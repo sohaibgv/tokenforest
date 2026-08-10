@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TokenForest</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <main id="panel">
+      <button id="close" title="Hide panel (Esc)">✕</button>
+      <canvas id="scene" width="180" height="130"></canvas>
+      <button id="travel" class="hidden"></button>
+      <div id="strip" data-tauri-drag-region>
+        <div id="bar"><div id="bar-fill"></div></div>
+        <span id="stats">waiting for data…</span>
+        <button id="shop-btn" title="Shop">🪓</button>
+        <button id="gear" title="Set token budget">⚙</button>
+      </div>
+      <div id="settings" class="hidden">
+        <label for="budget-input">Budget / 5h block</label>
+        <input id="budget-input" type="number" min="1" step="100000" />
+        <button id="budget-save">Set</button>
+      </div>
+      <div id="shop" class="hidden">
+        <div id="shop-head">
+          <span>SHOP</span>
+          <div id="shop-tabs">
+            <button data-tab="axes" class="active">Axes</button>
+            <button data-tab="helpers">Helpers</button>
+            <button data-tab="boosts">Boosts</button>
+            <button data-tab="style">Style</button>
+          </div>
+        </div>
+        <div id="shop-list"></div>
+        <div id="shop-foot">
+          <span id="shop-wood"></span>
+          <button id="shop-close">Close</button>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

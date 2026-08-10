@@ -1,0 +1,17 @@
+# Dependencies / build output
+node_modules/
+dist/
+src-tauri/target/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Local env files — never commit these
+.env
+.env.*
