@@ -12,6 +12,7 @@
       <button id="close" title="Hide panel (Esc)">✕</button>
       <canvas id="scene" width="180" height="130"></canvas>
       <button id="travel" class="hidden"></button>
+      <button id="update" class="hidden"></button>
       <div id="strip" data-tauri-drag-region>
         <div id="bar"><div id="bar-fill"></div></div>
         <span id="stats">waiting for data…</span>
@@ -22,6 +23,7 @@
         <label for="budget-input">Budget / 5h block</label>
         <input id="budget-input" type="number" min="1" step="100000" />
         <button id="budget-save">Set</button>
+        <button id="check-updates">Check for updates</button>
       </div>
       <div id="shop" class="hidden">
         <div id="shop-head">

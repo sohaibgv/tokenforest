@@ -129,6 +129,40 @@ body {
   display: none;
 }
 
+#update {
+  position: absolute;
+  left: 8px;
+  top: 6px;
+  background: #2c4433;
+  border: 1px solid #e6b93c;
+  border-radius: 4px;
+  color: #ffe9a8;
+  font: inherit;
+  font-size: 10px;
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  z-index: 10;
+}
+
+#update:hover:not(:disabled) {
+  background: #3a5a44;
+}
+
+#update.hidden {
+  display: none;
+}
+
+#check-updates {
+  background: #2c4433;
+  border: none;
+  border-radius: 3px;
+  color: #cfe3d4;
+  font: inherit;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
 #shop-btn {
   background: none;
   border: none;

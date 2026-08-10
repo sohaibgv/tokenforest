@@ -10,6 +10,7 @@ import { loadSave } from "./game-state";
 import { abbrev } from "./scene/floating-text";
 import { Game } from "./scene/game";
 import { initShop } from "./ui/shop";
+import { initUpdater } from "./ui/updater";
 
 async function boot(): Promise<void> {
   const canvas = document.getElementById("scene") as HTMLCanvasElement;
@@ -102,8 +103,9 @@ async function boot(): Promise<void> {
     }
   });
 
-  // --- shop + travel ---
+  // --- shop + travel + updates ---
   initShop(game);
+  initUpdater();
   const travelBtn = document.getElementById("travel") as HTMLButtonElement;
   travelBtn.addEventListener("click", () => {
     if (game.travel()) {
