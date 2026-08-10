@@ -45,6 +45,11 @@ export function setBudget(tokens: number): Promise<void> {
   return invoke("set_budget", { tokens });
 }
 
+/** Tell the tray a tree fell so the menu bar can celebrate it. */
+export function reportFell(wood: number): Promise<void> {
+  return invoke("report_fell", { wood });
+}
+
 export function onChop(handler: (e: ChopEvent) => void): void {
   void listen<ChopEvent>("tf:chop", (ev) => handler(ev.payload));
 }

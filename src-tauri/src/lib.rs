@@ -5,7 +5,7 @@ mod parser;
 mod save;
 mod watcher;
 
-use aggregator::{Aggregator, Snapshot};
+use aggregator::{Aggregator, FellSignal, Snapshot};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,6 +17,7 @@ use tauri_plugin_positioner::{Position, WindowExt};
 struct AppState {
     snapshot: Arc<Mutex<Snapshot>>,
     budget: Arc<AtomicU64>,
+    fell: FellSignal,
     /// Tray toggles blur the window; ignore blur-hide right after a toggle
     /// so the panel doesn't flicker shut as it opens.
     last_toggle: Mutex<Instant>,
@@ -34,6 +35,12 @@ struct AppState {
 #[tauri::command]
 fn get_snapshot(state: tauri::State<AppState>) -> Snapshot {
     state.snapshot.lock().unwrap().clone()
+}
+
+/// The frontend reports a felled tree so the tray can celebrate it.
+#[tauri::command]
+fn report_fell(wood: u64, state: tauri::State<AppState>) {
+    *state.fell.lock().unwrap() = Some((Instant::now(), wood));
 }
 
 #[tauri::command]
@@ -90,10 +97,12 @@ pub fn run() {
     let cfg = config::load();
     let budget = Arc::new(AtomicU64::new(cfg.token_budget));
     let snapshot = Arc::new(Mutex::new(Snapshot::default()));
+    let fell: FellSignal = Arc::new(Mutex::new(None));
 
     let state = AppState {
         snapshot: snapshot.clone(),
         budget: budget.clone(),
+        fell: fell.clone(),
         last_toggle: Mutex::new(Instant::now()),
         last_blur_hide: Mutex::new(None),
         last_prog_move: Mutex::new(Instant::now()),
@@ -106,6 +115,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             set_budget,
+            report_fell,
             save::load_game,
             save::save_game
         ])
@@ -149,7 +159,12 @@ pub fn run() {
             let (tx, rx) = mpsc::channel();
             let root = watcher::watch_root();
             std::thread::spawn(move || watcher::run(root, tx));
-            let agg = Aggregator::new(app.handle().clone(), budget.clone(), snapshot.clone());
+            let agg = Aggregator::new(
+                app.handle().clone(),
+                budget.clone(),
+                snapshot.clone(),
+                fell.clone(),
+            );
             std::thread::spawn(move || agg.run(rx));
 
             Ok(())

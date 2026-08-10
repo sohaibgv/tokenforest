@@ -122,12 +122,20 @@ impl Block {
     }
 }
 
+/// Set by the frontend when a tree falls (wood payout + when), so the tray
+/// can celebrate game events, not just token flow.
+pub type FellSignal = Arc<Mutex<Option<(Instant, u64)>>>;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TrayFrame {
-    Idle,
+    Idle1,
+    Idle2,
     Active1,
     Active2,
-    Warning,
+    Warning1,
+    Warning2,
+    Fell1,
+    Fell2,
 }
 
 fn abbrev(n: u64) -> String {
@@ -154,6 +162,7 @@ pub struct Aggregator {
     app: AppHandle,
     budget: Arc<AtomicU64>,
     snapshot: Arc<Mutex<Snapshot>>,
+    fell: FellSignal,
     dedupe_cur: HashSet<String>,
     dedupe_old: HashSet<String>,
     block: Option<Block>,
@@ -166,16 +175,22 @@ pub struct Aggregator {
 }
 
 impl Aggregator {
-    pub fn new(app: AppHandle, budget: Arc<AtomicU64>, snapshot: Arc<Mutex<Snapshot>>) -> Self {
+    pub fn new(
+        app: AppHandle,
+        budget: Arc<AtomicU64>,
+        snapshot: Arc<Mutex<Snapshot>>,
+        fell: FellSignal,
+    ) -> Self {
         Self {
             app,
             budget,
             snapshot,
+            fell,
             dedupe_cur: HashSet::new(),
             dedupe_old: HashSet::new(),
             block: None,
             sources: HashMap::new(),
-            tray_frame: TrayFrame::Idle,
+            tray_frame: TrayFrame::Idle1,
             tray_title: String::new(),
             anim_phase: false,
             recent_chops: VecDeque::new(),
@@ -411,23 +426,45 @@ impl Aggregator {
             .any(|s| s.state == SourceActivity::Working);
         let density = snapshot.block.as_ref().map(|b| b.density).unwrap_or(1.0);
 
-        // Icon: alternate the two chop frames while working (500ms ticks).
+        // Every state animates on the 500ms tick; fells override everything
+        // briefly so the menu bar celebrates alongside the game. Idle sways
+        // slowly (every 4th tick) so a resting forest still feels alive.
         self.anim_phase = !self.anim_phase;
-        let next = if density < WARNING_DENSITY {
-            TrayFrame::Warning
+        let fell = *self.fell.lock().unwrap();
+        let fell_active = fell
+            .map(|(t, _)| t.elapsed() < Duration::from_secs(3))
+            .unwrap_or(false);
+        let next = if fell_active {
+            if self.anim_phase {
+                TrayFrame::Fell1
+            } else {
+                TrayFrame::Fell2
+            }
+        } else if density < WARNING_DENSITY {
+            if self.anim_phase {
+                TrayFrame::Warning1
+            } else {
+                TrayFrame::Warning2
+            }
         } else if any_working {
             if self.anim_phase {
                 TrayFrame::Active1
             } else {
                 TrayFrame::Active2
             }
+        } else if self.anim_phase {
+            TrayFrame::Idle1
         } else {
-            TrayFrame::Idle
+            TrayFrame::Idle2
         };
 
-        // Title: tokens spent in the last few seconds, right in the menu bar.
+        // Title: wood payout right after a fell, else tokens burned recently.
         let burned: u64 = self.recent_chops.iter().map(|&(_, n)| n).sum();
-        let title = if burned > 0 {
+        let title = if let Some((_, wood)) =
+            fell.filter(|(t, _)| t.elapsed() < Duration::from_secs(4))
+        {
+            format!("🪵+{}", abbrev(wood))
+        } else if burned > 0 {
             format!("-{}", abbrev(burned))
         } else {
             String::new()
@@ -439,10 +476,14 @@ impl Aggregator {
         if next != self.tray_frame {
             self.tray_frame = next;
             let icon = match next {
-                TrayFrame::Idle => crate::icons::tray_idle(),
+                TrayFrame::Idle1 => crate::icons::tray_idle(),
+                TrayFrame::Idle2 => crate::icons::tray_idle2(),
                 TrayFrame::Active1 => crate::icons::tray_active(),
                 TrayFrame::Active2 => crate::icons::tray_active2(),
-                TrayFrame::Warning => crate::icons::tray_warning(),
+                TrayFrame::Warning1 => crate::icons::tray_warning(),
+                TrayFrame::Warning2 => crate::icons::tray_warning2(),
+                TrayFrame::Fell1 => crate::icons::tray_fell1(),
+                TrayFrame::Fell2 => crate::icons::tray_fell2(),
             };
             let _ = tray.set_icon(Some(icon));
         }

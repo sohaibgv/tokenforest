@@ -2,7 +2,7 @@
 // felled trees pay wood; wood buys upgrades and travel to harder worlds.
 // The 5h budget survives only as a meter (lake level, strip, tray icon).
 
-import type { ChopEvent, Snapshot } from "../bridge";
+import { reportFell, type ChopEvent, type Snapshot } from "../bridge";
 import {
   AXES,
   BOOSTS,
@@ -298,6 +298,7 @@ export class Game {
       this.floats.push(
         new FloatingText(tree.x + tree.width / 2, tree.y - 14, `+${abbrev(payout)}`, WOOD_COLOR),
       );
+      void reportFell(payout);
       s.currentPlotHp = this.plot.forest.hpSnapshot();
       scheduleSave(s, true);
     } else {

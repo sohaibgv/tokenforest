@@ -96,6 +96,25 @@ Builds are **unsigned** (no paid certificates), so:
 You need [Claude Code](https://claude.com/claude-code) — the game reads its
 local transcript files. No account, no network, no keys.
 
+## Code signing (optional, costs money)
+
+Unsigned builds trigger Gatekeeper / SmartScreen warnings. To sign for real:
+
+**macOS** (~$99/yr [Apple Developer Program](https://developer.apple.com/programs/)):
+create a "Developer ID Application" certificate, export it as .p12, then add
+repo secrets — the release workflow picks them up automatically, no code
+changes: `APPLE_CERTIFICATE` (base64 of the .p12), `APPLE_CERTIFICATE_PASSWORD`,
+`APPLE_SIGNING_IDENTITY` ("Developer ID Application: Your Name (TEAMID)"),
+`APPLE_ID`, `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID`.
+This also notarizes, so downloads open without warnings.
+
+**Windows**: needs a code-signing certificate (OV certs ~$100–400/yr from
+vendors like Certum/SSL.com, or [Azure Trusted Signing](https://azure.microsoft.com/en-us/products/trusted-signing)
+~$10/mo). SmartScreen reputation also builds over time even for signed OV
+certs. Wire it via `bundle.windows.signCommand` in `tauri.conf.json` per the
+[Tauri signing docs](https://tauri.app/distribute/sign/windows/) once you
+have one.
+
 ## Releasing (maintainers)
 
 Push a version tag and GitHub Actions builds all installers into a draft
