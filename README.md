@@ -146,7 +146,8 @@ apply to self-built copies unless it matches the release key):
 
 ```sh
 npx tauri signer generate -w ~/.tauri/dev.key --password ""
-export TAURI_SIGNING_PRIVATE_KEY_PATH=~/.tauri/dev.key
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/dev.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 ```
 
 Click the tree in your menu bar to open the panel. Right-click for the menu
