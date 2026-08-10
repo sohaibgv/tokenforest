@@ -124,12 +124,29 @@ release (publish it manually after review):
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
+## Auto-updates
+
+The app checks GitHub releases on launch (and via "Check for updates" in
+the ⚙ settings). When a newer version exists, an update pill appears —
+one click downloads, verifies the signature, installs, and relaunches.
+Update artifacts are signed with a minisign keypair; the public key ships
+in `tauri.conf.json`, the private key lives only in the repo's Actions
+secrets.
+
 ## Run from source
 
 ```sh
 npm install
 npm run tauri dev     # dev
 npm run tauri build   # bundle
+```
+
+`tauri build` needs an updater signing key (any key — updates just won't
+apply to self-built copies unless it matches the release key):
+
+```sh
+npx tauri signer generate -w ~/.tauri/dev.key --password ""
+export TAURI_SIGNING_PRIVATE_KEY_PATH=~/.tauri/dev.key
 ```
 
 Click the tree in your menu bar to open the panel. Right-click for the menu
