@@ -58,15 +58,10 @@ jobs:
           # signing) — required for in-app auto-updates.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS signing + notarization activate automatically once these
-          # repo secrets exist (requires an Apple Developer account) — until
-          # then they're empty and builds stay unsigned. See README.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # NOTE: when you get an Apple Developer cert, add the APPLE_*
+          # secrets AND matching env lines here (see README signing section).
+          # Never add the env lines without the secrets: empty env vars make
+          # the macOS bundler attempt signing and fail.
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "TokenForest ${{ github.ref_name }}"

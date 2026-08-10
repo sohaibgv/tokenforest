@@ -101,12 +101,14 @@ local transcript files. No account, no network, no keys.
 Unsigned builds trigger Gatekeeper / SmartScreen warnings. To sign for real:
 
 **macOS** (~$99/yr [Apple Developer Program](https://developer.apple.com/programs/)):
-create a "Developer ID Application" certificate, export it as .p12, then add
-repo secrets — the release workflow picks them up automatically, no code
-changes: `APPLE_CERTIFICATE` (base64 of the .p12), `APPLE_CERTIFICATE_PASSWORD`,
+create a "Developer ID Application" certificate, export it as .p12, add repo
+secrets `APPLE_CERTIFICATE` (base64 of the .p12), `APPLE_CERTIFICATE_PASSWORD`,
 `APPLE_SIGNING_IDENTITY` ("Developer ID Application: Your Name (TEAMID)"),
-`APPLE_ID`, `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID`.
-This also notarizes, so downloads open without warnings.
+`APPLE_ID`, `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID` — then
+add matching `APPLE_X: ${{ secrets.APPLE_X }}` lines to the tauri-action env
+in `.github/workflows/release.yml`. (Secrets and env lines must be added
+together: env lines without secrets break the macOS build.) This also
+notarizes, so downloads open without warnings.
 
 **Windows**: needs a code-signing certificate (OV certs ~$100–400/yr from
 vendors like Certum/SSL.com, or [Azure Trusted Signing](https://azure.microsoft.com/en-us/products/trusted-signing)
