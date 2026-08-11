@@ -153,6 +153,15 @@ body {
   display: none;
 }
 
+#autohide-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #9dbca6;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 #check-updates {
   background: #2c4433;
   border: none;
@@ -278,8 +287,11 @@ body {
   right: 6px;
   bottom: 30px;
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 6px;
+  max-width: 260px;
   background: #101a13;
   border: 1px solid #223528;
   border-radius: 4px;

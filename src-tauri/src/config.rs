@@ -20,6 +20,12 @@ pub struct Config {
     pub window_w: Option<u32>,
     #[serde(default)]
     pub window_h: Option<u32>,
+    /// Dropdown mode: hide on click-away, always on top, skip taskbar.
+    /// None = platform default (true on macOS/Windows, false on Linux,
+    /// where WMs blur the window during resize/minimize and auto-hide
+    /// makes the app feel broken).
+    #[serde(default)]
+    pub hide_on_blur: Option<bool>,
 }
 
 impl Default for Config {
@@ -30,6 +36,7 @@ impl Default for Config {
             window_y: None,
             window_w: None,
             window_h: None,
+            hide_on_blur: None,
         }
     }
 }

@@ -6,7 +6,7 @@ mod save;
 mod watcher;
 
 use aggregator::{Aggregator, FellSignal, Snapshot};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -18,6 +18,9 @@ struct AppState {
     snapshot: Arc<Mutex<Snapshot>>,
     budget: Arc<AtomicU64>,
     fell: FellSignal,
+    /// Dropdown mode (hide on click-away). Cached so blur events don't
+    /// read the config file; persisted via set_hide_on_blur.
+    hide_on_blur: AtomicBool,
     /// Tray toggles blur the window; ignore blur-hide right after a toggle
     /// so the panel doesn't flicker shut as it opens.
     last_toggle: Mutex<Instant>,
@@ -41,6 +44,27 @@ fn get_snapshot(state: tauri::State<AppState>) -> Snapshot {
 #[tauri::command]
 fn report_fell(wood: u64, state: tauri::State<AppState>) {
     *state.fell.lock().unwrap() = Some((Instant::now(), wood));
+}
+
+/// Dropdown mode bundles hide-on-blur with always-on-top and skip-taskbar;
+/// window mode behaves like a normal window (Linux default).
+fn apply_panel_mode(app: &AppHandle, dropdown: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_always_on_top(dropdown);
+        let _ = window.set_skip_taskbar(dropdown);
+    }
+}
+
+#[tauri::command]
+fn get_hide_on_blur(state: tauri::State<AppState>) -> bool {
+    state.hide_on_blur.load(Ordering::Relaxed)
+}
+
+#[tauri::command]
+fn set_hide_on_blur(enabled: bool, app: AppHandle, state: tauri::State<AppState>) {
+    state.hide_on_blur.store(enabled, Ordering::Relaxed);
+    config::update(|c| c.hide_on_blur = Some(enabled));
+    apply_panel_mode(&app, enabled);
 }
 
 #[tauri::command]
@@ -78,6 +102,13 @@ fn toggle_panel(app: &AppHandle) {
     };
     let state = app.state::<AppState>();
     if window.is_visible().unwrap_or(false) {
+        // Visible but buried under other windows (common in window mode):
+        // the click means "bring it to me", not "close it".
+        if !window.is_focused().unwrap_or(false) {
+            *state.last_toggle.lock().unwrap() = Instant::now();
+            let _ = window.set_focus();
+            return;
+        }
         let _ = window.hide();
     } else {
         let hidden_by_this_click = state
@@ -98,11 +129,15 @@ pub fn run() {
     let budget = Arc::new(AtomicU64::new(cfg.token_budget));
     let snapshot = Arc::new(Mutex::new(Snapshot::default()));
     let fell: FellSignal = Arc::new(Mutex::new(None));
+    let dropdown_default = cfg
+        .hide_on_blur
+        .unwrap_or(cfg!(not(target_os = "linux")));
 
     let state = AppState {
         snapshot: snapshot.clone(),
         budget: budget.clone(),
         fell: fell.clone(),
+        hide_on_blur: AtomicBool::new(dropdown_default),
         last_toggle: Mutex::new(Instant::now()),
         last_blur_hide: Mutex::new(None),
         last_prog_move: Mutex::new(Instant::now()),
@@ -118,6 +153,8 @@ pub fn run() {
             get_snapshot,
             set_budget,
             report_fell,
+            get_hide_on_blur,
+            set_hide_on_blur,
             save::load_game,
             save::save_game
         ])
@@ -151,6 +188,8 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            apply_panel_mode(&app.handle().clone(), dropdown_default);
 
             // Show the panel on launch: a tray-only app that starts fully
             // invisible looks broken, especially when the menu bar is full
@@ -232,7 +271,10 @@ pub fn run() {
                         }
                     });
                 }
-                if !recent_toggle {
+                // Window mode (Linux default): losing focus is normal life —
+                // WMs blur during resize/minimize — so never auto-hide.
+                let dropdown = state.hide_on_blur.load(Ordering::Relaxed);
+                if dropdown && !recent_toggle {
                     let _ = window.hide();
                     *state.last_blur_hide.lock().unwrap() = Some(Instant::now());
                 }

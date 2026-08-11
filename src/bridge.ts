@@ -50,6 +50,15 @@ export function reportFell(wood: number): Promise<void> {
   return invoke("report_fell", { wood });
 }
 
+/** Dropdown mode: hide on click-away + always-on-top + skip taskbar. */
+export function getHideOnBlur(): Promise<boolean> {
+  return invoke<boolean>("get_hide_on_blur");
+}
+
+export function setHideOnBlur(enabled: boolean): Promise<void> {
+  return invoke("set_hide_on_blur", { enabled });
+}
+
 export function onChop(handler: (e: ChopEvent) => void): void {
   void listen<ChopEvent>("tf:chop", (ev) => handler(ev.payload));
 }

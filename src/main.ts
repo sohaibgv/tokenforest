@@ -1,9 +1,11 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  getHideOnBlur,
   getSnapshot,
   onChop,
   onSnapshot,
   setBudget,
+  setHideOnBlur,
   type Snapshot,
 } from "./bridge";
 import { loadSave } from "./game-state";
@@ -84,6 +86,13 @@ async function boot(): Promise<void> {
 
   gear.addEventListener("click", () => {
     settings.classList.toggle("hidden");
+  });
+  const autohideBox = document.getElementById("autohide-box") as HTMLInputElement;
+  void getHideOnBlur().then((v) => {
+    autohideBox.checked = v;
+  });
+  autohideBox.addEventListener("change", () => {
+    void setHideOnBlur(autohideBox.checked);
   });
   budgetSave.addEventListener("click", () => {
     const v = Number.parseInt(budgetInput.value, 10);
