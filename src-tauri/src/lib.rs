@@ -3,6 +3,7 @@ mod config;
 mod icons;
 mod parser;
 mod save;
+mod usage;
 mod watcher;
 
 use aggregator::{Aggregator, FellSignal, Snapshot};
@@ -21,6 +22,8 @@ struct AppState {
     /// Dropdown mode (hide on click-away). Cached so blur events don't
     /// read the config file; persisted via set_hide_on_blur.
     hide_on_blur: AtomicBool,
+    /// Real-usage polling toggle, shared with the poll thread.
+    usage_enabled: Arc<AtomicBool>,
     /// Tray toggles blur the window; ignore blur-hide right after a toggle
     /// so the panel doesn't flicker shut as it opens.
     last_toggle: Mutex<Instant>,
@@ -53,6 +56,17 @@ fn apply_panel_mode(app: &AppHandle, dropdown: bool) {
         let _ = window.set_always_on_top(dropdown);
         let _ = window.set_skip_taskbar(dropdown);
     }
+}
+
+#[tauri::command]
+fn get_use_real_usage(state: tauri::State<AppState>) -> bool {
+    state.usage_enabled.load(Ordering::Relaxed)
+}
+
+#[tauri::command]
+fn set_use_real_usage(enabled: bool, state: tauri::State<AppState>) {
+    state.usage_enabled.store(enabled, Ordering::Relaxed);
+    config::update(|c| c.use_real_usage = Some(enabled));
 }
 
 #[tauri::command]
@@ -132,12 +146,15 @@ pub fn run() {
     let dropdown_default = cfg
         .hide_on_blur
         .unwrap_or(cfg!(not(target_os = "linux")));
+    let real_usage: usage::SharedUsage = Arc::new(Mutex::new(None));
+    let usage_enabled = Arc::new(AtomicBool::new(cfg.use_real_usage.unwrap_or(true)));
 
     let state = AppState {
         snapshot: snapshot.clone(),
         budget: budget.clone(),
         fell: fell.clone(),
         hide_on_blur: AtomicBool::new(dropdown_default),
+        usage_enabled: usage_enabled.clone(),
         last_toggle: Mutex::new(Instant::now()),
         last_blur_hide: Mutex::new(None),
         last_prog_move: Mutex::new(Instant::now()),
@@ -155,6 +172,8 @@ pub fn run() {
             report_fell,
             get_hide_on_blur,
             set_hide_on_blur,
+            get_use_real_usage,
+            set_use_real_usage,
             save::load_game,
             save::save_game
         ])
@@ -205,8 +224,12 @@ pub fn run() {
                 budget.clone(),
                 snapshot.clone(),
                 fell.clone(),
+                real_usage.clone(),
             );
             std::thread::spawn(move || agg.run(rx));
+            let usage_shared = real_usage.clone();
+            let usage_flag = usage_enabled.clone();
+            std::thread::spawn(move || usage::run(usage_shared, usage_flag));
 
             Ok(())
         })

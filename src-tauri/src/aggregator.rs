@@ -66,6 +66,9 @@ pub struct BlockInfo {
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub block: Option<BlockInfo>,
+    /// Real account usage from the Claude Code login, when readable.
+    /// Overrides the manual-budget estimate everywhere it's shown.
+    pub real: Option<crate::usage::RealUsage>,
     pub sources: Vec<SourceInfo>,
     pub woodcutters: u32,
 }
@@ -163,6 +166,7 @@ pub struct Aggregator {
     budget: Arc<AtomicU64>,
     snapshot: Arc<Mutex<Snapshot>>,
     fell: FellSignal,
+    real_usage: crate::usage::SharedUsage,
     dedupe_cur: HashSet<String>,
     dedupe_old: HashSet<String>,
     block: Option<Block>,
@@ -180,12 +184,14 @@ impl Aggregator {
         budget: Arc<AtomicU64>,
         snapshot: Arc<Mutex<Snapshot>>,
         fell: FellSignal,
+        real_usage: crate::usage::SharedUsage,
     ) -> Self {
         Self {
             app,
             budget,
             snapshot,
             fell,
+            real_usage,
             dedupe_cur: HashSet::new(),
             dedupe_old: HashSet::new(),
             block: None,
@@ -377,13 +383,18 @@ impl Aggregator {
 
     fn build_snapshot(&self, now: Instant) -> Snapshot {
         let budget = self.budget.load(Ordering::Relaxed).max(1);
+        let real = self.real_usage.lock().unwrap().clone();
         let block = self.block.as_ref().map(|b| BlockInfo {
             start: b.start.to_rfc3339(),
             end: b.end().to_rfc3339(),
             used_counted: b.used_counted,
             used_cache_read: b.used_cache_read,
             budget,
-            density: (1.0 - b.used_counted as f64 / budget as f64).clamp(0.0, 1.0),
+            // Real account utilization wins over the manual-budget estimate.
+            density: match &real {
+                Some(r) => (1.0 - r.five_hour_pct).clamp(0.0, 1.0),
+                None => (1.0 - b.used_counted as f64 / budget as f64).clamp(0.0, 1.0),
+            },
         });
 
         let mut sources: Vec<SourceInfo> = self
@@ -414,6 +425,7 @@ impl Aggregator {
 
         Snapshot {
             block,
+            real,
             sources,
             woodcutters,
         }
@@ -424,7 +436,12 @@ impl Aggregator {
             .sources
             .iter()
             .any(|s| s.state == SourceActivity::Working);
-        let density = snapshot.block.as_ref().map(|b| b.density).unwrap_or(1.0);
+        let density = snapshot
+            .real
+            .as_ref()
+            .map(|r| (1.0 - r.five_hour_pct).clamp(0.0, 1.0))
+            .or_else(|| snapshot.block.as_ref().map(|b| b.density))
+            .unwrap_or(1.0);
 
         // Every state animates on the 500ms tick; fells override everything
         // briefly so the menu bar celebrates alongside the game. Idle sways

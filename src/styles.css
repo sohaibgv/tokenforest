@@ -153,7 +153,8 @@ body {
   display: none;
 }
 
-#autohide-row {
+#autohide-row,
+#realusage-row {
   display: flex;
   align-items: center;
   gap: 4px;

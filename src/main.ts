@@ -2,10 +2,12 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   getHideOnBlur,
   getSnapshot,
+  getUseRealUsage,
   onChop,
   onSnapshot,
   setBudget,
   setHideOnBlur,
+  setUseRealUsage,
   type Snapshot,
 } from "./bridge";
 import { loadSave } from "./game-state";
@@ -67,17 +69,35 @@ async function boot(): Promise<void> {
     return h > 0 ? `resets in ${h}h ${m}m` : `resets in ${m}m`;
   }
 
+  function paintBar(density: number): void {
+    barFill.style.width = `${Math.round(density * 100)}%`;
+    barFill.style.background =
+      density < 0.15 ? "#d64545" : density < 0.35 ? "#e6a23c" : "#4a9e5c";
+  }
+
   function updateStrip(s: Snapshot): void {
+    if (s.real) {
+      // Real account usage, same numbers as Claude Code's /usage.
+      const left = Math.max(0, Math.min(1, 1 - s.real.fiveHourPct));
+      paintBar(left);
+      const pct = Math.round(s.real.fiveHourPct * 100);
+      let text = `${pct}% of 5h used`;
+      if (s.real.fiveHourResetsAt) {
+        text += ` · ${resetsIn(s.real.fiveHourResetsAt)}`;
+      }
+      if (s.real.weeklyPct !== null) {
+        text += ` · wk ${Math.round(s.real.weeklyPct * 100)}%`;
+      }
+      stats.textContent = text;
+      return;
+    }
     if (!s.block) {
-      barFill.style.width = "100%";
-      barFill.style.background = "#4a9e5c";
+      paintBar(1);
       stats.textContent = "budget fresh · all quiet";
       return;
     }
     const b = s.block;
-    barFill.style.width = `${Math.round(b.density * 100)}%`;
-    barFill.style.background =
-      b.density < 0.15 ? "#d64545" : b.density < 0.35 ? "#e6a23c" : "#4a9e5c";
+    paintBar(b.density);
     stats.textContent = `${abbrev(b.usedCounted)} / ${abbrev(b.budget)} · ${resetsIn(b.end)}`;
     if (document.activeElement !== budgetInput) {
       budgetInput.value = String(b.budget);
@@ -93,6 +113,13 @@ async function boot(): Promise<void> {
   });
   autohideBox.addEventListener("change", () => {
     void setHideOnBlur(autohideBox.checked);
+  });
+  const realUsageBox = document.getElementById("realusage-box") as HTMLInputElement;
+  void getUseRealUsage().then((v) => {
+    realUsageBox.checked = v;
+  });
+  realUsageBox.addEventListener("change", () => {
+    void setUseRealUsage(realUsageBox.checked);
   });
   budgetSave.addEventListener("click", () => {
     const v = Number.parseInt(budgetInput.value, 10);

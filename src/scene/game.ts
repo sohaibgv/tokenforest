@@ -149,7 +149,13 @@ export class Game {
 
   applySnapshot(s: Snapshot): void {
     this.hasData = true;
-    this.density = s.block ? s.block.density : 1;
+    // Lake level: real account utilization when available, else the
+    // budget-estimate density carried on the block.
+    this.density = s.real
+      ? Math.max(0, Math.min(1, 1 - s.real.fiveHourPct))
+      : s.block
+        ? s.block.density
+        : 1;
     this.plot.setLakeLevel(this.density);
     this.nextPlot?.setLakeLevel(this.density);
 

@@ -94,7 +94,15 @@ Builds are **unsigned** (no paid certificates), so:
 - **Windows**: SmartScreen may warn — "More info" → "Run anyway".
 
 You need [Claude Code](https://claude.com/claude-code) — the game reads its
-local transcript files. No account, no network, no keys.
+local transcript files. No separate account, no keys.
+
+**Budget meter**: by default the app also reads your local Claude Code login
+(macOS Keychain / `~/.claude/.credentials.json`) to poll Anthropic's usage
+endpoint every 5 minutes — the same numbers `/usage` shows — so the lake,
+bar, and warning icon reflect your *real* 5-hour and weekly limits and reset
+times. That token never goes anywhere except Anthropic's own API. Toggle
+"Real account usage" off in ⚙ settings to stay fully offline with a manual
+budget estimate instead. macOS may ask once to allow Keychain access.
 
 ## Code signing (optional, costs money)
 

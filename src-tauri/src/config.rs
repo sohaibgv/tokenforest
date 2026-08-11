@@ -26,6 +26,9 @@ pub struct Config {
     /// makes the app feel broken).
     #[serde(default)]
     pub hide_on_blur: Option<bool>,
+    /// Read real account usage via the local Claude Code login (default on).
+    #[serde(default)]
+    pub use_real_usage: Option<bool>,
 }
 
 impl Default for Config {
@@ -37,6 +40,7 @@ impl Default for Config {
             window_w: None,
             window_h: None,
             hide_on_blur: None,
+            use_real_usage: None,
         }
     }
 }

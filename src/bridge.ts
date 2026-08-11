@@ -31,8 +31,17 @@ export interface BlockInfo {
   density: number;
 }
 
+export interface RealUsage {
+  fiveHourPct: number; // 0..1 of the 5h window consumed
+  fiveHourResetsAt: string | null;
+  weeklyPct: number | null;
+  weeklyResetsAt: string | null;
+}
+
 export interface Snapshot {
   block: BlockInfo | null;
+  /** Real account usage from the Claude Code login, when readable. */
+  real: RealUsage | null;
   sources: SourceInfo[];
   woodcutters: number;
 }
@@ -57,6 +66,15 @@ export function getHideOnBlur(): Promise<boolean> {
 
 export function setHideOnBlur(enabled: boolean): Promise<void> {
   return invoke("set_hide_on_blur", { enabled });
+}
+
+/** Poll real account usage via the local Claude Code login. */
+export function getUseRealUsage(): Promise<boolean> {
+  return invoke<boolean>("get_use_real_usage");
+}
+
+export function setUseRealUsage(enabled: boolean): Promise<void> {
+  return invoke("set_use_real_usage", { enabled });
 }
 
 export function onChop(handler: (e: ChopEvent) => void): void {
