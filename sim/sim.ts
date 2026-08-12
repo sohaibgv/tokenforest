@@ -87,7 +87,6 @@ import {
   plotGateForWorld,
   travelAmberCost,
   travelSweatWoodCost,
-  POV_GRADE_MULT,
   povYieldMult,
   SKILL_SPEED_BASE,
   SKILL_SPEED_PER_TIER,

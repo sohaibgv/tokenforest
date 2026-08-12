@@ -375,6 +375,61 @@ export class Game {
   private povSkillCheck: SkillCheck | null = null;
   private povFlash: { grade: SkillGrade; t: number; wood: number | null } | null =
     null;
+
+  /** What the pointer is over in the world, if it's something you can use. */
+  private hoverTarget: { label: string; x: number; y: number; enabled: boolean } | null =
+    null;
+  /** Cell under the pointer, from the canvas mousemove. */
+  private hoverCell: Cell | null = null;
+  /** Buildable armed for placement, or null. */
+  private buildSelection: string | null = null;
+  /** Index into save.placed of an item being moved, or null. */
+  private buildMovingIndex: number | null = null;
+
+  /** 0..1 fade on the homestead's status board.
+   *
+   * The board used to be painted every frame forever. That is a HUD stapled
+   * to a diegetic world: the yard props already carry these three values at
+   * a glance — the log pile's height is your wood, the lantern's fill is your
+   * amber, the blade's heat is your focus — so a permanent numeric readout
+   * both duplicates them and is the one rectangle of pure UI left in the
+   * clearing. Revealed on hovering the homestead instead. Faded rather than
+   * snapped so it does not blink on and off as the pointer crosses the fence. */
+  private boardReveal = 0;
+  private boardHovered = false;
+
+  // --- The cast (see src/npc/) ---
+  /** Latest backend telemetry, purely so NPC lines can quote it. */
+  private lastSnapshot: Snapshot | null = null;
+  /** Last line each NPC used, so a click never repeats itself. */
+  private lastLine = new Map<NpcId, NpcLine>();
+  /** An unprompted mutter currently on screen, or null. Non-modal by
+   * construction — see the Ambient type in npc/dialogue. */
+  private ambient: {
+    speaker: { x: number; y: number };
+    lines: string[];
+    ttl: number;
+    life: number;
+  } | null = null;
+  /** Seconds until the next mutter is even considered. */
+  private ambientCooldown = Game.AMBIENT_MIN_GAP;
+  private static readonly AMBIENT_MIN_GAP = 45;
+  private static readonly AMBIENT_MAX_GAP = 90;
+  private static readonly AMBIENT_LIFE = 4.5;
+
+  // --- The Timber Line's transient state ---
+  /** Open NPC conversation, or null. While set, it owns every canvas click. */
+  private dialogue: Dialogue | null = null;
+  private dialogueHover: number | null = null;
+  /** Counts DOWN while the foreman rebuilds the span. */
+  private trestleBuildT = 0;
+  /** Next `trestleBuildT` threshold at which to play a hammer blow. */
+  private trestleHammerNext = 0;
+  /** Counts DOWN while the handcar pumps off the left edge. */
+  private handcarDepartT = 0;
+  private static readonly TRESTLE_BUILD_SECS = 1.5;
+  private static readonly HANDCAR_DEPART_SECS = 0.7;
+
   /** Bare extension hook for a future item perk ("chainsaw execution on a
    * perfect skill check") — not wired to anything yet. */
   onSkillCheckResult: ((grade: SkillGrade, wc: Woodcutter) => void) | null =
@@ -1824,6 +1879,19 @@ export class Game {
       const rail = this.railRow();
       for (let cx = 0; cx < grid.cols; cx++) out.push({ cx, cy: rail });
 
+      // The chasm. Nothing grows in mid-air: without this, trees and props
+      // were being snapped into cells that the ravine is drawn straight
+      // over, so they hung in the dark with no ground under them.
+      const rav = this.ravineRect();
+      for (let cy = 0; cy < grid.rows; cy++) {
+        for (let cx = 0; cx < grid.cols; cx++) {
+          const f = grid.footing({ cx, cy });
+          if (f.x >= rav.x0 - CELL / 2 && f.x <= rav.x1 + CELL / 2) {
+            out.push({ cx, cy });
+          }
+        }
+      }
+
       // And the ground each character stands on, plus a one-cell apron.
       // Tree canopies are far wider than their cell, so reserving only the
       // exact cell still left the fisher peering out from inside a trunk.
@@ -2465,6 +2533,758 @@ export class Game {
     const rav = this.ravineRect();
     const y = this.railFooting(0).y + 8;
     return { x: rav.x0 - 7, y: Math.min(this.h - 4, y) };
+  }
+
+  private hitHandcar(lx: number, ly: number): boolean {
+    if (this.backTravelOptions().length === 0) return false;
+    const p = this.handcarPos();
+    const size = spriteSize(HANDCAR_UP);
+    // Generous on the left: the platform and board are part of the same
+    // "leave from here" affordance, and they sit off the car's left edge.
+    return (
+      lx >= p.x - size.w - 4 && lx <= p.x + size.w && ly >= p.y - 16 && ly <= p.y + 3
+    );
+  }
+
+  bridgeRepaired(world = this.save.worldIndex): boolean {
+    return (this.save.bridgesRepaired ?? []).includes(world);
+  }
+
+  /** Pays the onward travel cost. Crossing is then free, and stays free if
+   * you come back through later. */
+  repairBridge(route: "timber" | "coin" | "sweat" = "timber"): boolean {
+    const status = this.travelStatus();
+    if (!status || !status.gateMet) return false;
+    // Already built. This guard is what makes paying idempotent. The UI also
+    // closes the bubble before running the handler, but a double-charge has
+    // to be impossible at the money layer, not only at the presentation one.
+    if (this.bridgeRepaired()) return false;
+
+    const mult = getWorld(this.save.worldIndex + 1).mult;
+    const amber = travelAmberCost(mult);
+    const sweatWood = travelSweatWoodCost(status.cost);
+
+    // Affordability is checked and the charge applied in the SAME branch, so
+    // there is no path that verifies one resource and then deducts another.
+    // The default stays "timber", so every existing caller (including the
+    // keyboard affordance in main.ts) behaves exactly as before.
+    if (route === "timber") {
+      if (this.save.wood < status.cost) return false;
+      this.save.wood -= status.cost;
+    } else if (route === "coin") {
+      if (this.save.amber < amber) return false;
+      this.save.amber -= amber;
+    } else {
+      if (this.save.wood < sweatWood || this.save.focus < FOCUS_CAP) return false;
+      this.save.wood -= sweatWood;
+      this.save.focus = 0;
+    }
+
+    this.save.bridgesRepaired = [
+      ...(this.save.bridgesRepaired ?? []),
+      this.save.worldIndex,
+    ];
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  /** Opens the departures board at the halt. Every world `backTravelOptions`
+   * offers becomes a row; picking one calls the existing travelBackTo, which
+   * has always accepted an arbitrary world index — the old road handler just
+   * threw everything but `[0]` away, so getting from world 5 back to world 1
+   * meant four separate trips through four separate loading slides. */
+  private openDepartureBoard(): void {
+    const options = this.backTravelOptions();
+    if (options.length === 0) return;
+    const anchor = this.handcarPos();
+    this.dialogue = {
+      speaker: { x: anchor.x, y: anchor.y - 12 },
+      lines: ["DEPARTURES"],
+      // Two columns past six entries: the logical canvas is only ~120-140px
+      // tall, and ten worlds in one column would run off the bottom.
+      columns: options.length > 6 ? 2 : 1,
+      choices: options.map((o) => ({
+        label: o.name.toUpperCase(),
+        onPick: () => {
+          if (this.travelBackTo(o.world)) {
+            this.handcarDepartT = Game.HANDCAR_DEPART_SECS;
+            playSfx("railWhistle");
+          }
+        },
+      })),
+    };
+    this.dialogueHover = null;
+  }
+
+  /** The foreman's line for whatever state the crossing is in. He is the
+   * single voice for onward travel: the gate, the price, and the all-clear
+   * all come from him, so there is one place to look. */
+  private openForemanDialogue(): void {
+    const st = this.travelStatus();
+    if (!st) return;
+    const w = this.foremanPos();
+    const speaker = { x: w.x, y: w.y - spriteSize(NPCS.foreman.idle).h - 1 };
+    // Narrow on purpose. The bubble is clamped to the canvas, and the canvas
+    // is only ~240 logical px wide — a wide wrap produced a box spanning half
+    // the world. Wrapping sooner gives a taller, chattier, much smaller box.
+    const maxW = Math.min(76, this.w - 16);
+    const say = (text: string): string[] => wrapLines(text, maxW);
+
+    if (!st.gateMet) {
+      const left = st.gate - this.save.plotsClearedInWorld;
+      this.dialogue = {
+        speaker,
+        lines: say(
+          `No sense laying track to nowhere. Clear ${left} more plot${left === 1 ? "" : "s"} first.`,
+        ),
+        choices: [{ label: "RIGHT YOU ARE", onPick: () => {} }],
+      };
+    } else if (!this.bridgeRepaired()) {
+      // Three ways to settle, all building the identical bridge — the choice
+      // is "what am I short of", not "which is best". See economy.ts for why
+      // Sweat still charges wood (Focus is free and would otherwise make
+      // every crossing in the game free) and why Coin scales with the world.
+      const mult = getWorld(this.save.worldIndex + 1).mult;
+      const amber = travelAmberCost(mult);
+      const sweatWood = travelSweatWoodCost(st.cost);
+      const routes: { label: string; ok: boolean; pay: () => void }[] = [
+        {
+          label: `TIMBER ${abbrev(st.cost)} WOOD`,
+          ok: this.save.wood >= st.cost,
+          pay: () => this.payTheForeman("timber"),
+        },
+        {
+          label: `COIN ${abbrev(amber)} AMBER`,
+          ok: this.save.amber >= amber,
+          pay: () => this.payTheForeman("coin"),
+        },
+        {
+          label: `SWEAT ${abbrev(sweatWood)} + FOCUS`,
+          ok: this.save.wood >= sweatWood && this.save.focus >= FOCUS_CAP,
+          pay: () => this.payTheForeman("sweat"),
+        },
+      ];
+      const anyAffordable = routes.some((r) => r.ok);
+      this.dialogue = {
+        speaker,
+        lines: say(
+          anyAffordable
+            ? "Wood you look at that. Span's down. So who's paying?"
+            : "Span's down and you're skint. Come back with timber, coin, or a rested pair of arms.",
+        ),
+        choices: anyAffordable
+          ? [
+              // Unaffordable routes stay VISIBLE but disabled, so the price
+              // list reads as a rate card. Hiding them would make the bubble
+              // silently change shape depending on your balance.
+              ...routes.map((r) => ({ label: r.label, onPick: r.pay, disabled: !r.ok })),
+              { label: "NOT YET", onPick: () => {} },
+            ]
+          : [{ label: "AYE, FAIR ENOUGH", onPick: () => {} }],
+      };
+    } else {
+      this.dialogue = {
+        speaker,
+        lines: say(`She will hold. Track is open to ${st.nextName}.`),
+        choices: [
+          {
+            label: "ALL ABOARD",
+            onPick: () => {
+              if (this.crossBridge()) playSfx("railWhistle");
+            },
+          },
+          { label: "NOT YET", onPick: () => {} },
+        ],
+      };
+    }
+    this.dialogueHover = null;
+  }
+
+  /** Does he have actual business, or is he just standing about? Drives
+   * whether clicking him opens the rate card or just gets you a remark. */
+  private foremanHasBusiness(): boolean {
+    return this.travelStatus() !== null;
+  }
+
+  /** Pay, then let him actually build it. The beat matters: the whole point
+   * of the two-step (pay, then cross) is that the wood buys a visible,
+   * permanent change to the world instead of vanishing into a teleport, and
+   * watching him swing the hammer is what sells that. */
+  private payTheForeman(route: "timber" | "coin" | "sweat"): void {
+    if (!this.repairBridge(route)) return;
+    this.trestleBuildT = Game.TRESTLE_BUILD_SECS;
+    // Seeded AT the start value, not 0, so the very first update tick already
+    // satisfies `trestleBuildT <= trestleHammerNext` and the first blow lands
+    // immediately. Seeding it at 0 would hold every blow until the beat was
+    // already over.
+    this.trestleHammerNext = Game.TRESTLE_BUILD_SECS;
+    const t = this.trestlePos();
+    this.effects.push(
+      new LeafBurst(t.x - 6, t.y - 6, ["#8a6440", "#c49a6c"], 12, 0.6),
+    );
+  }
+
+  /** Crosses an already-repaired bridge to the next world. */
+  crossBridge(): boolean {
+    const status = this.travelStatus();
+    if (!status || !status.gateMet || !this.bridgeRepaired() || this.nextPlot) {
+      return false;
+    }
+    const s = this.save;
+    s.worldIndex += 1;
+    s.adventureWorldUnlocked = Math.max(s.adventureWorldUnlocked, s.worldIndex);
+    s.plotIndex = 0;
+    s.plotsClearedInWorld = 0;
+    s.currentPlotHp = null;
+    scheduleSave(s, true);
+    this.startTransition(s.worldIndex, 0);
+    return true;
+  }
+
+  /** The adventure encampment — where you set out from. Deliberately OUTSIDE
+   * the fenced yard and further back toward the treeline, so the homestead
+   * (what you build) and the expedition camp (where you leave) read as two
+   * different places rather than more yard furniture. */
+  private encampmentPos(): { x: number; y: number } {
+    const grid = this.plot.forest.gridRef();
+    const yard = this.yardRect();
+    // Anchored to the grid as a whole, NOT to the yard's right edge: the yard
+    // grows with each cottage phase, so "just past the fence" shoved the camp
+    // off the map and into the lake.
+    const cell = {
+      cx: Math.max(
+        yard.cx + yard.cols + 1,
+        Math.min(grid.cols - 3, Math.round(grid.cols * 0.74)),
+      ),
+      // At least two rows clear of the track. The camp used to sit directly
+      // under it, and its hover label draws ABOVE the sprite — which put a
+      // long dark label straight across the rails.
+      cy: Math.min(grid.rows - 1, Math.max(this.railRow() + 2, yard.cy - 3)),
+    };
+    const foot = grid.footing(cell);
+    return this.avoidLake(foot.x, foot.y);
+  }
+
+  private hitEncampment(lx: number, ly: number): boolean {
+    const p = this.encampmentPos();
+    const size = spriteSize(ENCAMPMENT);
+    return (
+      Math.abs(lx - p.x) <= size.w / 2 + 1 && ly >= p.y - size.h - 1 && ly <= p.y + 1
+    );
+  }
+
+  // --- The barn: the homestead's second permanent build ---------------------
+
+  private barnCell(): Cell {
+    const y = this.yardRect();
+    return { cx: Math.min(y.cx + y.cols - 2, y.cx + 5), cy: y.cy };
+  }
+
+  private barnPos(): { x: number; y: number } {
+    return this.plot.forest.gridRef().footing(this.barnCell());
+  }
+
+  barnPhase(): number {
+    return Math.max(0, Math.min(BARN_MAX_PHASE, this.save.barnPhase ?? 0));
+  }
+
+  /** The barn only unlocks once the cottage is finished — a second landmark
+   * is a reward for completing the first, not a parallel track. */
+  barnAvailable(): boolean {
+    return barnUnlocked(this.cottagePhase());
+  }
+
+  barnNextCost(): number | null {
+    if (!this.barnAvailable()) return null;
+    return barnPhaseCost(this.barnPhase(), getWorld(this.save.worldIndex).mult);
+  }
+
+  buildBarnPhase(): boolean {
+    const cost = this.barnNextCost();
+    if (cost === null || this.save.wood < cost) return false;
+    this.save.wood -= cost;
+    this.save.barnPhase = this.barnPhase() + 1;
+    // The barn stands on a yard cell, so keep the clearing consistent for
+    // the same reason buildCottagePhase does.
+    this.layout();
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  private hitBarn(lx: number, ly: number): boolean {
+    if (!this.barnAvailable()) return false;
+    const p = this.barnPos();
+    const size = spriteSize(BARN_PHASE_SPRITES[this.barnPhase()]);
+    return (
+      Math.abs(lx - p.x) <= size.w / 2 + 1 && ly >= p.y - size.h - 1 && ly <= p.y + 1
+    );
+  }
+
+  // --- The cottage ----------------------------------------------------------
+
+  cottagePhase(): number {
+    return Math.max(0, Math.min(COTTAGE_MAX_PHASE, this.save.cottagePhase ?? 0));
+  }
+
+  cottageNextCost(): number | null {
+    return cottagePhaseCost(
+      this.cottagePhase(),
+      getWorld(this.save.worldIndex).mult,
+    );
+  }
+
+  buildCottagePhase(): boolean {
+    const cost = this.cottageNextCost();
+    if (cost === null || this.save.wood < cost) return false;
+    this.save.wood -= cost;
+    this.save.cottagePhase = this.cottagePhase() + 1;
+    // The yard GROWS with each cottage phase, so land that was forest a
+    // moment ago is now inside the fence. Re-running layout re-snaps the
+    // trees out of the enlarged homestead (and reflows any placed
+    // buildable), which is the visible payoff for the upgrade: the clearing
+    // widens. Tree HP/standing state lives on the Tree objects and survives
+    // a re-snap untouched.
+    this.layout();
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  private hitCottage(lx: number, ly: number): boolean {
+    const p = this.cottagePos();
+    const frame = COTTAGE_PHASE_SPRITES[this.cottagePhase()];
+    const size = spriteSize(frame);
+    return (
+      Math.abs(lx - p.x) <= Math.max(6, size.w / 2 + 1) &&
+      ly >= p.y - size.h - 1 &&
+      ly <= p.y + 1
+    );
+  }
+
+  // --- Build Mode -----------------------------------------------------------
+
+  buildModeActive(): boolean {
+    return this.buildSelection !== null || this.buildMovingIndex !== null;
+  }
+
+  buildSelectionId(): string | null {
+    return this.buildSelection;
+  }
+
+  /** Arms Build Mode with a buildable to place. The purchase happens on DROP,
+   * not here, so opening the placer and changing your mind costs nothing. */
+  beginPlacing(id: string): boolean {
+    const spec = buildableById(id);
+    if (!spec) return false;
+    if (!canOwnMore(this.save.placed, spec)) return false;
+    this.buildSelection = id;
+    this.buildMovingIndex = null;
+    return true;
+  }
+
+  cancelBuildMode(): void {
+    this.buildSelection = null;
+    this.buildMovingIndex = null;
+  }
+
+  /** What the pointer is over in the world, if it's something you can use.
+   * Every interactive prop was previously silent — nothing named what the
+   * boat or the little gold badge actually did, so the whole clearing read as
+   * scenery with a few mystery hotspots. */
+  private resolveHoverTarget(
+    lx: number,
+    ly: number,
+  ): { label: string; x: number; y: number; enabled: boolean } | null {
+    if (this.battleViewOpen || this.povTarget || this.nextPlot) return null;
+
+    const wc = this.hitWoodcutter(lx, ly);
+    if (wc) {
+      return wc.readyToChop
+        ? { label: "CHOP UP CLOSE", x: wc.x, y: wc.y - 16, enabled: true }
+        : {
+            label: "IDLE - WAITING FOR WORK",
+            x: wc.x,
+            y: wc.y - 16,
+            enabled: false,
+          };
+    }
+
+    if (this.hitCottage(lx, ly)) {
+      const p = this.cottagePos();
+      const cost = this.cottageNextCost();
+      // BELOW the cottage. Hovering the homestead is exactly what reveals the
+      // status board (see `boardReveal`), and that board hangs on the
+      // cottage's gable — so a label drawn above the roof landed straight on
+      // the numbers the hover was meant to show you. The two now stack:
+      // board above the roof, label below the door.
+      const y = p.y + 11;
+      if (cost === null) {
+        return { label: "YOUR COTTAGE", x: p.x, y, enabled: false };
+      }
+      return {
+        label: `BUILD ${COTTAGE_PHASE_NAME[this.cottagePhase()]} - ${abbrev(cost)} WOOD`,
+        x: p.x,
+        y,
+        enabled: this.save.wood >= cost,
+      };
+    }
+
+    if (this.hitEncampment(lx, ly)) {
+      const p = this.encampmentPos();
+      const adv = this.save.adventure;
+      return {
+        label: adv
+          ? `RESUME ADVENTURE - STAGE ${adv.stage}`
+          : "SET OUT ON AN ADVENTURE",
+        x: p.x,
+        // BELOW the tent, unlike every other prop's label. The camp already
+        // carries its own party/stage badge directly above it, and a label
+        // drawn upward landed square on that badge — two dark plaques of
+        // overlapping text. Below the tent is open grass at every window
+        // size, and it keeps the label clear of the rail line behind it too.
+        y: p.y + 11,
+        enabled: true,
+      };
+    }
+
+    if (this.hitBarn(lx, ly)) {
+      const p = this.barnPos();
+      const cost = this.barnNextCost();
+      const y = p.y - spriteSize(BARN_PHASE_SPRITES[this.barnPhase()]).h - 4;
+      if (cost === null) return { label: "THE BARN", x: p.x, y, enabled: false };
+      return {
+        label: `RAISE BARN ${BARN_PHASE_NAME[this.barnPhase()]} - ${abbrev(cost)} WOOD`,
+        x: p.x,
+        y,
+        enabled: this.save.wood >= cost,
+      };
+    }
+
+    // NOTE: this branch and its twin in handleClick are near-identical by
+    // shape and must be kept in step BY HAND. A blanket find-and-replace over
+    // `if (this.hitX(lx, ly)) {` has already corrupted this file once.
+    if (this.hitHandcar(lx, ly)) {
+      const p = this.handcarPos();
+      return { label: "RIDE THE LINE BACK", x: p.x + 6, y: p.y - 18, enabled: true };
+    }
+
+    // The whole cast, in one sweep. Each label names the person rather than
+    // their business — what they actually want is their own line to deliver
+    // (see talkTo / openForemanDialogue), and duplicating it here would put
+    // the same information in two visual languages a few pixels apart.
+    for (const id of NPC_IDS) {
+      if (!this.hitNpc(id, lx, ly)) continue;
+      const p = this.npcPos(id);
+      const busy =
+        id === "foreman" && this.foremanHasBusiness() && !this.bridgeRepaired();
+      return {
+        label: busy ? "THE FOREMAN - HE WANTS PAYING" : `TALK TO ${NPCS[id].name}`,
+        x: p.x,
+        // BELOW them, like every other label near the rail line: above their
+        // heads is where their speech opens AND where the track runs.
+        y: p.y + 11,
+        enabled: true,
+      };
+    }
+
+    if (this.hitSignpost(lx, ly)) {
+      const p = this.signpostPos();
+      return { label: "SETTINGS", x: p.x, y: p.y - 20, enabled: true };
+    }
+
+    const press = this.sapPressPos();
+    if (
+      this.sapPressOwned() &&
+      Math.abs(lx - press.x) <= 6 &&
+      Math.abs(ly - press.y) <= 7
+    ) {
+      const cost = sapPressCost(getWorld(this.save.worldIndex).mult);
+      return {
+        label: `PRESS SAP - ${abbrev(cost)} WOOD`,
+        x: press.x,
+        y: press.y - 14,
+        enabled: this.save.wood >= cost,
+      };
+    }
+
+    if (
+      this.goldenLog &&
+      Math.abs(lx - this.goldenLog.x) <= 6 &&
+      Math.abs(ly - this.goldenLog.y) <= 5
+    ) {
+      return {
+        label: "GOLDEN LOG",
+        x: this.goldenLog.x,
+        y: this.goldenLog.y - 8,
+        enabled: true,
+      };
+    }
+
+    if (this.koi) {
+      const k = this.plot.lake.koiPosition(this.koi.phase);
+      if (Math.hypot(lx - k.x, ly - k.y) <= Game.KOI_CLICK_RADIUS) {
+        return { label: "CATCH KOI", x: k.x, y: k.y - 8, enabled: true };
+      }
+    }
+
+    const tree = this.plot.forest.treeAt(lx, ly);
+    if (!tree) return null;
+    return {
+      label: this.save.focus > 0 ? "CHOP" : "NO FOCUS",
+      x: tree.x + tree.width / 2,
+      y: tree.y - tree.height - 2,
+      enabled: this.save.focus > 0,
+    };
+  }
+
+  hoverIsInteractive(): boolean {
+    return (
+      this.buildModeActive() ||
+      this.hoverTarget !== null ||
+      this.dialogueHover !== null
+    );
+  }
+
+  /** Canvas hover, driven from main.ts. */
+  handleHover(lx: number, ly: number): void {
+    // An open conversation takes the pointer, matching the way it takes every
+    // click — otherwise the world's own hover labels keep firing underneath a
+    // bubble the player is reading.
+    if (this.dialogue) {
+      this.hoverCell = null;
+      this.hoverTarget = null;
+      const layout = layoutBubble(this.dialogue, this.w, this.h);
+      const idx = hitChoice(layout, lx, ly);
+      this.dialogueHover =
+        idx !== null && !this.dialogue.choices[idx].disabled ? idx : null;
+      return;
+    }
+    this.dialogueHover = null;
+    // Pointer anywhere over the homestead reveals the status board. The
+    // whole fenced plot is the target rather than the cottage alone: it's a
+    // big, obvious area, and "look at my homestead" is the intent behind
+    // wanting the numbers.
+    this.boardHovered = this.pointerOverHomestead(lx, ly);
+    if (this.buildModeActive()) {
+      this.hoverCell = this.plot.forest.gridRef().cellAt(lx, ly);
+      this.hoverTarget = null;
+      return;
+    }
+    this.hoverCell = null;
+    this.hoverTarget = this.resolveHoverTarget(lx, ly);
+  }
+
+  /** Is the pointer over the fenced homestead (or the board hanging above
+   * the cottage)? Extends upward past the yard's own top edge because the
+   * board and the cottage roof both stand above the plot's back row — the
+   * reveal would otherwise vanish the moment you moved onto the thing you
+   * were trying to read. */
+  private pointerOverHomestead(lx: number, ly: number): boolean {
+    const grid = this.plot.forest.gridRef();
+    const y = this.yardRect();
+    const nw = grid.center({ cx: y.cx, cy: y.cy });
+    const se = grid.center({ cx: y.cx + y.cols - 1, cy: y.cy + y.rows - 1 });
+    return (
+      lx >= nw.x - CELL / 2 - 2 &&
+      lx <= se.x + CELL / 2 + 2 &&
+      ly >= nw.y - CELL * 3 &&
+      ly <= se.y + CELL / 2 + 2
+    );
+  }
+
+  clearHover(): void {
+    this.hoverCell = null;
+    this.hoverTarget = null;
+    this.dialogueHover = null;
+    this.boardHovered = false;
+  }
+
+  /** Screen rects of the open conversation's choice rows, in logical px, in
+   * choice order. Empty when nothing is open.
+   *
+   * Exists so the headless interaction tests can click a reply where it
+   * actually is instead of reaching in and invoking `onPick` directly — the
+   * bit worth testing about "PAY" is precisely that the CLICK path can't fire
+   * it twice, and calling the handler by hand tests the one thing that was
+   * never in doubt. Read-only, so it costs nothing to ship. */
+  dialogueChoiceRects(): { x: number; y: number; w: number; h: number }[] {
+    if (!this.dialogue) return [];
+    return layoutBubble(this.dialogue, this.w, this.h).choiceRects;
+  }
+
+  /** Drop any open conversation. Called whenever the world is about to be
+   * replaced or covered — a bubble anchored to a speaker who is no longer on
+   * screen would hang in mid-air over the new view. */
+  private closeDialogue(): void {
+    this.dialogue = null;
+    this.dialogueHover = null;
+  }
+
+  /** Whether a cell can take the thing currently being placed. */
+  canPlaceAt(c: Cell): boolean {
+    const grid = this.plot.forest.gridRef();
+    if (!grid.inBounds(c)) return false;
+    const y = this.yardRect();
+    if (c.cx < y.cx || c.cx >= y.cx + y.cols) return false;
+    if (c.cy < y.cy || c.cy >= y.cy + y.rows) return false;
+    const key = Grid.key(c);
+    if (key === Grid.key(this.cottageCell())) return false;
+    if (this.barnAvailable() && key === Grid.key(this.barnCell())) return false;
+    for (const p of Object.values(this.yardPropCells())) {
+      if (Grid.key(p) === key) return false;
+    }
+    // A tree standing in the cell blocks it. freeYardCells never consulted the
+    // forest's own occupancy map despite that map's doc comment claiming to be
+    // exactly this check, so buildables could be dropped inside a tree trunk.
+    if (this.plot.forest.occupiedCells().has(key)) return false;
+    // Not in the water. The yard widens with each cottage phase and the lake
+    // is seeded per plot, so the two genuinely can overlap.
+    const foot = grid.footing(c);
+    if (this.plot.lake.contains(foot.x, foot.y)) return false;
+    const placed = this.save.placed ?? [];
+    for (let i = 0; i < placed.length; i++) {
+      if (i === this.buildMovingIndex) continue;
+      if (placed[i].cx === c.cx && placed[i].cy === c.cy) return false;
+    }
+    return true;
+  }
+
+  /** Drops whatever Build Mode is holding onto the hovered cell. */
+  commitPlacement(): "placed" | "moved" | "invalid" | "unaffordable" | "maxed" | "none" {
+    const cell = this.hoverCell;
+    if (!cell || !this.buildModeActive()) return "none";
+    if (!this.canPlaceAt(cell)) return "invalid";
+
+    if (this.buildMovingIndex !== null) {
+      const placed = [...(this.save.placed ?? [])];
+      const moving = placed[this.buildMovingIndex];
+      if (!moving) return "none";
+      placed[this.buildMovingIndex] = { ...moving, cx: cell.cx, cy: cell.cy };
+      this.save.placed = placed;
+      this.buildMovingIndex = null;
+      scheduleSave(this.save, true);
+      return "moved";
+    }
+
+    const spec = buildableById(this.buildSelection ?? "");
+    if (!spec) return "none";
+    if (!canOwnMore(this.save.placed, spec)) return "maxed";
+    // Chest-won stock is spent before wood — a free copy you already own
+    // should never quietly charge you for a second one.
+    const stock = this.save.decorStock ?? {};
+    const fromStock = (stock[spec.id] ?? 0) > 0;
+    const cost = buildableCost(spec, getWorld(this.save.worldIndex).mult);
+    if (!fromStock && this.save.wood < cost) return "unaffordable";
+    if (fromStock) {
+      this.save.decorStock = { ...stock, [spec.id]: stock[spec.id] - 1 };
+    } else {
+      this.save.wood -= cost;
+    }
+    this.save.placed = [
+      ...(this.save.placed ?? []),
+      { id: spec.id, cx: cell.cx, cy: cell.cy },
+    ];
+    if (!canOwnMore(this.save.placed, spec)) this.buildSelection = null;
+    scheduleSave(this.save, true);
+    return "placed";
+  }
+
+  /** Clicking an already-placed item picks it up to move it — the natural
+   * "no, move THAT one" gesture. */
+  pickUpAt(c: Cell): boolean {
+    const placed = this.save.placed ?? [];
+    const i = placed.findIndex((p) => p.cx === c.cx && p.cy === c.cy);
+    if (i < 0) return false;
+    this.buildMovingIndex = i;
+    this.buildSelection = null;
+    return true;
+  }
+
+  /** Removes a placed item, refunding half. */
+  removeAt(c: Cell): boolean {
+    const placed = [...(this.save.placed ?? [])];
+    const i = placed.findIndex((p) => p.cx === c.cx && p.cy === c.cy);
+    if (i < 0) return false;
+    const spec = buildableById(placed[i].id);
+    if (spec) {
+      this.save.wood += Math.floor(
+        buildableCost(spec, getWorld(this.save.worldIndex).mult) / 2,
+      );
+    }
+    placed.splice(i, 1);
+    this.save.placed = placed;
+    if (this.buildMovingIndex === i) this.buildMovingIndex = null;
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  /** Cells inside the yard that nothing is standing on yet — where a bought
+   * buildable may be placed. Excludes the cottage's own cell and anything
+   * already placed. */
+  freeYardCells(): Cell[] {
+    const y = this.yardRect();
+    const grid = this.plot.forest.gridRef();
+    const taken = new Set<string>();
+    taken.add(Grid.key(this.cottageCell()));
+    if (this.barnAvailable()) taken.add(Grid.key(this.barnCell()));
+    // The readouts are furnishings occupying real cells, so a bought buildable
+    // can't be dropped on top of the log pile or the signpost.
+    for (const c of Object.values(this.yardPropCells())) taken.add(Grid.key(c));
+    for (const p of this.save.placed ?? []) {
+      taken.add(Grid.key({ cx: p.cx, cy: p.cy }));
+    }
+    const out: Cell[] = [];
+    for (let dy = 0; dy < y.rows; dy++) {
+      for (let dx = 0; dx < y.cols; dx++) {
+        const c = { cx: y.cx + dx, cy: y.cy + dy };
+        if (!grid.inBounds(c)) continue;
+        if (taken.has(Grid.key(c))) continue;
+        out.push(c);
+      }
+    }
+    return out;
+  }
+
+  // --- NPCs -----------------------------------------------------------------
+
+  /** Where each character stands, in logical px.
+   *
+   * Lives here rather than in the registry because every one of these depends
+   * on plot state the registry has no business knowing: the fisher needs the
+   * lake's seeded position, the foreman needs the bridge, the quartermaster
+   * needs the camp. */
+  npcPos(id: NpcId): { x: number; y: number } {
+    if (id === "foreman") return this.foremanPos();
+    if (id === "quartermaster") {
+      const camp = this.encampmentPos();
+      // Off to the camp's left so he doesn't stand in the tent doorway, and
+      // clear of the tent's own party/stage badge.
+      return this.avoidLake(camp.x - 16, camp.y + 2);
+    }
+    return this.fisherPos();
+  }
+
+  /** The fisher sits on the near shore, on whichever side has more room, so
+   * he never ends up wedged against a screen edge or standing in the yard. */
+  private fisherPos(): { x: number; y: number } {
+    const lake = this.plot.lake;
+    const yard = this.yardRect();
+    const grid = this.plot.forest.gridRef();
+    const yardRight =
+      grid.center({ cx: yard.cx + yard.cols - 1, cy: yard.cy }).x + CELL / 2;
+    const leftRoom = lake.cx - lake.rx - yardRight;
+    const rightRoom = this.w - (lake.cx + lake.rx);
+    const onLeft = leftRoom > rightRoom;
+    const x = onLeft ? lake.cx - lake.rx - 8 : lake.cx + lake.rx + 8;
+    return {
+      x: Math.max(6, Math.min(this.w - 8, Math.round(x))),
+      // Near the lake's waterline, a little toward the viewer so he reads as
+      // sitting on the bank rather than floating on the surface.
+      y: Math.round(lake.cy + lake.ry * 0.5),
+    };
+  }
+
+  private npcSize(id: NpcId): { w: number; h: number } {
+    return spriteSize(NPCS[id].idle);
   }
 
   private hitNpc(id: NpcId, lx: number, ly: number): boolean {
