@@ -255,7 +255,33 @@ export interface SkillCheck {
  * right silhouette for the kind directly. */
 const MAX_WOODCUTTERS = 8;
 const COALESCE_SECS = 0.5;
-const SLIDE_SECS = 1.4;
+/** How long a plot/world change takes, end to end.
+ *
+ * This used to be a 1.4s horizontal SLIDE of two plots past each other, and
+ * it looked broken because the renderer skipped its entire depth-sorted pass
+ * while it ran: every tree, worker, building, NPC and the whole crossing
+ * vanished, two flat bands of ground colour slid by, and the world popped
+ * back. Rendering both plots' full contents at two offsets would mean
+ * threading a plot + dx through every drawable in the file, for an effect
+ * nobody asked for.
+ *
+ * A fade does the same job honestly. The world keeps rendering normally the
+ * whole time — it just darkens, swaps while you cannot see it, and comes
+ * back. Nothing pops because nothing was ever missing, and it is shorter
+ * because a fade does not need time to travel a screen width. */
+const TRANSITION_SECS = 0.7;
+
+/** Half-width and height of a typical tree's canopy, in logical px — the
+ * silhouette used when deciding whether a tree would overhang water or a
+ * prop.
+ *
+ * Sized between the medium TREE (11x14) and the large TREE_LG (13x18) rather
+ * than the elder (19x21). Which kind lands in which cell is decided later by
+ * the forest's own spiral placement, so this has to cover the common cases
+ * without reserving for the single biggest tree in the game — that would
+ * push a wide, visibly empty ring around every lake. */
+const CANOPY_HALF_W = 8;
+const CANOPY_H = 16;
 const WOOD_COLOR = "#f0a04a";
 const TOKEN_COLOR = "#ffe9a8";
 /** frenzyBurst item effect: seconds of faster swings granted on a Great POV
@@ -302,7 +328,9 @@ export class Game {
   private plotWorld: number;
   private nextPlot: Plot | null = null;
   private nextPlotWorld = 0;
-  private slide = 0;
+  /** Seconds left in a plot/world change. The world renders normally the
+   * whole time; this only drives how dark the overlay is (see render). */
+  private transitionT = 0;
   private density = 1;
   private woodcutters = new Map<string, Woodcutter>();
   /** Live session id -> assigned roster member id (null = default-worker
@@ -1886,7 +1914,7 @@ export class Game {
       for (let cy = 0; cy < grid.rows; cy++) {
         for (let cx = 0; cx < grid.cols; cx++) {
           const f = grid.footing({ cx, cy });
-          if (f.x >= rav.x0 - CELL / 2 && f.x <= rav.x1 + CELL / 2) {
+          if (f.x >= rav.x0 - CANOPY_HALF_W && f.x <= rav.x1 + CANOPY_HALF_W) {
             out.push({ cx, cy });
           }
         }
@@ -1905,10 +1933,24 @@ export class Game {
           for (let dx = -1; dx <= 1; dx++) out.push({ cx: c.cx + dx, cy: c.cy + dy });
         }
       }
+      // Water, and anything else a tree must not overhang.
+      //
+      // Tested against the tree's whole FOOTPRINT, not just the cell's
+      // footing point. A trunk sits at the bottom-centre of its cell but the
+      // canopy is ~11px wide and ~14px tall above it, so testing one point
+      // let every cell bordering the lake grow a tree whose crown hung out
+      // over the water. Sampling the silhouette's corners and edges catches
+      // that without reserving a whole extra ring of cells.
+      const keepOut = this.treeKeepOutRects();
       for (let cy = 0; cy < grid.rows; cy++) {
         for (let cx = 0; cx < grid.cols; cx++) {
-          const f = grid.footing({ cx, cy });
-          if (this.plot.lake.contains(f.x, f.y)) out.push({ cx, cy });
+          // jitteredFooting, NOT footing: the forest places each trunk at a
+          // deterministic offset inside its cell (see Forest.resize), so
+          // testing the cell's centre-bottom checked a spot no tree ever
+          // stands on and let jittered trunks drift into the water.
+          if (this.treeWouldIntrude(grid.jitteredFooting({ cx, cy }), keepOut)) {
+            out.push({ cx, cy });
+          }
         }
       }
       return out;
@@ -3468,6 +3510,61 @@ export class Game {
     ctx.fillRect(floatX, floatY, 1, 2);
   }
 
+  /** Rectangles no tree may overhang. The lake is handled separately (it is
+   * an ellipse, not a rect) — these are the props that stand outside the
+   * fenced yard and so are not covered by the yard reservation. */
+  private treeKeepOutRects(): { x0: number; y0: number; x1: number; y1: number }[] {
+    const rects: { x0: number; y0: number; x1: number; y1: number }[] = [];
+    const box = (
+      p: { x: number; y: number },
+      map: PixelMap,
+      pad = 1,
+    ): { x0: number; y0: number; x1: number; y1: number } => {
+      const size = spriteSize(map);
+      return {
+        x0: p.x - size.w / 2 - pad,
+        y0: p.y - size.h - pad,
+        x1: p.x + size.w / 2 + pad,
+        y1: p.y + pad,
+      };
+    };
+    rects.push(box(this.encampmentPos(), ENCAMPMENT));
+    if (this.sapPressOwned()) rects.push(box(this.sapPressPos(), SAP_PRESS_IDLE));
+    rects.push(box(this.signpostPos(), SIGNPOST_IDLE));
+    return rects;
+  }
+
+  /** Would a tree standing at `foot` overlap the lake or any keep-out rect?
+   *
+   * Samples the tree silhouette rather than its bounding box: the canopy is
+   * wide at the top and the trunk narrow at the bottom, so a full-rectangle
+   * test would reserve cells whose tree never actually reaches the water. */
+  private treeWouldIntrude(
+    foot: { x: number; y: number },
+    rects: { x0: number; y0: number; x1: number; y1: number }[],
+  ): boolean {
+    const pts: [number, number][] = [
+      [0, 0], // trunk base
+      [-2, -2],
+      [2, -2],
+      [0, -CANOPY_H / 2],
+      [-CANOPY_HALF_W, -CANOPY_H * 0.6],
+      [CANOPY_HALF_W, -CANOPY_H * 0.6],
+      [-CANOPY_HALF_W + 1, -CANOPY_H],
+      [CANOPY_HALF_W - 1, -CANOPY_H],
+      [0, -CANOPY_H],
+    ];
+    for (const [dx, dy] of pts) {
+      const x = foot.x + dx;
+      const y = foot.y + dy;
+      if (this.plot.lake.contains(x, y)) return true;
+      for (const r of rects) {
+        if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) return true;
+      }
+    }
+    return false;
+  }
+
   /** Pull any placed buildable that has ended up outside the yard back into
    * it, onto the nearest free cell.
    *
@@ -4999,7 +5096,7 @@ export class Game {
     this.nextPlotWorld = world;
     this.nextPlot.resize(this.w, this.groundTop(), this.groundBottom());
     this.nextPlot.setLakeLevel(this.density);
-    this.slide = 0;
+    this.transitionT = TRANSITION_SECS;
     this.spot = null;
     this.goldenLog = null;
     this.koi = null; // new plot's lake — the old swim position is meaningless
@@ -5014,7 +5111,6 @@ export class Game {
       this.plotWorld = this.nextPlotWorld;
       this.nextPlot = null;
     }
-    this.slide = 0;
     this.save.currentPlotHp = this.plot.forest.hpSnapshot();
     scheduleSave(this.save, true);
     let i = 0;
@@ -5197,9 +5293,11 @@ export class Game {
     }
 
     // Plot cleared → trek to the next plot of this world.
-    if (this.nextPlot) {
-      this.slide += dt / SLIDE_SECS;
-      if (this.slide >= 1) {
+    if (this.transitionT > 0) {
+      this.transitionT = Math.max(0, this.transitionT - dt);
+      // Swap at the midpoint, while the screen is fully dark. Doing it at
+      // either end would show the change happening.
+      if (this.nextPlot && this.transitionT <= TRANSITION_SECS / 2) {
         this.finishTransition();
       }
     } else if (this.hasData && this.plot.forest.cleared()) {
@@ -5416,20 +5514,11 @@ export class Game {
 
     this.sky.render(ctx, w, skyH, new Date());
 
-    const sliding = this.nextPlot !== null;
-    const dxOld = sliding ? Math.round(-this.slide * w) : 0;
-    const dxNew = sliding ? Math.round((1 - this.slide) * w) : 0;
-
-    // Ground per world (both worlds visible during a travel slide).
-    if (sliding) {
-      ctx.fillStyle = getWorld(this.plotWorld).ground;
-      ctx.fillRect(dxOld, skyH, w, h - skyH);
-      ctx.fillStyle = getWorld(this.nextPlotWorld).ground;
-      ctx.fillRect(dxNew, skyH, w, h - skyH);
-    } else {
-      ctx.fillStyle = getWorld(this.plotWorld).ground;
-      ctx.fillRect(0, skyH, w, h - skyH);
-    }
+    // No more dual-plot offsets: a transition is a fade now, so exactly one
+    // plot is ever on screen and everything below draws at its normal place.
+    const dxOld = 0;
+    ctx.fillStyle = getWorld(this.plotWorld).ground;
+    ctx.fillRect(0, skyH, w, h - skyH);
 
     // Birds ride over the sky/treeline, before the ground goes down, so they
     // read as distant. See scene/ambience.ts.
@@ -5439,21 +5528,12 @@ export class Game {
     // everything on the ground draws over it.
     const oldWorld = getWorld(this.plotWorld);
     this.plot.renderTreeline(ctx, dxOld);
-    this.nextPlot?.renderTreeline(ctx, dxNew);
 
     this.plot.renderGroundLayer(ctx, dxOld, oldWorld.tuft);
-    if (this.nextPlot) {
-      this.nextPlot.renderGroundLayer(
-        ctx,
-        dxNew,
-        getWorld(this.nextPlotWorld).tuft,
-      );
-    }
 
     // Bushes / ferns / rocks / stumps: backdrop scenery, over the grass but
     // under everything that moves.
     this.plot.renderScenery(ctx, dxOld, oldWorld.tuft);
-    this.nextPlot?.renderScenery(ctx, dxNew, getWorld(this.nextPlotWorld).tuft);
 
     // Butterflies / fireflies / falling leaves sit in the grass: after the
     // ground cover, before the depth-sorted sprite pass, so a woodcutter
@@ -5474,7 +5554,7 @@ export class Game {
           d: mixHex(axeHeat, "#1d2b21", 0.35),
         }
       : baseWeaponPalette;
-    if (!sliding) {
+    {
       type Drawable = { y: number; draw: () => void };
       const drawables: Drawable[] = [];
       // Resource props sit on the ground line, so they depth-sort with trees
@@ -5593,26 +5673,6 @@ export class Game {
           );
         }
       }
-    } else {
-      withPalette(this.treePalette(this.plotWorld), () => {
-        for (const tree of [...this.plot.forest.trees].sort(
-          (a, b) => a.y - b.y,
-        )) {
-          this.plot.forest.renderTree(ctx, tree, dxOld);
-        }
-      });
-      if (this.nextPlot) {
-        withPalette(this.treePalette(this.nextPlotWorld), () => {
-          for (const tree of [...this.nextPlot!.forest.trees].sort(
-            (a, b) => a.y - b.y,
-          )) {
-            this.nextPlot!.forest.renderTree(ctx, tree, dxNew);
-          }
-        });
-      }
-      for (const wc of this.woodcutters.values()) {
-        wc.render(ctx, workerPalette, weaponPalette);
-      }
     }
 
     for (const f of this.floats) {
@@ -5631,7 +5691,7 @@ export class Game {
     // Build Mode overlay: the ONLY time the grid is ever visible. Drawn after
     // the night overlay so tiles and the ghost stay readable in the dark, and
     // after the world so nothing occludes what you're aiming at.
-    if (!sliding && this.buildModeActive()) {
+    if (this.buildModeActive()) {
       this.renderBuildOverlay(ctx);
     }
 
@@ -5640,7 +5700,7 @@ export class Game {
     // numbers and the lantern's light cone happen here, after the night
     // overlay, so the counts stay legible in the dark and the cone reads as
     // light rather than being dimmed along with everything else.
-    if (!sliding) {
+    {
       this.renderPropLabels(ctx);
     }
 
@@ -5653,7 +5713,7 @@ export class Game {
     // click survives until the pointer next moves — so the prop's label sat
     // on screen underneath its own speech bubble. Gating at the draw makes
     // that impossible to reintroduce from a new dialogue opener.
-    if (!sliding && this.hoverTarget && !this.dialogue) {
+    if (this.hoverTarget && !this.dialogue) {
       const t = this.hoverTarget;
       const tw = textWidth(t.label);
       const bx = Math.round(
@@ -5677,17 +5737,28 @@ export class Game {
     // Unprompted chatter sits BELOW a real conversation in z-order and is
     // suppressed entirely while one is open (updateAmbient won't start one,
     // and this won't draw a leftover), so the two can never stack.
-    if (!sliding && this.ambient && !this.dialogue) {
+    if (this.ambient && !this.dialogue) {
       drawAmbient(ctx, this.ambient, layoutAmbient(this.ambient, this.w, this.h));
     }
 
-    if (!sliding && this.dialogue) {
+    if (this.dialogue) {
       drawBubble(
         ctx,
         this.dialogue,
         layoutBubble(this.dialogue, this.w, this.h),
         this.dialogueHover,
       );
+    }
+
+    // Transition fade. Drawn over the world but UNDER the HUD text below, so
+    // the status line stays readable while the scene changes behind it.
+    // Peaks at full dark exactly halfway through, which is the frame the plot
+    // swap happens on (see update) — so the change itself is never visible.
+    if (this.transitionT > 0) {
+      const p = 1 - this.transitionT / TRANSITION_SECS; // 0..1 through the beat
+      const a = 1 - Math.abs(p * 2 - 1);
+      ctx.fillStyle = `rgba(8, 10, 14, ${(a * a).toFixed(3)})`;
+      ctx.fillRect(0, 0, w, h);
     }
 
     if (this.extraCount > 0) {
