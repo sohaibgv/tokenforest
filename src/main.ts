@@ -662,7 +662,11 @@ async function boot(): Promise<void> {
     // Mirrors the bridge's own two-step state so the accessible control says
     // the same thing the world does.
     const repaired = game.bridgeRepaired();
-    travelBtn.disabled = !status.gateMet || (!repaired && !status.affordable);
+    // A built bridge is always crossable — the gate governs building it, not
+    // using it (see Game.crossBridge).
+    travelBtn.disabled = repaired
+      ? false
+      : !status.gateMet || !status.affordable;
     travelBtn.textContent = repaired
       ? `Cross the bridge to ${status.nextName}`
       : `Repair the bridge to ${status.nextName} — ${abbrev(status.cost)} wood`;

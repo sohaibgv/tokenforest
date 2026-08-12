@@ -23,6 +23,7 @@ import {
 } from "../src/npc/lines";
 import { buildUsageView, type UsageView } from "../src/npc/usage-view";
 import { fontSafe } from "../src/scene/sprites";
+import { TREES_PER_PLOT } from "../src/scene/plot";
 
 import {
   buildEnemy,
@@ -92,6 +93,7 @@ import {
   SKILL_SPEED_PER_TIER,
   SKILL_SPEED_RANGE,
   travelCostForWorld,
+  WOOD_YIELD,
   unlockedSwatches,
   WORKER_PITY_THRESHOLD,
   type Rarity,
@@ -1299,7 +1301,39 @@ function featureChecks(): void {
         `${discounted.length - new Set(discounted).size} collisions`,
       );
 
-      // --- POV swing payout ------------------------------------------------
+      // --- Plot payout is unchanged by the tree-count drop ------------------
+    // TREES_PER_PLOT fell 28 -> 20 so the forest could actually fit in the
+    // smaller clearing, and WOOD_YIELD was scaled up to compensate. That is
+    // only acceptable if a plot is worth EXACTLY what it was before —
+    // otherwise a visual fix has quietly rebalanced progression.
+    {
+      const mixFor = (count: number) => {
+        const large = Math.max(1, Math.round(count * 0.18));
+        const medium = Math.max(1, Math.round(count * 0.36));
+        return { large, medium, small: count - 1 - large - medium };
+      };
+      const payout = (count: number, yields: Record<string, number>) => {
+        const m = mixFor(count);
+        return yields.elder + m.large * yields.large + m.medium * yields.medium + m.small * yields.small;
+      };
+      const before = payout(28, { small: 1, medium: 3, large: 5, elder: 50 });
+      const now = payout(TREES_PER_PLOT, WOOD_YIELD);
+      check(
+        "a plot is worth the same after the tree-count change",
+        Math.abs(before - now) < 0.5,
+        `was ${before.toFixed(1)}, now ${now.toFixed(1)} (x mult)`,
+      );
+      // And the elder must stay the standout prize — it is the one tree the
+      // plot always has exactly one of, and the reason clearing feels like an
+      // event rather than a chore.
+      check(
+        "the elder still out-pays any other tree by far",
+        WOOD_YIELD.elder > WOOD_YIELD.large * 5,
+        `elder ${WOOD_YIELD.elder} vs large ${WOOD_YIELD.large.toFixed(2)}`,
+      );
+    }
+
+    // --- POV swing payout ------------------------------------------------
     // The timing bar now pays in wood rather than reporting a multiplier,
     // and that payout mixes grade, sweep speed and jitter. Three ways this
     // could break a save, one gate each.

@@ -308,10 +308,20 @@ export function getWorld(index: number): WorldSpec {
 }
 
 /** Wood paid when a tree of this kind falls (× world mult). */
+/** Wood a felled tree pays, by kind (x world mult).
+ *
+ * The non-elder values carry a x67/49 uplift over the original 1/3/5. That
+ * factor is exactly what keeps a plot's total payout identical after
+ * TREES_PER_PLOT dropped from 28 to 20 (see scene/plot.ts): at 28 the
+ * non-elder trees summed to 67 units, at 20 they sum to 49. The elder is
+ * untouched — there is still exactly one per plot, so its contribution never
+ * needed rescaling. */
+const NON_ELDER_UPLIFT = 67 / 49;
+
 export const WOOD_YIELD: Record<string, number> = {
-  small: 1,
-  medium: 3,
-  large: 5,
+  small: 1 * NON_ELDER_UPLIFT,
+  medium: 3 * NON_ELDER_UPLIFT,
+  large: 5 * NON_ELDER_UPLIFT,
   elder: 50,
 };
 

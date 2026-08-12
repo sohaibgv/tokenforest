@@ -7,7 +7,20 @@ import type { Cell, Grid } from "./grid";
 import { Lake } from "./lake";
 import { mulberry32 } from "./rng";
 
-export const TREES_PER_PLOT = 28;
+/** Trees per plot.
+ *
+ * Was 28, chosen when the canvas rendered at half CSS size and a plot was
+ * ~840 logical px wide. The renderer now targets ~240px, so the same 28
+ * trees have to share a much smaller clearing with a homestead, a river, a
+ * lake, an expedition camp and three NPCs. Placement ran out of legal cells
+ * — 28 free for 28 trees — and the forest's spiral fell back to dropping
+ * trunks into the pond and inside the fence.
+ *
+ * Lowered to fit, with WOOD_YIELD raised to match so a plot is worth exactly
+ * what it was worth before (sim-gated: "plot wood is unchanged"). Tree count
+ * is a visual quantity; wood per plot is the economic one, and only the
+ * second should be hard to change. */
+export const TREES_PER_PLOT = 20;
 
 /** Ground-cover kinds, in the order they're drawn. Split out because they
  * want genuinely different shapes and colours — 26 identical 2x1 dashes

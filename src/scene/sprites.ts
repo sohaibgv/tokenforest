@@ -1414,13 +1414,19 @@ const PROTESTOR_HURT: PixelMap = [
   "...P..P...",
   "....b.b...",
 ];
+/* Defeated frames are SPRAWLED, not shrunk.
+   All three enemy kinds used to keep a standing silhouette and simply lose
+   two rows, so a kill read as the sprite getting shorter — and with the
+   death squash playing over the top of it, as a living enemy being
+   compressed rather than a dead one hitting the ground. These follow the
+   woodcutter's COMMON_DEFEATED instead: headwear knocked clear, body laid
+   out horizontally, limbs splayed. */
 const PROTESTOR_DEFEATED: PixelMap = [
-  "...UU.....",
-  "...ss.....",
-  "..VVVV....",
-  "..vVVv....",
-  "..PPPP....",
-  "..b..b....",
+  ".U...........",
+  "s.ss........s",
+  "..vVVVv......",
+  ".P..vv..P....",
+  "b....P....b..",
 ];
 
 const SCIENTIST_IDLE: PixelMap = [
@@ -1464,12 +1470,11 @@ const SCIENTIST_HURT: PixelMap = [
   "....b.b...",
 ];
 const SCIENTIST_DEFEATED: PixelMap = [
-  "...MM.....",
-  "..JEEJ....",
-  "..lLLl....",
-  "..llll....",
-  "..PPPP....",
-  "..b..b....",
+  ".J...........",
+  "s.ss........s",
+  "..lLLLl......",
+  ".P..ll..P....",
+  "b....P....b..",
 ];
 const SCIENTIST_SPECIAL: PixelMap = [
   "....O.....",
@@ -1530,12 +1535,11 @@ const MAYOR_HURT: PixelMap = [
   "....b.b...",
 ];
 const MAYOR_DEFEATED: PixelMap = [
-  "...MM.....",
-  "...ss.....",
-  "..SSSB....",
-  "..nBnn....",
-  "..PPPP....",
-  "..b..b....",
+  ".B...........",
+  "s.ss........s",
+  "..nSSSn......",
+  ".P..BB..P....",
+  "b....P....b..",
 ];
 
 export const ENEMY_KIND_SPRITES: Record<"protestor" | "scientist" | "mayor", EnemyFrameSet> = {

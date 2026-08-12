@@ -280,8 +280,8 @@ const TRANSITION_SECS = 0.7;
  * the forest's own spiral placement, so this has to cover the common cases
  * without reserving for the single biggest tree in the game — that would
  * push a wide, visibly empty ring around every lake. */
-const CANOPY_HALF_W = 8;
-const CANOPY_H = 16;
+const CANOPY_HALF_W = 6;
+const CANOPY_H = 14;
 const WOOD_COLOR = "#f0a04a";
 const TOKEN_COLOR = "#ffe9a8";
 /** frenzyBurst item effect: seconds of faster swings granted on a Great POV
@@ -1900,54 +1900,25 @@ export class Game {
       // plot is first seeded, but that check runs in normalized space before
       // any nudge, so without this a displaced pond can end up with trunks
       // standing in it.
-      const out = this.yardCells();
-      // The rail corridor. A tree standing between the rails reads as broken
-      // art, and the track has to run unbroken edge to edge for the two ends
-      // to read as one route (see pushRailDrawables).
-      const rail = this.railRow();
-      for (let cx = 0; cx < grid.cols; cx++) out.push({ cx, cy: rail });
-
-      // The chasm. Nothing grows in mid-air: without this, trees and props
-      // were being snapped into cells that the ravine is drawn straight
-      // over, so they hung in the dark with no ground under them.
-      const rav = this.ravineRect();
-      for (let cy = 0; cy < grid.rows; cy++) {
-        for (let cx = 0; cx < grid.cols; cx++) {
-          const f = grid.footing({ cx, cy });
-          if (f.x >= rav.x0 - CANOPY_HALF_W && f.x <= rav.x1 + CANOPY_HALF_W) {
-            out.push({ cx, cy });
-          }
-        }
-      }
-
-      // And the ground each character stands on, plus a one-cell apron.
-      // Tree canopies are far wider than their cell, so reserving only the
-      // exact cell still left the fisher peering out from inside a trunk.
-      // Runs after the lake nudge above, so the fisher — whose spot is
-      // derived from the water's edge — is resolved against the final lake.
-      for (const id of NPC_IDS) {
-        if (!this.npcPresent(id)) continue;
-        const p = this.npcPos(id);
-        const c = grid.cellAt(p.x, p.y);
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) out.push({ cx: c.cx + dx, cy: c.cy + dy });
-        }
-      }
-      // Water, and anything else a tree must not overhang.
+      // ONE rule for everything: a tree may not be placed where its drawn
+      // silhouette would overlap anything that matters — water, the track,
+      // the homestead, a building, or a person.
       //
-      // Tested against the tree's whole FOOTPRINT, not just the cell's
-      // footing point. A trunk sits at the bottom-centre of its cell but the
-      // canopy is ~11px wide and ~14px tall above it, so testing one point
-      // let every cell bordering the lake grow a tree whose crown hung out
-      // over the water. Sampling the silhouette's corners and edges catches
-      // that without reserving a whole extra ring of cells.
+      // This used to be four separate passes with four different margins
+      // (yard cells, the rail row, a river band by footing-x, a 3x3 apron
+      // around each NPC), and each one leaked in its own way: trees stood in
+      // front of the adventure tent and swallowed clicks meant for it, grew
+      // through NPCs, crept into the river, and appeared inside the yard.
+      // Testing the actual footprint against one list of keep-out shapes
+      // fixes all of them at once and leaves nowhere new to leak.
+      const out: Cell[] = [];
       const keepOut = this.treeKeepOutRects();
       for (let cy = 0; cy < grid.rows; cy++) {
         for (let cx = 0; cx < grid.cols; cx++) {
           // jitteredFooting, NOT footing: the forest places each trunk at a
           // deterministic offset inside its cell (see Forest.resize), so
           // testing the cell's centre-bottom checked a spot no tree ever
-          // stands on and let jittered trunks drift into the water.
+          // stands on.
           if (this.treeWouldIntrude(grid.jitteredFooting({ cx, cy }), keepOut)) {
             out.push({ cx, cy });
           }
@@ -2442,20 +2413,7 @@ export class Game {
     };
   }
 
-  /** Every cell the homestead covers, plus a one-cell apron. The apron
-   * matters: the fence is drawn on the yard's boundary and tree canopies are
-   * wider than their cell, so a tree in the very next cell still overhangs
-   * the rails. Reserving one ring out keeps the clearing looking cleared. */
-  private yardCells(): Cell[] {
-    const y = this.yardRect();
-    const out: Cell[] = [];
-    for (let dy = -1; dy <= y.rows; dy++) {
-      for (let dx = -1; dx <= y.cols; dx++) {
-        out.push({ cx: y.cx + dx, cy: y.cy + dy });
-      }
-    }
-    return out;
-  }
+
 
   /** Cell the cottage itself stands on — back-left of the yard. */
   private cottageCell(): Cell {
@@ -2680,7 +2638,24 @@ export class Game {
     const maxW = Math.min(76, this.w - 16);
     const say = (text: string): string[] => wrapLines(text, maxW);
 
-    if (!st.gateMet) {
+    // Repaired FIRST. Checking the gate first meant a returning player was
+    // told to clear three more plots while standing in front of their own
+    // finished bridge.
+    if (this.bridgeRepaired()) {
+      this.dialogue = {
+        speaker,
+        lines: say(`She will hold. Track is open to ${st.nextName}.`),
+        choices: [
+          {
+            label: "ALL ABOARD",
+            onPick: () => {
+              if (this.crossBridge()) playSfx("railWhistle");
+            },
+          },
+          { label: "NOT YET", onPick: () => {} },
+        ],
+      };
+    } else if (!st.gateMet) {
       const left = st.gate - this.save.plotsClearedInWorld;
       this.dialogue = {
         speaker,
@@ -2777,9 +2752,17 @@ export class Game {
   /** Crosses an already-repaired bridge to the next world. */
   crossBridge(): boolean {
     const status = this.travelStatus();
-    if (!status || !status.gateMet || !this.bridgeRepaired() || this.nextPlot) {
-      return false;
-    }
+    // NO GATE CHECK. The plot gate governs when you may BUILD the crossing,
+    // not whether you may use one that already exists.
+    //
+    // travelBackTo resets plotsClearedInWorld, so riding back down the line
+    // and then trying to come forward again demanded you re-clear three
+    // plots for a bridge you had already paid for and built — the ladder
+    // silently re-tolled itself every time you revisited. And since getting
+    // PAST a world requires repairing its bridge in the first place, every
+    // world you can travel back to necessarily has one: `bridgeRepaired`
+    // alone is the correct and sufficient condition.
+    if (!status || !this.bridgeRepaired() || this.nextPlot) return false;
     const s = this.save;
     s.worldIndex += 1;
     s.adventureWorldUnlocked = Math.max(s.adventureWorldUnlocked, s.worldIndex);
@@ -2830,7 +2813,17 @@ export class Game {
 
   private barnCell(): Cell {
     const y = this.yardRect();
-    return { cx: Math.min(y.cx + y.cols - 2, y.cx + 5), cy: y.cy };
+    const grid = this.plot.forest.gridRef();
+    const wanted = Math.min(y.cx + y.cols - 2, y.cx + 5);
+    // Walk left along the yard's back row until the cell is dry. The yard
+    // widens with each cottage phase and the lake is seeded per plot, so the
+    // two genuinely overlap on some plots — and a barn standing in the pond
+    // is the kind of thing you only notice after you have paid for it.
+    for (let cx = wanted; cx > y.cx; cx--) {
+      const f = grid.footing({ cx, cy: y.cy });
+      if (!this.plot.lake.contains(f.x, f.y)) return { cx, cy: y.cy };
+    }
+    return { cx: wanted, cy: y.cy };
   }
 
   private barnPos(): { x: number; y: number } {
@@ -3327,7 +3320,17 @@ export class Game {
     const leftRoom = lake.cx - lake.rx - yardRight;
     const rightRoom = this.w - (lake.cx + lake.rx);
     const onLeft = leftRoom > rightRoom;
-    const x = onLeft ? lake.cx - lake.rx - 8 : lake.cx + lake.rx + 8;
+    let x = onLeft ? lake.cx - lake.rx - 8 : lake.cx + lake.rx + 8;
+    // Never in the river. Picking a bank by lake room alone put him on the
+    // right of the lake, which on plots where the lake sits far over is
+    // exactly where the river runs — so he ended up sitting IN the water
+    // with half of him on the far bank. If the chosen side collides, put him
+    // back on the near bank of the river instead.
+    const rav = this.ravineRect();
+    const half = spriteSize(NPCS.fisher.idle).w / 2;
+    if (x + half >= rav.x0 - 2 && x - half <= rav.x1 + 2) {
+      x = rav.x0 - half - 4;
+    }
     return {
       x: Math.max(6, Math.min(this.w - 8, Math.round(x))),
       // Near the lake's waterline, a little toward the viewer so he reads as
@@ -3510,10 +3513,14 @@ export class Game {
     ctx.fillRect(floatX, floatY, 1, 2);
   }
 
-  /** Rectangles no tree may overhang. The lake is handled separately (it is
-   * an ellipse, not a rect) — these are the props that stand outside the
-   * fenced yard and so are not covered by the yard reservation. */
+  /** Every rectangle a tree's silhouette must stay out of.
+   *
+   * The lake is handled separately by treeWouldIntrude (it is an ellipse, not
+   * a rect); everything else in the world that a tree must not grow through
+   * or in front of is listed here, in one place, so a new prop only has to be
+   * added once. */
   private treeKeepOutRects(): { x0: number; y0: number; x1: number; y1: number }[] {
+    const grid = this.plot.forest.gridRef();
     const rects: { x0: number; y0: number; x1: number; y1: number }[] = [];
     const box = (
       p: { x: number; y: number },
@@ -3528,9 +3535,48 @@ export class Game {
         y1: p.y + pad,
       };
     };
-    rects.push(box(this.encampmentPos(), ENCAMPMENT));
+
+    // The homestead, generously. No trees in the home area at all — the yard
+    // is a cleared plot of land, and the fence is meant to enclose ground you
+    // can build on, not a thicket.
+    const y = this.yardRect();
+    const nw = grid.center({ cx: y.cx, cy: y.cy });
+    const se = grid.center({ cx: y.cx + y.cols - 1, cy: y.cy + y.rows - 1 });
+    // Exactly the yard, plus a couple of pixels. Padding this by a whole
+    // cell on every side (and two above) reserved 60 of the grid's 160 cells
+    // on its own — between that, the track, the river and the lake, only 13
+    // cells were left for 28 trees, so the forest's placement spiral gave up
+    // and dropped trees into reserved ground anyway. The canopy test already
+    // provides the real clearance; the rect only has to be the thing itself.
+    rects.push({
+      x0: nw.x - CELL / 2 - 2,
+      y0: nw.y - CELL / 2 - 2,
+      x1: se.x + CELL / 2 + 2,
+      y1: se.y + CELL / 2 + 2,
+    });
+
+    // The track, edge to edge. It has to run unbroken for the two ends of
+    // the line to read as one route.
+    const railY = this.railFooting(0).y;
+    // The tile is 5px tall; reserving a full cell above it cost another 20
+    // cells for no visual benefit.
+    rects.push({ x0: -CELL, y0: railY - 6, x1: this.w + CELL, y1: railY + 2 });
+
+    // The river and its banks.
+    const rav = this.ravineRect();
+    rects.push({ x0: rav.x0 - 2, y0: rav.top - 4, x1: rav.x1 + 2, y1: rav.bottom });
+
+    // Buildings and props that stand outside the fence.
+    rects.push(box(this.encampmentPos(), ENCAMPMENT, 1));
     if (this.sapPressOwned()) rects.push(box(this.sapPressPos(), SAP_PRESS_IDLE));
     rects.push(box(this.signpostPos(), SIGNPOST_IDLE));
+
+    // The cast. A tree in front of a person hides them and, worse, eats the
+    // click meant for them.
+    for (const id of NPC_IDS) {
+      if (!this.npcPresent(id)) continue;
+      rects.push(box(this.npcPos(id), NPCS[id].idle, 1));
+    }
     return rects;
   }
 
@@ -4033,10 +4079,10 @@ export class Game {
       // state at a glance (locked / price / open) while his speech bubble
       // carries the actual conversation.
       const p = this.trestlePos();
-      const label = !st.gateMet
-        ? `${this.save.plotsClearedInWorld}/${st.gate}`
-        : this.bridgeRepaired()
-          ? "OPEN"
+      const label = this.bridgeRepaired()
+        ? "OPEN"
+        : !st.gateMet
+          ? `${this.save.plotsClearedInWorld}/${st.gate}`
           : abbrev(st.cost);
       const tw = textWidth(label);
       const lx = Math.round(
