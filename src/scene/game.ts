@@ -2506,8 +2506,11 @@ export class Game {
    * to the right ~13% so it costs the plot very little usable ground. */
   private ravineRect(): { x0: number; x1: number; top: number; bottom: number } {
     return {
-      x0: Math.round(this.w * 0.8),
-      x1: Math.round(this.w * 0.93),
+      // Narrower than the chasm it replaces. A river only has to be too wide
+      // to jump, not a canyon — the old 13% band swallowed a sixth of the
+      // plot and read as the map ending rather than as a feature in it.
+      x0: Math.round(this.w * 0.84),
+      x1: Math.round(this.w * 0.92),
       top: this.groundTop(),
       bottom: this.h,
     };
@@ -2531,8 +2534,13 @@ export class Game {
     // complaint: the ravine cells are reserved from trees and props (see
     // layout), so nothing can ever be placed in front of him.
     const rav = this.ravineRect();
-    const y = this.railFooting(0).y + 8;
-    return { x: rav.x0 - 7, y: Math.min(this.h - 4, y) };
+    // Well BELOW the deck, not level with it. At +8 his head sat behind the
+    // bridge's approach planking and railing — the man you are meant to
+    // click was drawn inside the structure he is standing next to. Dropping
+    // him to +20 clears the whole span, and the depth sort then draws him in
+    // front of it rather than behind.
+    const y = this.railFooting(0).y + 20;
+    return { x: rav.x0 - 8, y: Math.min(this.h - 4, y) };
   }
 
   private hitHandcar(lx: number, ly: number): boolean {
@@ -2754,7 +2762,10 @@ export class Game {
     const cell = {
       cx: Math.max(
         yard.cx + yard.cols + 1,
-        Math.min(grid.cols - 3, Math.round(grid.cols * 0.74)),
+        // 0.66, not 0.74: at 0.74 the camp landed on the strip of bank
+        // between the homestead and the river, which is exactly where the
+        // foreman has to stand.
+        Math.min(grid.cols - 3, Math.round(grid.cols * 0.66)),
       ),
       // At least two rows clear of the track. The camp used to sit directly
       // under it, and its hover label draws ABOVE the sprite — which put a

@@ -28,7 +28,7 @@ export interface TimberLineView {
   halt: { x: number; y: number };
   handcar: { x: number; y: number };
   trestle: { x: number; y: number };
-  /** The chasm the bridge crosses, in logical px. */
+  /** The river the bridge crosses, in logical px. */
   ravine: { x0: number; x1: number; top: number; bottom: number };
   /** Is there an onward world at all? No trestle on the last one. */
   hasTrestle: boolean;
@@ -143,7 +143,7 @@ export function pushTimberLineDrawables(
   // The chasm itself, behind everything, at the very back of the depth sort.
   drawables.push({
     y: -1,
-    draw: () => drawRavine(ctx, rav.x0, rav.x1, rav.top, rav.bottom),
+    draw: () => drawRiver(ctx, rav.x0, rav.x1, rav.top, rav.bottom, v.animT),
   });
 
   drawables.push({
@@ -152,89 +152,127 @@ export function pushTimberLineDrawables(
   });
 }
 
-/** A chasm cutting the plot's right edge, with a lit rocky lip on each side
- * so the ground reads as breaking off rather than as a painted dark stripe. */
-function drawRavine(ctx: CanvasRenderingContext2D, x0: number, x1: number, top: number, bottom: number): void {
-  const g = ctx.createLinearGradient(0, top, 0, bottom);
-  g.addColorStop(0, "#0d0b12");
-  g.addColorStop(0.45, "#171320");
-  g.addColorStop(1, "#080610");
-  ctx.fillStyle = g;
-  ctx.fillRect(x0, top, x1 - x0, bottom - top);
-
-  // Crumbling edges: a bright lip pixel then a dark inner face, jittered per
-  // row so the break looks torn rather than cut.
+/** The river the bridge crosses.
+ *
+ * This was a black chasm, and a black chasm is a VOID: there is nothing in
+ * it to look at, nothing to explain why you cannot simply walk across, and
+ * no reason for a bridge to be the answer. Water solves all three at once —
+ * it reads instantly, it belongs in a forest, and the game already speaks
+ * this visual language at the lake, so the two read as the same world.
+ *
+ * Deliberately shares the lake's palette and its shimmer trick (a moving
+ * modulo stripe) rather than inventing a second water look. The difference
+ * is direction: the lake shimmers in place, the river's highlights march
+ * downstream, which is what makes it read as flowing rather than as a
+ * long thin pond. */
+function drawRiver(
+  ctx: CanvasRenderingContext2D,
+  x0: number,
+  x1: number,
+  top: number,
+  bottom: number,
+  t: number,
+): void {
+  const flow = Math.floor(t * 6);
   for (let y = top; y < bottom; y++) {
-    const j = Math.abs(Math.sin(y * 12.9898) * 43758.5453) % 1;
-    const l = Math.round(j * 2);
-    const r = Math.round((1 - j) * 2);
-    ctx.fillStyle = "#6b6257";
-    ctx.fillRect(x0 - l, y, 1, 1);
-    ctx.fillRect(x1 + r - 1, y, 1, 1);
-    ctx.fillStyle = "rgba(0,0,0,0.45)";
-    ctx.fillRect(x0 - l + 1, y, 2, 1);
-    ctx.fillRect(x1 + r - 3, y, 2, 1);
+    // Banks wander a little so the channel is not a rectangle.
+    const wob = Math.round(Math.sin(y * 0.21) * 1.5 + Math.sin(y * 0.07) * 1.5);
+    const lx = x0 + wob;
+    const rx = x1 + Math.round(Math.sin(y * 0.17 + 2) * 1.5);
+
+    // Wet sand at each edge, then the water.
+    ctx.fillStyle = "#6e5a3e";
+    ctx.fillRect(lx - 2, y, 2, 1);
+    ctx.fillRect(rx, y, 2, 1);
+
+    for (let x = lx; x < rx; x++) {
+      const edge = x < lx + 2 || x >= rx - 2;
+      // The stripe scrolls with `flow`, and the y term slants it, so the
+      // highlights travel diagonally downstream.
+      const shimmer = (x * 3 + y * 5 - flow * 4) % 13 === 0;
+      ctx.fillStyle = edge ? "#2d6299" : shimmer ? "#5a9bd8" : "#3a7bbf";
+      ctx.fillRect(x, y, 1, 1);
+    }
   }
 }
 
-/** The span: piers into the chasm, a plank deck, and railings.
- * `built` is 0 (collapsed) to 1 (whole); intermediate values fill the deck
- * left-to-right so the wood you just paid visibly becomes the bridge. */
-function drawSpan(ctx: CanvasRenderingContext2D, x0: number, x1: number, y: number, built: number): void {
+/** The crossing: a timber bridge on posts standing in the water.
+ *
+ * `built` is 0 (needs repair) to 1 (whole). The broken state deliberately
+ * keeps MOST of the bridge standing — both approaches, every post, both
+ * railings up to the break — and takes out only a section of the middle.
+ * The previous version removed nearly everything, which read as "there is
+ * no bridge here" rather than "this bridge needs repair", and a repair job
+ * you cannot recognise as a repair job is not an invitation to pay for one. */
+function drawSpan(
+  ctx: CanvasRenderingContext2D,
+  x0: number,
+  x1: number,
+  y: number,
+  built: number,
+): void {
   const w = x1 - x0;
   const deckTop = y - 3;
+  // Overhang the banks so the deck visibly LANDS on solid ground at both
+  // ends instead of stopping at the waterline.
+  const bx0 = x0 - 5;
+  const bx1 = x1 + 5;
 
-  // Piers, always present — they are what survived the collapse, and they
-  // give the eye something to read the gap's depth against.
-  for (const t of [0.28, 0.72]) {
-    const px = Math.round(x0 + w * t);
-    ctx.fillStyle = "#4a3520";
-    ctx.fillRect(px - 1, y, 3, 16);
+  // Support posts, standing in the water with a reflection-ish shadow.
+  for (const f of [0.3, 0.7]) {
+    const px = Math.round(x0 + w * f);
     ctx.fillStyle = "#2b2118";
-    ctx.fillRect(px + 1, y, 1, 16);
-    // Cross-brace between the pier and the deck.
+    ctx.fillRect(px - 1, y, 3, 14);
+    ctx.fillStyle = "#4a3520";
+    ctx.fillRect(px - 1, y, 2, 14);
+    // Cross-brace under the deck.
     ctx.fillStyle = "#5e452a";
-    ctx.fillRect(px - 4, y + 4, 9, 1);
+    ctx.fillRect(px - 4, y + 3, 9, 1);
   }
 
-  const laid = Math.round(w * built);
+  // The damaged section: a hole in the MIDDLE, closing up as it's rebuilt.
+  const gapHalf = Math.round((1 - built) * w * 0.18);
+  const mid = Math.round((bx0 + bx1) / 2);
+  const gap0 = mid - gapHalf;
+  const gap1 = mid + gapHalf;
+  const inGap = (x: number): boolean => gapHalf > 0 && x >= gap0 && x < gap1;
 
   // Deck planks.
-  for (let x = 0; x < laid; x++) {
-    const gx = x0 + x;
-    ctx.fillStyle = x % 4 === 0 ? "#6e4c30" : "#8a6440";
-    ctx.fillRect(gx, deckTop, 1, 3);
+  for (let x = bx0; x < bx1; x++) {
+    if (inGap(x)) continue;
+    ctx.fillStyle = (x - bx0) % 4 === 0 ? "#6e4c30" : "#8a6440";
+    ctx.fillRect(x, deckTop, 1, 3);
+    ctx.fillStyle = "#a07a4e";
+    ctx.fillRect(x, deckTop, 1, 1);
   }
-  ctx.fillStyle = "#a07a4e";
-  ctx.fillRect(x0, deckTop, laid, 1);
 
-  // RAILINGS — posts and a top rail, on the built section only. This is the
-  // detail that makes it a bridge instead of a plank.
+  // Railings: posts and a top rail, skipping the damaged run.
   ctx.fillStyle = "#5e452a";
-  for (let x = 0; x < laid; x += 5) {
-    ctx.fillRect(x0 + x, deckTop - 5, 1, 5);
+  for (let x = bx0; x < bx1; x += 5) {
+    if (inGap(x)) continue;
+    ctx.fillRect(x, deckTop - 5, 1, 5);
   }
-  if (laid > 0) {
+  for (let x = bx0; x < bx1; x++) {
+    if (inGap(x)) continue;
     ctx.fillStyle = "#7a5f3e";
-    ctx.fillRect(x0, deckTop - 5, laid, 1);
+    ctx.fillRect(x, deckTop - 5, 1, 1);
     ctx.fillStyle = "#5e452a";
-    ctx.fillRect(x0, deckTop - 3, laid, 1);
+    ctx.fillRect(x, deckTop - 3, 1, 1);
   }
 
-  // The broken end: a ragged stub and one plank hanging off it.
-  if (built < 1) {
-    const bx = x0 + laid;
-    ctx.fillStyle = "#6e4c30";
-    ctx.fillRect(bx, deckTop, 2, 2);
-    ctx.fillRect(bx + 2, deckTop + 1, 1, 1);
+  // Damage detail at the break: splintered plank ends and one board hanging
+  // into the water. Only while there is still a gap to repair.
+  if (gapHalf > 0) {
+    ctx.fillStyle = "#5c4026";
+    ctx.fillRect(gap0 - 1, deckTop + 1, 1, 2);
+    ctx.fillRect(gap1, deckTop + 1, 1, 2);
+    // A snapped railing post leaning over the gap.
     ctx.fillStyle = "#5e452a";
-    ctx.fillRect(bx + 1, deckTop + 3, 1, 4); // dangling plank
-    ctx.fillRect(bx + 1, deckTop + 7, 2, 1);
-    // Far side stub, so the gap reads as a break in a whole rather than as
-    // an unfinished build running off the edge.
+    ctx.fillRect(gap0 - 2, deckTop - 4, 1, 2);
+    ctx.fillRect(gap1 + 1, deckTop - 3, 1, 2);
+    // Dangling board.
     ctx.fillStyle = "#6e4c30";
-    ctx.fillRect(x1 - 3, deckTop, 3, 3);
-    ctx.fillStyle = "#5e452a";
-    ctx.fillRect(x1 - 1, deckTop - 5, 1, 5);
+    ctx.fillRect(gap0 - 1, deckTop + 3, 1, 5);
+    ctx.fillRect(gap0 - 1, deckTop + 8, 2, 1);
   }
 }

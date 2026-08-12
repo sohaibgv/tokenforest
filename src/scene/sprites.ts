@@ -72,6 +72,10 @@ const PALETTE: Record<string, string> = {
   // person wherever you meet him — he travels the line, he isn't local to a
   // world. His hard hat reuses `U`, which carries the same never-tinted
   // guarantee for the protestor's bandana.
+  j: "#ff8a2b", // safety orange — the hard hat. Its own letter rather than
+  // the protestor's `U` bandana, which is a duller burnt orange and belongs
+  // to a different character; a hard hat wants to be the brightest thing on
+  // the person wearing it.
   z: "#e8e04a", // hi-vis. The single most legible "this person works on a
   // construction site" signal there is, and nothing else in the world uses
   // it — which is the point: the foreman has to be identifiable at 10px
@@ -634,42 +638,42 @@ export const TRESTLE_BREAK: PixelMap = [
  * makes him legible as a CONSTRUCTION man at 10px, which is the read his
  * whole rate-card routine depends on. */
 export const FOREMAN_IDLE: PixelMap = [
-  "...WWWWW...",
-  "....WWW....",
+  "....jjj....",
+  "...jjjjj...",
   "....ss.....",
-  "..zzzzz....",
-  "..zWWWz....",
-  "..zzzzz..D.",
-  "...mmm...w.",
-  "...m.m...w.",
-  "...b.b.....",
-  "..bb.bb....",
+  "...zzzzz...",
+  "...zWWWz...",
+  "...zzzzz.D.",
+  "....mmm..w.",
+  "....m.m..w.",
+  "....b.b....",
+  "...bb.bb...",
 ];
 
 export const FOREMAN_HAMMER_UP: PixelMap = [
-  "...WWWWW.D.",
-  "....WWW..w.",
+  "....jjj..D.",
+  "...jjjjj.w.",
   "....ss...w.",
-  "..zzzzz.w..",
-  "..zWWWz....",
-  "..zzzzz....",
-  "...mmm.....",
-  "...m.m.....",
-  "...b.b.....",
-  "..bb.bb....",
+  "...zzzzzw..",
+  "...zWWWz...",
+  "...zzzzz...",
+  "....mmm....",
+  "....m.m....",
+  "....b.b....",
+  "...bb.bb...",
 ];
 
 export const FOREMAN_HAMMER_DOWN: PixelMap = [
-  "...WWWWW...",
-  "....WWW....",
+  "....jjj....",
+  "...jjjjj...",
   "....ss.....",
-  "..zzzzz....",
-  "..zWWWz....",
-  "..zzzzz.w..",
-  "...mmm..w..",
-  "...m.m..DD.",
-  "...b.b.....",
-  "..bb.bb....",
+  "...zzzzz...",
+  "...zWWWz...",
+  "...zzzzz.w.",
+  "....mmm..w.",
+  "....m.m.DD.",
+  "....b.b....",
+  "...bb.bb...",
 ];
 
 /** The fisher, SEATED on the shore — the one character who isn't standing,
