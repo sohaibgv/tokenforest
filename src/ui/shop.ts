@@ -8,7 +8,6 @@ import {
   BOOSTS,
   buildableCost,
   BUILDABLES,
-  canOwnMore,
   type CosmeticSpec,
   COSMETICS,
   COTTAGE_PHASE_NAME,
@@ -16,7 +15,6 @@ import {
   dyedPalette,
   getWorld,
   HELPERS,
-  ownedCount,
   PROVISIONS,
   SAP_PRESS_AMBER_YIELD,
   unlockedSwatches,
@@ -432,35 +430,42 @@ export function initShop(game: Game): void {
         );
       }
 
-      const yardFull = game.yardIsFull();
       for (const b of BUILDABLES) {
         const cost = buildableCost(b, mult);
-        const owned = ownedCount(s.placed, b.id);
-        const maxed = !canOwnMore(s.placed, b);
+        // The cap counts what you OWN, placed or not — an item in the box is
+        // one you have already bought.
+        const capped = game.totalOwned(b.id) >= b.maxOwned;
         // Landmarks read as "built / not built"; repeat decorations show how
         // many of the allowance you've used, because that's the number you
         // actually care about when arranging a row of them.
+        // Counts what you OWN — placed plus still in the box — because that
+        // is what the cap applies to and what you actually want to know
+        // before buying another.
+        const held = game.totalOwned(b.id);
+        const inBox = game.decorInStock(b.id);
         const countText = b.unique
-          ? owned > 0
-            ? " · built"
+          ? held > 0
+            ? " · owned"
             : " · one only"
-          : ` · ${owned}/${b.maxOwned}`;
+          : ` · ${held}/${b.maxOwned} owned${inBox > 0 ? `, ${inBox} in your box` : ""}`;
         cards.push(
           card(
             b.name,
             `${b.blurb} · ${abbrev(cost)} wood${countText}`,
             {
-              // Arms placement rather than buying: the shop closes and the
-              // player picks the cell. Nothing is charged until they drop it,
-              // so opening the placer and backing out costs nothing.
-              text: maxed ? (b.unique ? "built" : "max") : yardFull ? "yard full" : "Place",
-              enabled: !maxed && !yardFull && s.wood >= cost,
+              // BUYS it into your inventory. It used to arm the placer and
+              // charge on every drop, so one purchase could quietly become
+              // six. Placement is now a separate, free act — open the
+              // inventory whenever you like and put the thing down.
+              text: capped ? (b.unique ? "owned" : "max") : "Buy",
+              enabled: !capped && s.wood >= cost,
               onClick: () => {
-                if (game.beginPlacing(b.id)) close();
+                game.buyBuildable(b.id);
+                renderList();
               },
             },
             BUILDABLE_SPRITES[b.id] ?? COTTAGE_ICON,
-            maxed ? "owned" : owned > 0 ? "equipped" : undefined,
+            capped ? "owned" : held > 0 ? "equipped" : undefined,
           ),
         );
       }
@@ -468,9 +473,10 @@ export function initShop(game: Game): void {
 
       const hint = document.createElement("div");
       hint.className = "shop-sub build-hint";
-      hint.textContent = yardFull
+      const boxed = game.inventoryEntries().reduce((n, e) => n + e.count, 0);
+      hint.textContent = game.yardIsFull()
         ? "The yard is full — raise the cottage to expand the plot."
-        : `${game.freeYardCells().length} free plots · ${placedCount} built · click a plot to place, Esc to cancel, click a built item to move it`;
+        : `${boxed} in your box · ${placedCount} placed · ${game.freeYardCells().length} free plots — open the Box to put things down`;
       listEl.append(hint);
     } else {
       const cards: HTMLElement[] = [];

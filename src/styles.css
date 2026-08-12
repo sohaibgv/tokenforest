@@ -3526,6 +3526,15 @@ button:active:not(:disabled) {
   overflow-x: auto;
 }
 
+/* Shown when the box is open but empty — the bar has to say something,
+   or opening it looks broken. */
+.build-empty {
+  font-size: 11px;
+  color: var(--text-secondary);
+  align-self: center;
+  padding: 0 4px;
+}
+
 .build-slot {
   display: flex;
   flex-direction: column;

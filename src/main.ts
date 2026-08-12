@@ -16,11 +16,6 @@ import { playSfx, setSfxMuted, setSfxVolume, sfxMuted, sfxVolume } from "./sfx";
 import { flushSaveNow, getCurrentSlot, loadSave, setCurrentSlot } from "./game-state";
 import {
   buildableById,
-  buildableCost,
-  BUILDABLES,
-  canOwnMore,
-  getWorld,
-  ownedCount,
 } from "./economy";
 import { abbrev } from "./scene/floating-text";
 import { Game } from "./scene/game";
@@ -161,59 +156,68 @@ async function boot(): Promise<void> {
     canvas.style.cursor = "";
   });
 
+  // Your box, openable at any time — not only as a side effect of buying
+  // something. Closing it also disarms the placer, so "Done" and the button
+  // mean the same thing.
+  document.getElementById("box-btn")!.addEventListener("click", () => {
+    closeAllOverlays();
+    game.toggleInventory();
+    canvas.style.cursor = "";
+  });
+
   /** Rebuilds the bar only when its contents actually change — it's driven
    * from the render loop, so blindly re-creating the slots every frame would
    * destroy the button under the pointer mid-click. */
   let buildBarKey = "";
   function syncBuildBar(): void {
-    const active = game.buildModeActive();
-    buildBar.classList.toggle("hidden", !active);
-    if (!active) {
+    const visible = game.inventoryVisible();
+    buildBar.classList.toggle("hidden", !visible);
+    if (!visible) {
       buildBarKey = "";
       return;
     }
     const sel = game.buildSelectionId();
-    const mult = getWorld(game.save.worldIndex).mult;
-    const key = `${sel}|${(game.save.placed ?? []).length}|${Math.floor(game.save.wood)}|${JSON.stringify(game.save.decorStock ?? {})}`;
+    const entries = game.inventoryEntries();
+    const key = `${sel}|${JSON.stringify(entries)}|${(game.save.placed ?? []).length}`;
     if (key === buildBarKey) return;
     buildBarKey = key;
 
     buildLabel.textContent = sel
       ? `Placing ${buildableById(sel)?.name ?? sel}`
-      : "Moving — pick a spot";
+      : game.buildModeActive()
+        ? "Moving — pick a spot"
+        : entries.length > 0
+          ? "Your box — pick something to place"
+          : "Your box is empty";
 
     buildSlots.replaceChildren();
-    for (const b of BUILDABLES) {
-      const cost = buildableCost(b, mult);
-      const owned = ownedCount(game.save.placed, b.id);
-      const maxed = !canOwnMore(game.save.placed, b);
+    // ONLY what you own and have not placed. The bar used to list every
+    // buildable in the game with a price on it, which is what made it read
+    // as a second shop where each click cost wood — the whole confusion
+    // behind buying one bench and placing six.
+    for (const e of entries) {
+      const b = buildableById(e.id);
+      if (!b) continue;
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "build-slot";
-      const stocked = game.decorInStock(b.id);
+      btn.className = "build-slot stocked";
       btn.classList.toggle("selected", sel === b.id);
-      btn.classList.toggle("stocked", stocked > 0);
-      btn.disabled = maxed || (stocked === 0 && game.save.wood < cost);
-      btn.title = maxed
-        ? `${b.name} — ${b.unique ? "already built" : "all placed"}`
-        : stocked > 0
-          ? `${b.name} — ${stocked} free from a chest`
-          : `${b.name} — ${abbrev(cost)} wood`;
+      btn.title = `${b.name} — ${e.count} in your box`;
       const icon = pixelIcon(BUILDABLE_SPRITES[b.id], { palette: UI_PALETTE, scale: 2 });
       const count = document.createElement("span");
-      count.textContent = stocked > 0
-        ? `free x${stocked}`
-        : b.unique
-          ? owned > 0
-            ? "✓"
-            : "1"
-          : `${owned}/${b.maxOwned}`;
+      count.textContent = `x${e.count}`;
       btn.append(icon, count);
       btn.addEventListener("click", () => {
         game.beginPlacing(b.id);
         buildBarKey = ""; // force a redraw so the selection highlight moves
       });
       buildSlots.append(btn);
+    }
+    if (entries.length === 0) {
+      const empty = document.createElement("span");
+      empty.className = "build-empty";
+      empty.textContent = "Buy decorations in the Shop.";
+      buildSlots.append(empty);
     }
   }
 
@@ -237,6 +241,7 @@ async function boot(): Promise<void> {
   prependIcon("adventure-close", CLOSE_ICON, 2, true);
   prependIcon("shop-btn", SLOT_WOODCHOPPING_ICON, 2, false);
   prependIcon("adventure-btn", COMPASS_ICON, 2, false);
+  prependIcon("box-btn", BUILDABLE_SPRITES.flowerbed ?? COMPASS_ICON, 2, false);
   prependIcon("gear", GEAR_ICON, 2, false);
   const shopTabIcons: Record<string, PixelMap> = {
     team: TEAM_ICON,

@@ -52,7 +52,6 @@ import {
   barnPhaseCost,
   barnUnlocked,
   buildableById,
-  canOwnMore,
   buildableCost,
   CACHE_KOI_TTL,
   COTTAGE_MAX_PHASE,
@@ -66,6 +65,8 @@ import {
   SKILL_SPEED_BASE,
   SKILL_SPEED_PER_TIER,
   SKILL_SPEED_RANGE,
+  BUILDABLES,
+  ownedCount,
   focusHeatColor,
   getWorld,
   logStackTier,
@@ -411,6 +412,9 @@ export class Game {
   private hoverCell: Cell | null = null;
   /** Buildable armed for placement, or null. */
   private buildSelection: string | null = null;
+  /** The inventory panel is open. Independent of having something armed:
+   * you can look in the box, and close it again, without placing anything. */
+  private inventoryOpen = false;
   /** Index into save.placed of an item being moved, or null. */
   private buildMovingIndex: number | null = null;
 
@@ -2908,20 +2912,73 @@ export class Game {
 
   // --- Build Mode -----------------------------------------------------------
 
+  /** Is the placer armed — i.e. will a canvas click drop or move something?
+   * Distinct from the inventory merely being open. */
   buildModeActive(): boolean {
     return this.buildSelection !== null || this.buildMovingIndex !== null;
+  }
+
+  /** Should the inventory bar be on screen? */
+  inventoryVisible(): boolean {
+    return this.inventoryOpen || this.buildModeActive();
+  }
+
+  toggleInventory(): boolean {
+    this.inventoryOpen = !this.inventoryOpen;
+    if (!this.inventoryOpen) this.cancelBuildMode();
+    return this.inventoryOpen;
+  }
+
+  openInventory(): void {
+    this.inventoryOpen = true;
+  }
+
+  /** Everything you own but have not put down yet, in display order. */
+  inventoryEntries(): { id: string; count: number }[] {
+    const stock = this.save.decorStock ?? {};
+    return BUILDABLES.filter((b) => (stock[b.id] ?? 0) > 0).map((b) => ({
+      id: b.id,
+      count: stock[b.id] ?? 0,
+    }));
   }
 
   buildSelectionId(): string | null {
     return this.buildSelection;
   }
 
-  /** Arms Build Mode with a buildable to place. The purchase happens on DROP,
-   * not here, so opening the placer and changing your mind costs nothing. */
-  beginPlacing(id: string): boolean {
+  /** How many of a buildable you own in total — standing in the yard PLUS
+   * sitting unplaced in your inventory. The cap has to apply to both: an
+   * item in the box is one you have already bought. */
+  totalOwned(id: string): number {
+    return ownedCount(this.save.placed, id) + this.decorInStock(id);
+  }
+
+  /** Buys one and puts it in your inventory. Nothing is placed — you open
+   * the inventory and put it down wherever you like, whenever you like.
+   *
+   * Purchase used to happen on DROP: the shop merely armed the placer, and
+   * every cell you clicked charged you again. Buying one bench and then
+   * placing "it" six times silently cost six benches, because there was no
+   * such thing as a bought item — only a charge per drop. Now a purchase is
+   * a thing you own. */
+  buyBuildable(id: string): boolean {
     const spec = buildableById(id);
     if (!spec) return false;
-    if (!canOwnMore(this.save.placed, spec)) return false;
+    if (this.totalOwned(id) >= spec.maxOwned) return false;
+    const cost = buildableCost(spec, getWorld(this.save.worldIndex).mult);
+    if (this.save.wood < cost) return false;
+    this.save.wood -= cost;
+    const stock = this.save.decorStock ?? {};
+    this.save.decorStock = { ...stock, [id]: (stock[id] ?? 0) + 1 };
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  /** Arms placement with something you already own. Nothing is charged here
+   * or on the drop — you paid when you bought it. */
+  beginPlacing(id: string): boolean {
+    if (!buildableById(id)) return false;
+    if (this.decorInStock(id) <= 0) return false;
     this.buildSelection = id;
     this.buildMovingIndex = null;
     return true;
@@ -2930,6 +2987,7 @@ export class Game {
   cancelBuildMode(): void {
     this.buildSelection = null;
     this.buildMovingIndex = null;
+    this.inventoryOpen = false;
   }
 
   /** What the pointer is over in the world, if it's something you can use.
@@ -3213,23 +3271,19 @@ export class Game {
 
     const spec = buildableById(this.buildSelection ?? "");
     if (!spec) return "none";
-    if (!canOwnMore(this.save.placed, spec)) return "maxed";
-    // Chest-won stock is spent before wood — a free copy you already own
-    // should never quietly charge you for a second one.
+    // Placing SPENDS AN OWNED ITEM. It never charges wood — that already
+    // happened at the shop. Running out of stock is the only thing that can
+    // stop a drop now.
     const stock = this.save.decorStock ?? {};
-    const fromStock = (stock[spec.id] ?? 0) > 0;
-    const cost = buildableCost(spec, getWorld(this.save.worldIndex).mult);
-    if (!fromStock && this.save.wood < cost) return "unaffordable";
-    if (fromStock) {
-      this.save.decorStock = { ...stock, [spec.id]: stock[spec.id] - 1 };
-    } else {
-      this.save.wood -= cost;
-    }
+    if ((stock[spec.id] ?? 0) <= 0) return "unaffordable";
+    this.save.decorStock = { ...stock, [spec.id]: stock[spec.id] - 1 };
     this.save.placed = [
       ...(this.save.placed ?? []),
       { id: spec.id, cx: cell.cx, cy: cell.cy },
     ];
-    if (!canOwnMore(this.save.placed, spec)) this.buildSelection = null;
+    // Keep the placer armed while you still have more of this to put down —
+    // laying a row of fence posts should not mean reopening a menu each time.
+    if (this.decorInStock(spec.id) <= 0) this.buildSelection = null;
     scheduleSave(this.save, true);
     return "placed";
   }
@@ -3250,12 +3304,11 @@ export class Game {
     const placed = [...(this.save.placed ?? [])];
     const i = placed.findIndex((p) => p.cx === c.cx && p.cy === c.cy);
     if (i < 0) return false;
-    const spec = buildableById(placed[i].id);
-    if (spec) {
-      this.save.wood += Math.floor(
-        buildableCost(spec, getWorld(this.save.worldIndex).mult) / 2,
-      );
-    }
+    // Picked-up items go back in the box, not half-refunded as wood. You
+    // bought the thing; rearranging your own yard should be lossless.
+    const id = placed[i].id;
+    const stock = this.save.decorStock ?? {};
+    this.save.decorStock = { ...stock, [id]: (stock[id] ?? 0) + 1 };
     placed.splice(i, 1);
     this.save.placed = placed;
     if (this.buildMovingIndex === i) this.buildMovingIndex = null;
