@@ -82,6 +82,42 @@ fn set_hide_on_blur(enabled: bool, app: AppHandle, state: tauri::State<AppState>
 }
 
 #[tauri::command]
+fn get_current_slot() -> Option<u8> {
+    config::load().current_slot
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SfxSettings {
+    muted: bool,
+    volume: f32,
+}
+
+#[tauri::command]
+fn get_sfx_settings() -> SfxSettings {
+    let cfg = config::load();
+    SfxSettings {
+        muted: cfg.sfx_muted.unwrap_or(false),
+        volume: cfg.sfx_volume.unwrap_or(0.5).clamp(0.0, 1.0),
+    }
+}
+
+#[tauri::command]
+fn set_sfx_settings(muted: bool, volume: f32) {
+    config::update(|c| {
+        c.sfx_muted = Some(muted);
+        c.sfx_volume = Some(volume.clamp(0.0, 1.0));
+    });
+}
+
+#[tauri::command]
+fn set_current_slot(slot: u8) {
+    if (1..=3).contains(&slot) {
+        config::update(|c| c.current_slot = Some(slot));
+    }
+}
+
+#[tauri::command]
 fn set_budget(tokens: u64, state: tauri::State<AppState>) {
     let tokens = tokens.max(1);
     state.budget.store(tokens, Ordering::Relaxed);
@@ -174,8 +210,14 @@ pub fn run() {
             set_hide_on_blur,
             get_use_real_usage,
             set_use_real_usage,
+            get_current_slot,
+            set_current_slot,
+            get_sfx_settings,
+            set_sfx_settings,
             save::load_game,
-            save::save_game
+            save::save_game,
+            save::list_slots,
+            save::delete_slot
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]

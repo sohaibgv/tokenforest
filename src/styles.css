@@ -6,14 +6,149 @@
   -webkit-user-select: none;
 }
 
+/* Generic display:none toggle. Most overlay-level elements (#shop, #travel,
+   .battle-box-grid, ...) carry their own higher-specificity `#id.hidden` /
+   `.class.hidden` override further down because their base rule sets
+   `display: flex|grid` with equal-or-higher CSS specificity than a bare
+   `.hidden` would win on its own — see each for why. This generic rule only
+   exists to cover plain elements (e.g. adventure.ts's Resume/Push On
+   buttons) that toggle `.hidden` with no such competing display rule. */
+.hidden {
+  display: none;
+}
+
+/* Pixel-icon pipeline (src/ui/pixel-icon.ts): a cached <img> rendered from a
+   PixelMap, standing in for every emoji the DOM UI used to lean on. Native
+   pixel dimensions × scale are set as explicit width/height attributes at
+   creation time; this class only handles crisp upscaling + inline layout. */
+.pixel-icon {
+  display: inline-block;
+  vertical-align: middle;
+  image-rendering: pixelated;
+  flex-shrink: 0;
+}
+
+/* Color / spacing token system --------------------------------------------
+   Every color, radius, gap, and button-padding value below should trace
+   back to one of these. Companion `-rgb` variables exist purely so call
+   sites can do `rgba(var(--x-rgb), alpha)` for glows/hover tints without
+   re-deriving the channel values by hand. */
+:root {
+  /* Backgrounds — warm cream/parchment family (was near-black green). Relative
+     lightness ORDER is preserved from the old dark family (bg-panel was the
+     darkest of the 3, bg-base the middle, bg-inset the lightest — verified,
+     not assumed), just recomputed light-on-warm instead of dark-on-warm:
+     bg-panel is still the "deepest" of the three (elevated card surfaces —
+     strip/settings/case-viewport/shop-adventure overlay fill), bg-base the
+     mid warm-cream page backdrop, bg-inset the palest (dividers/unselected
+     pills/disabled fills reading as a subtle highlight within a panel). */
+  --bg-base: #f7f0e0; /* html/body root */
+  --bg-panel: #eddfc0; /* strip, settings, item-picker, case-viewport, and
+                           (via rgba) the #shop/#adventure overlay fill */
+  --bg-panel-rgb: 237, 223, 192;
+  --bg-inset: #faf4e4; /* row dividers, unselected pills, disabled fills */
+
+  /* Borders — warm wood-brown (was dark green-gray) */
+  --border-divider: #b4914e; /* subtle header/footer rules on panels */
+  --border-disabled: #998766; /* disabled-control borders (was #3a4a3e/#3f5347) */
+  --border-disabled-rgb: 153, 135, 102;
+  --border-panel: var(--btn-bg); /* panel outline, e.g. #shop/.case-viewport */
+
+  /* Text hierarchy (3 intentional dim tiers + the bright "readable" tier).
+     Polarity flipped: dark warm brown tones for the new light panels (was
+     pale green-white for dark panels) — same 4-tier contrast relationship,
+     just dark-on-light instead of light-on-dark. */
+  --text-bright: #2a1e12; /* brightest/highest-emphasis: body default, button labels, card names */
+  --text-bright-rgb: 42, 30, 18;
+  --text-primary: #5c4a30; /* headers: SHOP/ADVENTURE, #stats */
+  --text-secondary: #726046; /* darkened for AA (was #8a7454, 3.4:1 on panel) */ /* sub-labels, inactive nav */
+  --text-disabled: #b3a080; /* disabled controls */
+  --text-on-accent: #1c1206; /* text sitting on a solid --accent-green fill */
+
+  /* Buttons — warm wood tone light enough for dark --text-bright labels to
+     read on top (was a dark green fill paired with pale text). */
+  --btn-bg: #d9ad6b;
+  --btn-bg-hover: #e3bd82;
+  --btn-gold-bg: #4a3a1a; /* prestige/update's premium gold-bordered fill —
+                              kept dark: its own --accent-gold-light text is
+                              independent of the --text-bright flip, so this
+                              stays a deliberately deeper "premium" plaque. */
+  --btn-gold-bg-hover: #5c4a24;
+
+  /* Accents */
+  --accent-green: #4a9e5c;
+  --accent-green-rgb: 74, 158, 92;
+  --accent-green-hover: #5cb56d; /* hover shade for a *solid* green fill */
+  --accent-gold: #815c07; /* primary gold: legendary rarity, update/prestige border —
+                              darkened from #ffd75e (lightness-only, same hue) so it
+                              reads as text/dots/borders on the new light panels;
+                              still pairs fine with --accent-gold-light on the
+                              deliberately-dark --btn-gold-bg buttons below. */
+  --accent-gold-rgb: 129, 92, 7;
+  --accent-gold-light: #ffe9a8; /* cream-gold text for the DARK --btn-gold-bg
+                                    buttons (#update/#prestige-btn) only — matches
+                                    canvas TOKEN_COLOR. Do not use on light-panel
+                                    text (see .battle-boon-title etc., which use
+                                    --accent-gold instead for that reason). */
+  --accent-wood: #945115; /* darker legible variant of canvas WOOD_COLOR (#f0a04a)
+                              — the DOM #shop-foot readout needed more contrast
+                              against the new light panel than the canvas
+                              floating-text color does against the game world. */
+  /* Crossroads Signpost plank (the re-skinned #settings board). Tokens rather
+     than literals specifically so sim.ts's contrast pass covers them — the
+     panel no longer sits on --bg-panel, so its text pairs are new and need
+     guarding like every other surface. --plank-bg-dark is the bottom of the
+     board's gradient, i.e. the worst case any text on it has to survive. */
+  --plank-bg: #e6d6b4;
+  --plank-bg-dark: #d8c49c;
+  --plank-ink: #241a10; /* carved lettering */
+  --plank-label: #4a3520; /* section labels on the board */
+  --plank-edge: #6e4c30; /* board frame / nail heads */
+  --notch-bg: #b2915f; /* budget plank face (gradient bottom) */
+  --danger: #d64545; /* matches canvas danger red (budget critical, battle MISS/KO) */
+  --danger-rgb: 214, 69, 69;
+  --warning: #e6a23c; /* matches canvas budget-bar amber state */
+  --status-adventuring: #4a90c2; /* team roster "away/exploring" status dot */
+
+  /* Rarity (one canonical hex per tier, used everywhere that tier appears).
+     common/rare/epic/legendary were lightness-adjusted only (hue/identity
+     unchanged) — at their original values they had ~1:1 to 2.6:1 contrast
+     against the new light panels (illegible); darkened until each reads
+     clearly as text/dots on cream while still visually reading as its own
+     rarity color (common = neutral warm gray, not tinted toward any rarity
+     hue; rare = still clearly teal; epic = still clearly purple; legendary
+     = still clearly gold/amber, just a richer "dark goldenrod" shade). */
+  --rarity-common: #6b5f4f;
+  --rarity-rare: #1c6e5f;
+  --rarity-epic: #7c3ed4;
+  --rarity-epic-rgb: 124, 62, 212;
+  --rarity-legendary: #815c07;
+
+  /* Radius: small controls vs. full overlay panels — 2 sizes, no in-between */
+  --radius-sm: 3px;
+  --radius-lg: 6px;
+
+  /* Gaps */
+  --gap-sm: 4px;
+  --gap-md: 6px;
+  --gap-lg: 8px;
+  --gap-xl: 12px; /* Team grid rows / Gacha hero row at the larger 560x480
+                      shop-takeover size, where --gap-lg reads a bit tight */
+
+  /* Button padding: standard row action / tight compact row / big battle tap target */
+  --pad-btn: 4px 10px;
+  --pad-btn-compact: 2px 6px;
+  --pad-btn-lg: 8px 10px;
+}
+
 html,
 body {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  background: #16211a;
+  background: var(--bg-base);
   font-family: ui-monospace, Menlo, monospace;
-  color: #cfe3d4;
+  color: var(--text-bright);
 }
 
 #panel {
@@ -38,35 +173,87 @@ body {
   width: 18px;
   height: 18px;
   border: none;
-  border-radius: 4px;
-  background: rgba(16, 26, 19, 0.55);
-  color: #cfe3d4;
+  border-radius: var(--radius-sm);
+  background: rgba(var(--bg-panel-rgb), 0.55);
+  color: var(--text-bright);
   font-size: 11px;
   line-height: 1;
   cursor: pointer;
 }
 
 #close:hover {
-  background: rgba(16, 26, 19, 0.85);
-  color: #ffffff;
+  background: rgba(var(--bg-panel-rgb), 0.85);
+  color: #1a1006; /* was #ffffff — bg-panel is now light, so hover-emphasis
+                      needs to go darker, not brighter */
+}
+
+#close.hidden {
+  display: none;
+}
+
+/* POV/Battle exit — deliberately bigger and labeled, not just a bare "✕"
+   in the corner: it's the one way back to normal view from a full-window
+   takeover, so it needs to be unmissable and easy to actually hit (a tiny
+   18px target right at the window edge is an easy near-miss). Positioned
+   inset from the literal corner so it reads clearly as its own control
+   rather than overlapping #close's old spot. Shares #close's "✕ [+ short
+   label]" icon language — see #shop-close/#adventure-close below for the
+   third leg of that same visual pattern. */
+#pov-exit,
+#battle-exit {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid rgba(var(--text-bright-rgb), 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--bg-panel-rgb), 0.75);
+  color: var(--text-bright);
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#pov-exit:hover,
+#battle-exit:hover {
+  background: rgba(var(--bg-panel-rgb), 0.95);
+  border-color: var(--accent-green);
+  color: #1a1006; /* was #ffffff — bg-panel is now light, so hover-emphasis
+                      needs to go darker, not brighter */
+}
+
+#pov-exit.hidden,
+#battle-exit.hidden {
+  display: none;
 }
 
 #strip {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--gap-lg);
   height: 26px;
   padding: 0 8px;
-  background: #101a13;
-  border-top: 1px solid #223528;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-divider);
   font-size: 11px;
+}
+
+#strip.hidden {
+  display: none;
 }
 
 #bar {
   width: 70px;
   height: 8px;
-  background: #223528;
-  border-radius: 2px;
+  background: var(--border-divider);
+  border-radius: var(--radius-sm);
   overflow: hidden;
   flex-shrink: 0;
 }
@@ -74,7 +261,7 @@ body {
 #bar-fill {
   height: 100%;
   width: 100%;
-  background: #4a9e5c;
+  background: var(--accent-green);
   transition: width 0.4s ease, background 0.4s ease;
 }
 
@@ -83,49 +270,71 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: #9dbca6;
+  color: var(--text-primary);
 }
 
 #gear {
   background: none;
   border: none;
-  color: #6f8f78;
+  color: var(--text-secondary);
   font-size: 13px;
   cursor: pointer;
   padding: 2px;
 }
 
 #gear:hover {
-  color: #cfe3d4;
+  color: var(--text-bright);
 }
 
-#travel {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  bottom: 34px;
-  background: #2c4433;
-  border: 1px solid #4a9e5c;
-  border-radius: 4px;
-  color: #cfe3d4;
-  font: inherit;
-  font-size: 11px;
-  padding: 4px 10px;
+/* Travel is the moored raft on the canvas now. This button survives as a
+   TRANSPARENT overlay parked over the raft (positioned each poll in main.ts):
+   the prop carries the visual affordance, but a canvas hit-box is invisible to
+   keyboard and assistive tech, so the real control stays in the DOM. It is
+   fully focusable and announces the same label the old pill showed. */
+/* Invisible, focusable stand-ins for canvas props, so keyboard and
+   screen-reader users can reach an interaction whose only visual is painted
+   pixels. Currently just #travel (see main.ts).
+
+   `pointer-events: none` is load-bearing. These sit at z-index 5 directly
+   over the prop they describe, so with pointer events on they SWALLOW the
+   mouse click meant for the canvas underneath. That was invisible while the
+   button's own handler happened to do the same thing as clicking the prop —
+   but the moment the prop's click opened a conversation instead of acting
+   immediately (the bridge-wright, see Game.openWrightDialogue), the button
+   silently bypassed the whole conversation and travelled directly.
+
+   Turning pointer events off costs nothing for the accessible path: keyboard
+   focus and Enter/Space activation are unaffected by pointer-events, so the
+   button still tabs, still announces its full label, and still works. Mouse
+   users now always reach the canvas and get the diegetic interaction. Each
+   modality gets the affordance that suits it. */
+.affordance {
+  position: fixed;
+  opacity: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: transparent;
   cursor: pointer;
-  white-space: nowrap;
+  pointer-events: none;
+  z-index: 5;
 }
 
-#travel:hover {
-  background: #3a5a44;
-}
-
-#travel:disabled {
-  border-color: #3a4a3e;
-  color: #6f8f78;
+.affordance:disabled {
   cursor: default;
 }
 
-#travel.hidden {
+/* Focus MUST stay visible even though the control is transparent — otherwise
+   a keyboard user tabs onto an element with no indication of where they are. */
+.affordance:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent-green);
+  outline-offset: 2px;
+  background: rgba(var(--accent-gold-rgb), 0.18);
+  border-radius: var(--radius-sm);
+}
+
+.affordance.hidden {
   display: none;
 }
 
@@ -133,20 +342,20 @@ body {
   position: absolute;
   left: 8px;
   top: 6px;
-  background: #2c4433;
-  border: 1px solid #e6b93c;
-  border-radius: 4px;
-  color: #ffe9a8;
+  background: var(--btn-gold-bg);
+  border: 1px solid var(--accent-gold);
+  border-radius: var(--radius-sm);
+  color: var(--accent-gold-light);
   font: inherit;
   font-size: 10px;
-  padding: 3px 8px;
+  padding: var(--pad-btn);
   cursor: pointer;
   white-space: nowrap;
   z-index: 10;
 }
 
 #update:hover:not(:disabled) {
-  background: #3a5a44;
+  background: var(--btn-gold-bg-hover);
 }
 
 #update.hidden {
@@ -157,23 +366,48 @@ body {
 #realusage-row {
   display: flex;
   align-items: center;
-  gap: 4px;
-  color: #9dbca6;
+  gap: var(--gap-sm);
+  color: var(--text-primary);
   cursor: pointer;
   white-space: nowrap;
 }
 
 #check-updates {
-  background: #2c4433;
+  background: var(--btn-bg);
   border: none;
-  border-radius: 3px;
-  color: #cfe3d4;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
   font: inherit;
-  padding: 2px 8px;
+  padding: var(--pad-btn);
   cursor: pointer;
 }
 
-#shop-btn {
+#check-updates:hover {
+  background: var(--btn-bg-hover);
+}
+
+#prestige-btn {
+  background: var(--btn-gold-bg);
+  border: 1px solid var(--accent-gold);
+  border-radius: var(--radius-sm);
+  color: var(--accent-gold-light);
+  font: inherit;
+  font-size: 10px;
+  padding: var(--pad-btn);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#prestige-btn:hover {
+  background: var(--btn-gold-bg-hover);
+}
+
+#prestige-btn.hidden {
+  display: none;
+}
+
+#shop-btn,
+#adventure-btn {
   background: none;
   border: none;
   font-size: 12px;
@@ -189,9 +423,9 @@ body {
   top: 26%;
   display: flex;
   flex-direction: column;
-  background: rgba(16, 26, 19, 0.96);
-  border: 1px solid #2c4433;
-  border-radius: 6px;
+  background: rgba(var(--bg-panel-rgb), 0.96);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-lg);
   font-size: 11px;
 }
 
@@ -199,27 +433,49 @@ body {
   display: none;
 }
 
+/* Shop takeover (main.ts's "shop" TakeoverMode): once the window grows to
+   the 560x480 takeover size, #shop claims a fixed, much larger absolute
+   share of it — `top: 26%` of a bigger window would still keep the panel
+   proportionally small, so this overrides it with a fixed 40px offset,
+   leaving just a sliver of live scene + #strip visible above (unlike POV/
+   Battle, Shop is a partial overlay, not an opaque takeover — see
+   syncTakeoverChrome()). */
+body.shop-takeover #shop {
+  top: 40px;
+}
+
 #shop-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 6px 8px;
-  border-bottom: 1px solid #223528;
-  color: #9dbca6;
+  border-bottom: 1px solid var(--border-divider);
+  color: var(--text-primary);
+}
+
+#shop-head > span:first-child,
+#adventure-head > span:first-child {
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--text-primary);
 }
 
 #shop-tabs button {
   background: none;
   border: none;
-  color: #6f8f78;
+  color: var(--text-secondary);
   font: inherit;
-  padding: 2px 6px;
+  padding: var(--pad-btn-compact);
   cursor: pointer;
 }
 
+#shop-tabs button:hover:not(.active) {
+  color: var(--text-bright);
+}
+
 #shop-tabs button.active {
-  color: #cfe3d4;
-  border-bottom: 1px solid #4a9e5c;
+  color: var(--text-bright);
+  border-bottom: 1px solid var(--accent-green);
 }
 
 #shop-list {
@@ -232,36 +488,155 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 4px 0;
-  border-bottom: 1px solid #1c2b20;
+  gap: var(--gap-lg);
+  padding: 4px 4px;
+  margin: 0 -4px;
+  border-bottom: 1px solid var(--bg-inset);
+  border-radius: var(--radius-sm);
+  transition: background-color 0.15s ease;
+}
+
+.shop-row:hover {
+  background: rgba(var(--text-bright-rgb), 0.04);
+}
+
+.shop-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.shop-info > div:first-child {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .shop-sub {
-  color: #6f8f78;
+  color: var(--text-secondary);
   font-size: 10px;
 }
 
 .shop-row button {
-  background: #2c4433;
+  background: var(--btn-bg);
   border: none;
-  border-radius: 3px;
-  color: #cfe3d4;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
   font: inherit;
   font-size: 10px;
-  padding: 3px 8px;
+  padding: var(--pad-btn);
   cursor: pointer;
   flex-shrink: 0;
 }
 
 .shop-row button:hover:not(:disabled) {
-  background: #3a5a44;
+  background: var(--btn-bg-hover);
 }
 
 .shop-row button:disabled {
-  background: #1c2b20;
-  color: #56705e;
+  background: var(--bg-inset);
+  color: var(--text-disabled);
   cursor: default;
+}
+
+/* Gnomes/Boosts/Provisions/Style card grid (Part C.5) — replaces the old
+   flat .shop-row list for these 4 lower-traffic tabs with a 2-column grid
+   of card tiles, matching the warm/parchment card language already
+   established by .team-tile/.team-detail (roster) and .gacha-machine-slot
+   (hero panel) rather than inventing a new visual style. Small item counts
+   (3-5 per tab) read comfortably as 2-3 grid rows instead of a sparse list. */
+.shop-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--gap-md);
+  margin-top: var(--gap-sm);
+}
+
+.shop-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--gap-sm);
+  padding: 8px 6px;
+  background: rgba(var(--text-bright-rgb), 0.03);
+  border: 1px solid var(--bg-inset);
+  border-radius: var(--radius-sm);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.shop-card:hover {
+  background: rgba(var(--text-bright-rgb), 0.06);
+}
+
+.shop-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+}
+
+.shop-card-name {
+  font-weight: 600;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.shop-card-sub {
+  /* Reserves room for a 2-line blurb so cards in the same grid row still
+     line up even when one item's sub-text is longer than its neighbor's —
+     grid's default row-stretch already equalizes card height, this just
+     keeps the button from jumping around before that stretch kicks in. */
+  min-height: 2.4em;
+}
+
+.shop-card-btn {
+  /* Pins the button to the card's bottom edge regardless of how tall the
+     icon/name/sub-text above it are — .shop-card is a column flexbox
+     stretched to the grid row's full height, so `auto` margin here eats
+     all the remaining space above the button. */
+  margin-top: auto;
+  width: 100%;
+  background: var(--btn-bg);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font: inherit;
+  font-size: 10px;
+  padding: var(--pad-btn);
+  cursor: pointer;
+}
+
+.shop-card-btn:hover:not(:disabled) {
+  background: var(--btn-bg-hover);
+}
+
+.shop-card-btn:disabled {
+  background: var(--bg-inset);
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+/* Owned/equipped/locked state, surfaced on the card itself (border + tint)
+   rather than only readable from the button's text — mirrors .team-tile's
+   own border/background state language above. */
+.shop-card.owned {
+  border-color: var(--accent-green);
+  background: rgba(var(--accent-green-rgb), 0.08);
+}
+
+.shop-card.equipped {
+  border-color: var(--accent-gold);
+  background: rgba(var(--accent-gold-rgb), 0.1);
+  box-shadow: 0 0 6px rgba(var(--accent-gold-rgb), 0.35);
+}
+
+.shop-card.locked {
+  opacity: 0.6;
 }
 
 #shop-foot {
@@ -269,20 +644,36 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 6px 8px;
-  border-top: 1px solid #223528;
-  color: #f0a04a;
+  border-top: 1px solid var(--border-divider);
+  color: var(--accent-wood);
+}
+
+.shop-currency-icon {
+  margin-right: 2px;
+}
+
+.shop-currency-icon:not(:first-child) {
+  margin-left: 4px;
 }
 
 #shop-foot button {
-  background: #2c4433;
+  background: var(--btn-bg);
   border: none;
-  border-radius: 3px;
-  color: #cfe3d4;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
   font: inherit;
-  padding: 2px 8px;
+  padding: var(--pad-btn);
   cursor: pointer;
 }
 
+#shop-foot button:hover {
+  background: var(--btn-bg-hover);
+}
+
+/* Settings, re-skinned as the board nailed to the Crossroads Signpost: a
+   wood-grain plank with each control reading as something carved into or
+   fastened onto it, rather than a web form drawer. The grain is a repeating
+   gradient rather than an image, matching the no-binary-assets rule. */
 #settings {
   position: absolute;
   right: 6px;
@@ -291,13 +682,154 @@ body {
   flex-wrap: wrap;
   justify-content: flex-end;
   align-items: center;
-  gap: 6px;
+  gap: var(--gap-md);
   max-width: 260px;
-  background: #101a13;
-  border: 1px solid #223528;
-  border-radius: 4px;
-  padding: 6px 8px;
+  background:
+    repeating-linear-gradient(
+      180deg,
+      rgba(110, 76, 48, 0.1) 0 3px,
+      rgba(110, 76, 48, 0) 3px 7px
+    ),
+    linear-gradient(180deg, var(--plank-bg), var(--plank-bg-dark));
+  border: 2px solid var(--plank-edge);
+  color: var(--plank-ink);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
   font-size: 11px;
+  box-shadow: 0 3px 6px rgba(0, 0, 0, 0.35);
+}
+
+/* Nail heads at the plank's corners. */
+#settings::before,
+#settings::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--plank-label);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+#settings::before {
+  left: 5px;
+}
+
+#settings::after {
+  right: 5px;
+}
+
+.sign-plank-label {
+  width: 100%;
+  text-align: right;
+  color: var(--plank-label);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+/* Budget notch board: ◀ [carved value] ▶ */
+#budget-board {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#budget-board button {
+  padding: 2px 6px;
+  line-height: 1;
+}
+
+#budget-plank {
+  min-width: 56px;
+  text-align: center;
+  padding: 3px 6px;
+  background: linear-gradient(180deg, #c8ab7c, var(--notch-bg));
+  border: 1px solid var(--plank-label);
+  border-radius: 2px;
+  color: var(--plank-ink);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+/* A value that isn't on the notch ladder — shown honestly rather than
+   silently rounded onto the nearest peg. */
+#budget-plank.off-notch {
+  border-style: dashed;
+}
+
+/* Every button on the board reads as a carved wooden plaque, so the panel is
+   one material rather than a mix of themed and browser-default controls. */
+#settings button {
+  background: linear-gradient(180deg, #d3b587, var(--notch-bg));
+  border: 1px solid var(--plank-label);
+  border-radius: 2px;
+  color: var(--plank-ink);
+  font: inherit;
+  padding: var(--pad-btn);
+  cursor: pointer;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+#settings button:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+#settings button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+/* Checkboxes become carved toggles: a peg socket in the plank that takes a
+   burned-in mark when set. The real <input> is kept (not replaced by a div)
+   so keyboard focus, Space to toggle, and screen-reader state all still work
+   — only its painting is overridden. */
+#settings input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 13px;
+  height: 13px;
+  margin: 0 4px 0 0;
+  vertical-align: -2px;
+  background: linear-gradient(180deg, #9c7d4f, #b2915f);
+  border: 1px solid var(--plank-label);
+  border-radius: 2px;
+  position: relative;
+  cursor: pointer;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+#settings input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  background: var(--plank-ink);
+  border-radius: 1px;
+}
+
+#settings input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent-green);
+  outline-offset: 1px;
+}
+
+#budget-exact-row {
+  display: flex;
+  width: 100%;
+  justify-content: flex-end;
+}
+
+#budget-exact-row input {
+  font: inherit;
+  padding: 2px 4px;
+  background: #efe0bf;
+  border: 1px solid var(--plank-label);
+  border-radius: 2px;
+  color: var(--plank-ink);
+  width: 110px;
+}
+
+#budget-exact-row.hidden {
+  display: none;
 }
 
 #settings.hidden {
@@ -306,24 +838,2746 @@ body {
 
 #budget-input {
   width: 90px;
-  background: #16211a;
-  border: 1px solid #2c4433;
-  border-radius: 3px;
-  color: #cfe3d4;
+  background: var(--bg-base);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
   font: inherit;
   padding: 2px 4px;
 }
 
 #budget-save {
-  background: #2c4433;
+  background: var(--btn-bg);
   border: none;
-  border-radius: 3px;
-  color: #cfe3d4;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
   font: inherit;
-  padding: 2px 8px;
+  padding: var(--pad-btn);
   cursor: pointer;
 }
 
 #budget-save:hover {
-  background: #3a5a44;
+  background: var(--btn-bg-hover);
+}
+
+/* Team + Gacha panels ------------------------------------------------- */
+
+.gacha-nav {
+  display: flex;
+  gap: var(--gap-sm);
+  padding: 4px 0;
+  flex-wrap: wrap;
+}
+
+.gacha-nav button {
+  background: var(--bg-inset);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 10px;
+  padding: var(--pad-btn-compact);
+  cursor: pointer;
+}
+
+.gacha-nav button:hover:not(:disabled):not(.active) {
+  background: var(--btn-bg-hover);
+  color: var(--text-bright);
+}
+
+.gacha-nav button.active {
+  background: var(--btn-bg);
+  color: var(--text-bright);
+}
+
+.gacha-nav button:disabled {
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+/* Gacha hero (Part C.3, since widened) — a single column: the Part E
+   machine illustration on top (see .gacha-machine-slot below), full-width
+   so it's the dominant visual, then the .gacha-control-bar (pity/odds text
+   + Pull ×1/×10 buttons, and — during a reveal — the "Pull i/10" progress
+   readout + Skip button) stacked underneath it instead of beside it. */
+.gacha-hero {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+  margin: 4px 0;
+}
+
+/* Part E gacha machine illustration slot — ui/gacha.ts mounts a
+   .gacha-machine-frame (the actual art + glass-window overlay) into this
+   container. Capped + centered (rather than filling the hero column
+   outright) so the machine reads as a big centerpiece without stretching
+   edge-to-edge at wide window sizes; .gacha-machine-frame's own
+   aspect-ratio:104/92 (untouched) keeps the illustration from distorting as
+   this width changes. min-height (not a fixed height) lets the box grow
+   downward during a reveal, when the case-opening reel's landed-result
+   caption (.case-reveal) and Skip button render below the machine art
+   itself — see ui/gacha.ts's revealSingle/revealTen, which now mount the
+   reel directly behind the machine's glass window instead of tearing down
+   and rebuilding this whole panel per pull. Deliberately no overflow:hidden
+   here (or on .gacha-machine-frame/.gacha-machine-window below) for that
+   same reason — .case-viewport's own overflow:hidden already clips the
+   horizontal card strip; this level only needs to let taller content grow. */
+.gacha-machine-slot {
+  width: 100%;
+  max-width: 280px;
+  margin: 0 auto;
+  min-height: 140px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-sm);
+}
+
+/* Fixed-aspect-ratio box matching gacha-machine.ts's native MACHINE_W x
+   MACHINE_H (104x92) — the machine <img> and the reel-hosting glass-window
+   overlay are both absolutely positioned children of this box, so their
+   percentage-based geometry always agrees regardless of on-screen scale. */
+.gacha-machine-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 104 / 92;
+  flex-shrink: 0;
+}
+
+/* The rendered machine illustration (a cached <img>, see ui/pixel-icon.ts's
+   composite pipeline + scene/gacha-machine.ts's drawMachine) — stretched to
+   fill the frame via CSS (image-rendering:pixelated keeps it crisp), NOT
+   sized via its own width/height attributes, so it scales with the frame's
+   own responsive aspect-ratio box. pointer-events:none + stacked on top (by
+   DOM order, drawn after .gacha-machine-window below) so its own drawn
+   glass-window pixels are literally transparent right where the reel sits
+   underneath, and clicks/scroll pass straight through to the reel. */
+.gacha-machine-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Percentage-based overlay exactly matching scene/gacha-machine.ts's
+   MACHINE_WINDOW_PCT (10/104, 21/92, 84/104, 47/92) — the reel's
+   .case-opening/.case-viewport mounts directly into this element (see
+   ui/gacha.ts), so it always lines up with the machine art's own undrawn
+   glass region regardless of how large .gacha-machine-slot ever renders. */
+.gacha-machine-window {
+  position: absolute;
+  left: 9.6154%;
+  top: 22.8261%;
+  width: 80.7692%;
+  height: 51.087%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Pull-interaction polish (Part E.5): a quick ~150ms "lever pulled" tactile
+   micro-animation on the Pull button itself, toggled right at click time,
+   before the existing revealSingle/revealTen flow takes over. */
+@keyframes machine-lever-pulse {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(0.94) translateY(1px);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.machine-lever-pulse {
+  animation: machine-lever-pulse 150ms ease-out;
+}
+
+/* Landing-moment flourish (Part E.5): a brief glow toggled on the whole
+   machine slot, gated on the reel's own existing `finished` promise (no new
+   timing logic) — reads as the dispense tray lighting up as the prize
+   lands. */
+@keyframes gacha-tray-glow {
+  0% {
+    box-shadow: 0 0 0 rgba(var(--accent-gold-rgb), 0);
+  }
+  40% {
+    box-shadow: 0 0 12px 2px rgba(var(--accent-gold-rgb), 0.65);
+  }
+  100% {
+    box-shadow: 0 0 0 rgba(var(--accent-gold-rgb), 0);
+  }
+}
+
+.gacha-tray-glow {
+  animation: gacha-tray-glow 500ms ease-out;
+}
+
+/* Full-width control bar underneath the machine — pity/odds rows, then the
+   Pull ×1/×10 buttons (see .gacha-pull-buttons below). Also hosts the
+   "Pull i/10" progress readout and Skip button during a reveal (see
+   ui/gacha.ts's currentControlBar/revealSingle/revealTen) — previously
+   those were appended as standalone #shop-list children below the whole
+   .gacha-hero, which visibly reflowed the panel between idle and reveal
+   states; mounting them here instead keeps the bar's footprint stable. */
+.gacha-control-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+}
+
+.gacha-control-bar .shop-row {
+  border-bottom: none;
+  margin: 0;
+  padding: 2px 0;
+}
+
+/* Side-by-side, each taking half the full control-bar width — was a
+   sidebar-width stacked column when the machine slot was narrow; now that
+   the control bar spans the full hero width, a row reads better than two
+   very wide stacked pills. */
+.gacha-pull-buttons {
+  display: flex;
+  flex-direction: row;
+  gap: var(--gap-sm);
+  margin-top: var(--gap-sm);
+}
+
+.gacha-pull-buttons button.btn-primary {
+  flex: 1;
+  padding: var(--pad-btn-lg);
+}
+
+.rarity-common {
+  color: var(--rarity-common);
+}
+
+.rarity-rare {
+  color: var(--rarity-rare);
+}
+
+.rarity-epic {
+  color: var(--rarity-epic);
+}
+
+.rarity-legendary {
+  color: var(--rarity-legendary);
+}
+
+/* Rarity dot: a small colored-shape badge that sits next to the existing
+   .rarity-* colored TEXT wherever a rarity tier is shown (team roster,
+   gacha reveal cards, item picker, chest reveal) — deliberately a plain CSS
+   circle keyed off the same --rarity-* tokens rather than a 4th emoji
+   glyph, so the badge and its text can never visually drift out of sync
+   the way four hand-picked emoji might. Combine with a `rarity-{tier}`
+   class for the fill color, e.g. `class="rarity-dot rarity-epic"`. */
+.rarity-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 4px;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
+.rarity-dot.rarity-common {
+  background: var(--rarity-common);
+}
+
+.rarity-dot.rarity-rare {
+  background: var(--rarity-rare);
+}
+
+.rarity-dot.rarity-epic {
+  background: var(--rarity-epic);
+  box-shadow: 0 0 4px rgba(var(--rarity-epic-rgb), 0.6);
+}
+
+.rarity-dot.rarity-legendary {
+  background: var(--rarity-legendary);
+  box-shadow: 0 0 4px rgba(var(--accent-gold-rgb), 0.6);
+}
+
+/* Tighter dot for the 40px-wide case-opening reel card (see .case-card) —
+   the roomier 7px default badge crowds out too much of the already-tiny
+   label at that width. */
+.case-card-label .rarity-dot {
+  width: 5px;
+  height: 5px;
+  margin-right: 3px;
+}
+
+/* Status dot: same shape/mechanism as .rarity-dot above, replacing the old
+   STATUS_ICON emoji (🟢/🩹/🧭) on the team roster's at-a-glance scan.
+   available mirrors the hp-bar's own "fine" green, resting mirrors its
+   warning-amber "hurt" read, adventuring is a new "away/exploring" blue. */
+.status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 4px;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
+.status-dot.available {
+  background: var(--accent-green);
+}
+
+.status-dot.resting {
+  background: var(--warning);
+}
+
+.status-dot.adventuring {
+  background: var(--status-adventuring);
+}
+
+/* Two-pane barracks layout (Part C.2) — a narrow scrollable roster column
+   of small "slot" tiles on the left, and ONE detail panel for whichever
+   member is selected on the right. Replaces the old flat 2-column grid of
+   always-expanded .team-card rows. The Heal-All banner (renderHealRow)
+   stays OUTSIDE this layout, full-width, above it — it's an action, not a
+   roster entry. */
+.team-layout {
+  display: flex;
+  gap: var(--gap-lg);
+  margin-top: var(--gap-md);
+  align-items: flex-start;
+}
+
+/* Roster column: just wide enough for a tile plus a little padding.
+   Rosters have no upper bound (every gacha worker pull pushes a new
+   member — see gacha.ts's save.team.push, no MAX_WOODCUTTERS-style cap),
+   so this scrolls independently of the detail panel instead of growing the
+   whole panel past the 560x480 shop-takeover window. */
+.team-roster {
+  flex: 0 0 60px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.team-tile {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  background: rgba(var(--text-bright-rgb), 0.03);
+  border: 1px solid var(--bg-inset);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.team-tile:hover {
+  background: rgba(var(--text-bright-rgb), 0.06);
+}
+
+/* Selected-tile state — same classList.toggle("selected", ...) idiom the
+   rest of the UI uses for a single-choice highlight (mirrors .team-slots
+   button.active's toggle("active", ...) pattern just below). */
+.team-tile.selected {
+  border-color: var(--accent-green);
+  background: rgba(var(--text-bright-rgb), 0.08);
+}
+
+/* Same persistent epic/legendary chrome convention as .team-card-epic/
+   -legendary below, just a left-edge accent sized for the compact tile. */
+.team-tile-epic {
+  border-left: 2px solid var(--rarity-epic);
+}
+
+.team-tile-legendary {
+  border-left: 2px solid var(--accent-gold);
+}
+
+.team-tile-portrait {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Small level badge, top-left corner of the tile. */
+.team-tile-level {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 1px 3px;
+  background: var(--btn-bg);
+  color: var(--text-bright);
+  border-radius: var(--radius-sm);
+}
+
+/* .status-dot, corner-pinned instead of inline next to the name (there's no
+   name on the compact tile). */
+.team-tile-status {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  margin-right: 0;
+}
+
+/* Compact stacked ▲/▼ (reuses .team-reorder's flex/gap + button styling
+   below), corner-pinned so reordering doesn't require selecting the tile
+   first. */
+.team-tile-reorder {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.team-tile-reorder button {
+  font-size: 7px;
+  line-height: 1;
+  padding: 1px 2px;
+}
+
+/* Detail panel: the one selected member's full card — larger portrait,
+   name/level/rarity, HP bar, atk/hp line, equip-slot chips, and (when a
+   slot is toggled open) the item picker + level-up button. Takes the rest
+   of the layout's width since the slot chips and item-picker rows need
+   real room. */
+.team-detail {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  padding: 8px;
+  background: rgba(var(--text-bright-rgb), 0.03);
+  border: 1px solid var(--bg-inset);
+  border-radius: var(--radius-sm);
+}
+
+.team-detail-head {
+  font-size: 12px;
+}
+
+.team-detail-portrait {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 0;
+}
+
+/* Persistent (subtler than the one-time gacha pull-reveal celebration)
+   chrome for epic/legendary team members, so an owned rare pull keeps
+   reading as special after the reveal animation ends. */
+.team-card-epic {
+  border-left: 2px solid var(--rarity-epic);
+  padding-left: 6px;
+}
+
+.team-card-epic .team-card-head > div:first-child {
+  text-shadow: 0 0 5px rgba(var(--rarity-epic-rgb), 0.5);
+}
+
+.team-card-legendary {
+  border-left: 2px solid var(--accent-gold);
+  padding-left: 6px;
+}
+
+.team-card-legendary .team-card-head > div:first-child {
+  text-shadow: 0 0 6px rgba(var(--accent-gold-rgb), 0.6);
+}
+
+.team-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+}
+
+.team-card-head > div:first-child {
+  font-weight: 600;
+}
+
+.team-reorder {
+  display: flex;
+  gap: var(--gap-sm);
+}
+
+.team-reorder button {
+  background: var(--btn-bg);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font-size: 9px;
+  padding: var(--pad-btn-compact);
+  cursor: pointer;
+}
+
+.team-reorder button:hover:not(:disabled) {
+  background: var(--btn-bg-hover);
+}
+
+.team-reorder button:disabled {
+  background: var(--bg-inset);
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+.hp-bar {
+  height: 4px;
+  background: var(--bg-inset);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  margin: 3px 0;
+}
+
+.hp-bar-fill {
+  height: 100%;
+  background: var(--accent-green);
+  transition: width 0.3s ease-out, background-color 0.3s ease-out;
+}
+
+/* Danger-threshold coloring, mirroring main.ts's paintBar() red/amber/green
+   budget-meter language (same --danger/--warning tokens, same "you should
+   worry" read) — toggled by JS alongside each bar's style.width assignment
+   in team.ts/adventure.ts/battle.ts, since pure CSS can't branch on an
+   inline width value. */
+.hp-bar-fill.low {
+  background: var(--warning);
+}
+
+.hp-bar-fill.critical {
+  background: var(--danger);
+  animation: hp-critical-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes hp-critical-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.team-actions,
+.team-slots {
+  display: flex;
+  gap: var(--gap-sm);
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
+
+.team-actions button,
+.team-slots button {
+  background: var(--btn-bg);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font: inherit;
+  font-size: 10px;
+  padding: var(--pad-btn-compact);
+  cursor: pointer;
+}
+
+.team-actions button:hover:not(:disabled),
+.team-slots button:hover {
+  background: var(--btn-bg-hover);
+}
+
+.team-actions button:disabled {
+  background: var(--bg-inset);
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+/* Bigger padding than the shared .team-actions/.team-slots rule above, since
+   the chip's icon now renders at 3x scale (24x24) and needs breathing room
+   instead of the tight 2px/6px text-button padding. */
+.team-slots button {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+}
+
+.team-slots button.active {
+  background: var(--accent-green);
+  color: var(--text-on-accent);
+}
+
+.item-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: var(--bg-panel);
+  border-radius: var(--radius-sm);
+}
+
+.item-picker button {
+  display: flex;
+  align-items: center;
+  background: var(--btn-bg);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font: inherit;
+  font-size: 10px;
+  padding: var(--pad-btn-compact);
+  cursor: pointer;
+  text-align: left;
+}
+
+/* Weapon/charm preview prepended to each item-picker row (src/ui/team.ts's
+   renderItemPicker) — a little breathing room before the rarity dot/text so
+   the tiny pixel art doesn't crowd directly against them. */
+.item-picker-preview {
+  margin-right: 6px;
+}
+
+.item-picker button:hover {
+  background: var(--btn-bg-hover);
+}
+
+/* Flags an owned item's picker entry as currently equipped on a DIFFERENT
+   team member — clicking it still works (Game.equipItem now safely
+   transfers gear off whoever had it, see unequipInstanceEverywhere), this
+   is purely so the player sees the swap coming instead of it happening
+   silently. */
+.item-picker-worn-tag {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+/* Adventure overlay ----------------------------------------------------- */
+
+#adventure {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 30px;
+  top: 26%;
+  display: flex;
+  flex-direction: column;
+  background: rgba(var(--bg-panel-rgb), 0.96);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-lg);
+  font-size: 11px;
+}
+
+#adventure.hidden {
+  display: none;
+}
+
+#adventure-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-divider);
+  color: var(--text-primary);
+}
+
+#adventure-head button {
+  background: var(--btn-bg);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font: inherit;
+  padding: var(--pad-btn);
+  cursor: pointer;
+}
+
+#adventure-head button:hover {
+  background: var(--btn-bg-hover);
+}
+
+#adventure-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+}
+
+.adv-world-row,
+.adv-carry {
+  display: flex;
+  gap: var(--gap-sm);
+  flex-wrap: wrap;
+}
+
+.adv-world-row button,
+.adv-carry button,
+.adv-muster > button,
+.adv-field > button {
+  background: var(--btn-bg);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font: inherit;
+  font-size: 10px;
+  padding: var(--pad-btn);
+  cursor: pointer;
+}
+
+.adv-world-row button:hover:not(:disabled),
+.adv-carry button:hover:not(:disabled),
+.adv-muster > button:hover:not(:disabled),
+.adv-field > button:hover:not(:disabled) {
+  background: var(--btn-bg-hover);
+}
+
+.adv-world-row button.active,
+.adv-carry button.active {
+  background: var(--accent-green);
+  color: var(--text-on-accent);
+}
+
+.adv-world-row button:disabled,
+.adv-carry button:disabled,
+.adv-muster > button:disabled {
+  background: var(--bg-inset);
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+/* Heal-All shortcut, emphasized when the roster is fully out of available
+ * members (0 selectable on Muster) — the one case where healing isn't
+ * optional, it's the only path back into the game. */
+.adv-muster > button.cta {
+  background: var(--accent-green);
+  color: var(--text-on-accent);
+}
+
+.adv-muster > button.cta:hover:not(:disabled) {
+  background: var(--accent-green-hover);
+}
+
+.adv-world-row button.hidden {
+  display: none;
+}
+
+.adv-roster {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+}
+
+.adv-roster-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  cursor: default;
+  border-radius: var(--radius-sm);
+  transition: background-color 0.15s ease;
+}
+
+.adv-roster-row:hover {
+  background: rgba(var(--text-bright-rgb), 0.04);
+}
+
+/* .adv-roster-row is now only used by the Field screen's read-only party
+   display (syncParty/renderField in ui/adventure.ts) — Muster's party
+   picker is the formation UI below instead of a checkbox list, so this no
+   longer needs its own interactive/pointer-cursor variant. */
+.adv-roster-row .hp-bar {
+  flex: 1;
+  margin: 0;
+}
+
+/* Muster formation: a campsite clearing at night — 3 workers seated on logs
+   around a fire (front sits nearest/largest, the two back seats smaller and
+   dimmer, the "further away" depth cue). Order here is purely visual — the
+   front-first turn-order semantics live in ui/adventure.ts's EMBARK_ORDER,
+   not in this layout. Dark radial-gradient clearing (independent of the
+   light/dark viewer theme — this is a fixed "night scene", same reasoning
+   as the pixel-art canvas itself never re-themes) makes the campfire glow
+   and the lit portraits actually read as firelit instead of just sitting on
+   a plain panel. */
+.adv-formation {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--gap-md);
+  padding: 14px 0 8px;
+  border-radius: var(--radius-lg);
+  background: radial-gradient(ellipse at 50% 68%, #2a2115 0%, #14120c 62%, #0c0b08 100%);
+  overflow: hidden;
+}
+
+.adv-formation.hidden {
+  display: none;
+}
+
+/* Decorative campfire — CSS-only (gradients + a flicker animation, no image
+   assets). A real flex item BETWEEN .adv-formation-back and
+   .adv-formation-front (see ui/adventure.ts), sized to hold the flame
+   clear of both rows, with its glow/logs/flame children positioned
+   relative to its own box — never behind either seat's log, at any
+   window size. */
+.adv-campfire {
+  position: relative;
+  z-index: 0;
+  width: 100%;
+  height: 26px;
+  flex: 0 0 auto;
+  margin: -4px 0;
+}
+
+.adv-campfire-glow {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 130px;
+  height: 90px;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(ellipse, rgba(232, 150, 60, 0.45) 0%, rgba(232, 150, 60, 0.14) 45%, transparent 75%);
+  animation: campfire-pulse 2.4s ease-in-out infinite;
+}
+
+.adv-campfire-logs {
+  position: absolute;
+  left: 50%;
+  bottom: 4px;
+  width: 22px;
+  height: 8px;
+  transform: translateX(-50%);
+}
+
+.adv-campfire-logs::before,
+.adv-campfire-logs::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 3px;
+  width: 22px;
+  height: 5px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, #6b4423, #4a2e17);
+}
+
+.adv-campfire-logs::before {
+  transform: rotate(18deg);
+}
+
+.adv-campfire-logs::after {
+  transform: rotate(-18deg);
+}
+
+.adv-campfire-flame {
+  position: absolute;
+  left: 50%;
+  bottom: 3px;
+  width: 9px;
+  height: 15px;
+  transform: translateX(-50%);
+  border-radius: 50% 50% 50% 50% / 65% 65% 35% 35%;
+  background: linear-gradient(0deg, #d9642c 0%, #e8b84b 55%, #ffe9a8 100%);
+  filter: blur(0.3px);
+  transform-origin: 50% 100%;
+  animation: campfire-flicker 0.5s ease-in-out infinite alternate;
+}
+
+.adv-campfire-flame-2 {
+  width: 6px;
+  height: 10px;
+  opacity: 0.85;
+  animation-duration: 0.4s;
+  animation-delay: 0.15s;
+}
+
+@keyframes campfire-pulse {
+  0%,
+  100% {
+    opacity: 0.85;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.08);
+  }
+}
+
+@keyframes campfire-flicker {
+  0% {
+    transform: translateX(-50%) scaleY(1) skewX(0deg);
+  }
+  100% {
+    transform: translateX(-50%) scaleY(1.15) skewX(-4deg);
+  }
+}
+
+.adv-formation-back {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 28px;
+}
+
+.adv-formation-front {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: center;
+}
+
+.adv-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.adv-slot.dragging {
+  opacity: 0.4;
+}
+
+/* The "log" itself: a squat rounded bar (not a box) with a warm wood
+   gradient + faint horizontal grain lines, seat-shaped rather than
+   card-shaped. The portrait is pulled up on top of it via negative margin
+   in the portrait-wrap sizing below, so a worker visually SITS on the log
+   instead of floating inside a bordered rectangle. */
+.adv-slot-face {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 6px 5px;
+  border: 1px solid #3a2614;
+  border-radius: 999px / 60%;
+  background: repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.12) 0px,
+      rgba(0, 0, 0, 0.12) 1px,
+      transparent 1px,
+      transparent 4px
+    ),
+    linear-gradient(180deg, #7a5230 0%, #5c3a1e 100%);
+  box-shadow: 0 3px 4px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.adv-slot-face:hover {
+  transform: translateY(-1px);
+}
+
+/* Drop target while a drag is over this log. */
+.adv-slot-face.drag-over {
+  box-shadow: 0 0 0 2px var(--accent-green), 0 3px 4px rgba(0, 0, 0, 0.5);
+}
+
+/* Filled slots get a rarity-colored ring, same idiom .team-tile-epic/
+   -legendary use elsewhere, just a full ring since these are standalone
+   seats rather than rows in a list. */
+.adv-slot.filled .adv-slot-face {
+  box-shadow: 0 0 0 2px var(--rarity-common), 0 3px 4px rgba(0, 0, 0, 0.5);
+}
+
+.adv-slot.filled.rarity-rare .adv-slot-face {
+  box-shadow: 0 0 0 2px var(--rarity-rare), 0 3px 4px rgba(0, 0, 0, 0.5);
+}
+
+.adv-slot.filled.rarity-epic .adv-slot-face {
+  box-shadow: 0 0 0 2px var(--rarity-epic), 0 0 6px rgba(var(--rarity-epic-rgb), 0.5);
+}
+
+.adv-slot.filled.rarity-legendary .adv-slot-face {
+  box-shadow: 0 0 0 2px var(--accent-gold), 0 0 8px rgba(var(--accent-gold-rgb), 0.55);
+}
+
+/* Targeted state — the slot the next bottom-tray card click (or drop) will
+   assign into. Same "active selection" green the rest of the UI uses.
+   !important since a filled epic/legendary seat's rarity ring above is more
+   specific (3 class selectors vs 2) and would otherwise win while targeted. */
+.adv-slot.targeted .adv-slot-face {
+  box-shadow: 0 0 0 2px var(--accent-green) !important;
+}
+
+/* Always-visible remove badge — corner-pinned "×" on a filled seat,
+   independent of targeting. Only shown once filled; clicking it clears the
+   seat directly (e.stopPropagation() in the JS click handler so it doesn't
+   also toggle the seat's targeted state). */
+.adv-slot-remove {
+  display: none;
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--danger);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.adv-slot-remove:hover {
+  filter: brightness(1.15);
+}
+
+.adv-slot.filled .adv-slot-remove {
+  display: flex;
+}
+
+/* Backpack shortcut — opposite corner from the remove badge, same
+   always-visible-once-filled convention. Opens the seated worker's
+   equipment (see ui/adventure.ts's openBackpack). */
+.adv-slot-backpack {
+  display: none;
+  position: absolute;
+  top: -5px;
+  left: -5px;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+  font-size: 10px;
+  background: var(--btn-bg);
+  border: 1px solid var(--border-panel);
+  border-radius: 50%;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.adv-slot-backpack:hover {
+  background: var(--btn-bg-hover);
+}
+
+.adv-slot.filled .adv-slot-backpack {
+  display: flex;
+}
+
+/* Back seats (Back-Left / Back-Right): smaller log, dimmer, and a soft
+   drop-shadow under the portrait — the "further away" depth cue. */
+.adv-slot-backLeft .adv-slot-face,
+.adv-slot-backRight .adv-slot-face {
+  width: 52px;
+}
+
+.adv-slot-backLeft .adv-slot-portrait,
+.adv-slot-backRight .adv-slot-portrait {
+  height: 34px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+/* Front seat: the prominent one, right by the fire — wider log, taller
+   portrait reservation, no dimming, a stronger shadow so it visually pops
+   toward the viewer instead of just sitting flat. */
+.adv-slot-front .adv-slot-face {
+  width: 72px;
+}
+
+.adv-slot-front .adv-slot-portrait {
+  height: 52px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.adv-slot-portrait-img {
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.55)) brightness(0.88);
+  opacity: 0.9;
+}
+
+.adv-slot-portrait-img-front {
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.5));
+  opacity: 1;
+}
+
+.adv-slot-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px dashed var(--text-disabled);
+  border-radius: 50%;
+  color: var(--text-disabled);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.adv-slot-front .adv-slot-placeholder {
+  width: 30px;
+  height: 30px;
+  font-size: 16px;
+}
+
+.adv-slot-name {
+  font-size: 9px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* Overrides the generic .rarity-* text-color rules (meant for light panel
+   backgrounds elsewhere) at higher specificity — sitting on a warm brown
+   log against a near-black clearing needs one consistent light color
+   regardless of rarity; rarity is already communicated by the seat's own
+   colored ring/glow (see .adv-slot.filled.rarity-* above), not by text hue
+   here. */
+.adv-slot-face .adv-slot-name {
+  color: #f2e6d0;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+}
+
+.adv-slot-face .adv-slot-name-empty {
+  color: rgba(242, 230, 208, 0.55);
+  text-shadow: none;
+}
+
+/* Bottom roster tray — replaces the old per-slot .adv-slot-picker dropdown
+   entirely. A persistent horizontal row of larger member cards (portrait +
+   name/level/rarity/status + HP bar + atk/hp line), one per roster member
+   currently eligible to be assigned into whichever formation slot is
+   targeted (see .adv-slot.targeted above). Scrolls horizontally rather than
+   wrapping so the row never pushes the rest of the muster screen around as
+   the roster grows. */
+.adv-tray {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gap-sm);
+  overflow-x: auto;
+  padding: 2px 2px 6px;
+}
+
+.adv-tray.hidden {
+  display: none;
+}
+
+.adv-tray-empty {
+  padding: 4px 0;
+}
+
+.adv-tray-empty.hidden {
+  display: none;
+}
+
+/* Same card language as .team-detail (team.ts's roster detail panel), just
+   sized to sit shoulder-to-shoulder in a horizontal scroller instead of
+   filling a whole pane. */
+.adv-tray-card {
+  flex: 0 0 auto;
+  width: 96px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  padding: 6px;
+  background: rgba(var(--text-bright-rgb), 0.03);
+  border: 1px solid var(--bg-inset);
+  border-radius: var(--radius-sm);
+  cursor: grab;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.adv-tray-card.dragging {
+  opacity: 0.4;
+}
+
+.adv-tray-card:hover {
+  background: rgba(var(--text-bright-rgb), 0.07);
+  border-color: var(--accent-green);
+}
+
+.adv-tray-card-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 9px;
+}
+
+.adv-tray-card-head > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.adv-tray-card-portrait {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 0;
+}
+
+/* Gacha case-opening reveal ----------------------------------------------- */
+
+.case-opening {
+  /* .case-opening is mounted directly into .gacha-machine-window (a flex
+     container with align-items/justify-content:center — see styles.css
+     below) with no width of its own; without an explicit width it sizes to
+     max-content, and since every child below is position:absolute (so it
+     contributes nothing to intrinsic size), the whole chain collapses to
+     ~2px and .case-viewport's overflow:hidden clips the reel to nothing.
+     width:100% makes this box size off .gacha-machine-window's real,
+     definite width instead, so .case-viewport (width:100% of THIS box)
+     gets a real width too and the reel is actually visible. */
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--gap-md);
+  padding: 6px 0;
+  /* Anchor for the sparkle burst (.case-sparkle below), which lands() spawns
+     positioned relative to this box via getBoundingClientRect diffing. */
+  position: relative;
+}
+
+.case-viewport {
+  position: relative;
+  width: 100%;
+  /* Fixed height is fine to grow (no reel math depends on it) but the
+     WIDTH must stay in lockstep with CARD_W in case-opening.ts, which
+     hardcodes "60px card + 8px gap" (Part E: grown again to fill the wider
+     full-hero machine window) for its horizontal landing-position math — do
+     not resize .case-card's width/margin-right without updating CARD_W to
+     match, or the reveal will land off-center from the pointer. */
+  height: 92px;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-sm);
+}
+
+.case-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  will-change: transform;
+}
+
+.case-card {
+  flex-shrink: 0;
+  width: 60px;
+  height: 76px;
+  margin-right: 8px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 2px;
+  overflow: hidden;
+  border: 1px solid transparent;
+}
+
+/* Icon art (Part E) shown above the label/sub text when a CaseCard carries
+   an iconUrl — worker portraits, weapon/charm icons, power-up glyphs (see
+   ui/gacha.ts's workerCard/itemCard/powerupCard). Fixed box + object-fit so
+   native pixel sizes ranging from a 2px axe sliver to a 16px-wide worker
+   portrait all sit consistently, still crisp at this scale. */
+.case-icon {
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  margin-bottom: 1px;
+}
+
+.case-card-label {
+  font-size: 9px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.case-card-sub {
+  font-size: 8px;
+  opacity: 0.8;
+  text-transform: capitalize;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* Reveal-card gradients: were dark saturated-to-near-black gradients (a
+   holdover from the old dark theme, hardcoded independent of the :root
+   tokens) meant to read as "spotlight" cards against a dark viewport. Now
+   updated to light pastel-to-panel gradients per rarity so the (now dark,
+   for panel legibility — see :root) rarity text/border colors stay
+   readable, and so the cards read as part of the same warm parchment
+   family instead of clashing dark islands. */
+.case-card-common {
+  background: linear-gradient(180deg, #f2e8d1, var(--bg-panel));
+  border-color: var(--border-disabled);
+  color: var(--rarity-common);
+}
+
+.case-card-rare {
+  background: linear-gradient(180deg, #cdeee6, #a9ded2);
+  border-color: var(--rarity-rare);
+  color: var(--rarity-rare);
+}
+
+.case-card-epic {
+  background: linear-gradient(180deg, #e8dbf7, #cfb4ef);
+  border-color: var(--rarity-epic);
+  color: var(--rarity-epic);
+}
+
+.case-card-legendary {
+  background: linear-gradient(180deg, #fbe9b8, #f5d585);
+  border-color: var(--rarity-legendary);
+  color: var(--rarity-legendary);
+  box-shadow: 0 0 6px rgba(var(--accent-gold-rgb), 0.5);
+}
+
+/* Was solid #ffffff — worked as a bright line against the old near-black
+   viewport/cards. Cards and viewport are now light (see above), so the
+   pointer needs to be dark instead; keeps a soft light halo via box-shadow
+   so it still stands out against the darker rare/epic/legendary card
+   gradients too. */
+.case-pointer {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 2px;
+  height: 100%;
+  background: #2a1e12;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6);
+  transform: translateX(-1px);
+  z-index: 2;
+  pointer-events: none;
+}
+
+.case-pointer::before,
+.case-pointer::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+}
+
+.case-pointer::before {
+  top: -1px;
+  border-top: 5px solid #2a1e12;
+}
+
+.case-pointer::after {
+  bottom: -1px;
+  border-bottom: 5px solid #2a1e12;
+}
+
+@keyframes case-landed-pulse {
+  0% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+  35% {
+    transform: scale(1.18);
+    filter: brightness(1.6);
+  }
+  100% {
+    transform: scale(1.06);
+    filter: brightness(1.15);
+  }
+}
+
+.case-landed {
+  animation: case-landed-pulse 0.5s ease-out forwards;
+  z-index: 1;
+}
+
+/* Sparkle burst spawned by case-opening.ts's land() — a handful of small
+   diamond chips fired outward from the landed card in random directions
+   (--dx/--dy set per-instance via inline style) and faded out, so a pull
+   physically "pops open" instead of just swapping in a text label. Count
+   and color scale with rarity (see spawnSparkles) so legendary pulls read
+   as a bigger event than common ones — same "juice scales with the win"
+   principle as combat's crit screenshake. */
+@keyframes case-sparkle {
+  0% {
+    transform: translate(0, 0) scale(0.4) rotate(0deg);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+    transform: translate(calc(var(--dx) * 0.2), calc(var(--dy) * 0.2)) scale(1.1) rotate(45deg);
+  }
+  100% {
+    transform: translate(var(--dx), var(--dy)) scale(0.3) rotate(200deg);
+    opacity: 0;
+  }
+}
+
+.case-sparkle {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  /* NOT --rarity-common (a muted brown) — a sparkle needs to read as a
+     glint of light against the machine's warm wood/parchment background,
+     which a low-saturation brown chip would just vanish into. */
+  background: #fff6dd;
+  box-shadow: 0 0 3px rgba(120, 90, 40, 0.5);
+  transform: rotate(45deg);
+  pointer-events: none;
+  z-index: 3;
+  animation: case-sparkle 0.6s ease-out forwards;
+}
+
+.case-sparkle-rare {
+  background: var(--rarity-rare);
+  box-shadow: 0 0 4px rgba(28, 110, 95, 0.6);
+}
+
+.case-sparkle-epic {
+  background: var(--rarity-epic);
+  box-shadow: 0 0 5px rgba(var(--rarity-epic-rgb), 0.7);
+}
+
+.case-sparkle-legendary {
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  /* --accent-gold (#815c07) is a dark, muted gold-brown — same low-contrast
+     problem the base .case-sparkle had against the wood background. Use
+     the light cream-gold instead so a legendary burst actually reads as
+     the biggest, brightest pull. */
+  background: var(--accent-gold-light);
+  box-shadow: 0 0 6px rgba(var(--accent-gold-rgb), 0.85);
+}
+
+.case-reveal {
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.case-reveal-common {
+  color: var(--rarity-common);
+}
+
+.case-reveal-rare {
+  color: var(--rarity-rare);
+}
+
+.case-reveal-epic {
+  color: var(--rarity-epic);
+}
+
+.case-reveal-legendary {
+  color: var(--rarity-legendary);
+  text-shadow: 0 0 8px rgba(var(--accent-gold-rgb), 0.7);
+}
+
+.case-progress {
+  text-align: center;
+  margin-bottom: 2px;
+}
+
+.case-skip-btn {
+  display: block;
+  margin: 6px auto 0;
+  background: var(--btn-bg);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font: inherit;
+  font-size: 10px;
+  padding: var(--pad-btn-compact);
+  cursor: pointer;
+}
+
+.case-skip-btn:hover {
+  background: var(--btn-bg-hover);
+}
+
+/* Battle overlay --------------------------------------------------------
+   Deliberately NOT #adventure's opaque panel — the canvas scene (sprites,
+   motion, hit flashes) is the whole point here, so this is a thin,
+   transparent HUD floating over it, not a menu that hides it. */
+
+#battle {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-size: 11px;
+}
+
+#battle.hidden {
+  display: none;
+}
+
+#battle-body {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.battle-top {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  /* Right-aligned content (.battle-round) must clear #battle-exit's actual
+     footprint ("Pause Battle" label + icon + padding, ~130px from the
+     container edge), not the old bare-✕ #close button's ~28px this offset
+     was originally sized for — otherwise the round counter renders right
+     under the button (headless-verified; 115px still clipped by a few px). */
+  right: 135px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--gap-md);
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+.battle-round {
+  color: var(--bg-base); /* on the dark battlefield — see .battle-stage-info */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+}
+
+.battle-stage-info {
+  position: absolute;
+  top: 22px;
+  left: 8px;
+  right: 28px;
+  font-size: 10px;
+  /* Sits directly on the dark-green battlefield — light text + dark
+     shadow (was dark --text-primary, unreadable there). */
+  color: var(--bg-base);
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+/* ── Floating unit nameplates ────────────────────────────────────────────
+   Both rosters are now FREE LAYERS, not corner lists: each row is absolutely
+   positioned over its own unit's head every tick by positionPlates() in
+   ui/battle.ts, JRPG-style. The wrappers keep their separate class names
+   only because the enemy side additionally serves as the target-selection UI
+   (see syncEnemyRows/selectEnemyTarget): only a `.targetable` row captures
+   clicks, everything else stays click-through so the Defend skill-check's
+   canvas click still reaches the canvas (handleBattleClick in scene/game.ts).
+
+   Why they moved: parked in two fixed corners, reading "who is nearly dead"
+   meant matching a corner name to a sprite in the middle of the field and
+   holding that mapping yourself — six lookups a turn at full party and full
+   enemy count. Over the sprite, the association costs nothing. */
+.battle-enemies,
+.battle-party {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.battle-enemy-row,
+.battle-party-row {
+  position: absolute;
+  /* `translate:`, NOT `transform:` — these plates sit in a layer with
+     buttons and the global `button:active:not(:disabled)` rule owns
+     `transform` (see the convention note further down this file). Using it
+     for layout here is exactly the bug that broke the action tokens.
+     -50% centres on the head, -100% lifts the whole plate above it, so
+     positionPlates() only has to know where the head is. */
+  translate: -50% -100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  min-width: 78px;
+  max-width: 140px;
+  padding: 2px 6px 3px;
+  /* Opaque-enough parchment for AA dark-on-light text over the green
+     battlefield; the old 0.55 alpha + dark text-shadow rendered the dark
+     label as an illegible olive smear (headless-verified). */
+  background: rgba(var(--bg-panel-rgb), 0.92);
+  border: 1px solid #4a3520;
+  border-radius: 2px;
+  box-shadow: 0 1px 0 rgba(255, 240, 210, 0.35) inset, 0 2px 4px rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
+}
+
+/* Little pointer tab so a plate visibly belongs to the sprite under it
+   rather than floating near it — matters most when two enemies stand close
+   enough that their plates nearly touch. */
+.battle-enemy-row::after,
+.battle-party-row::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  margin-left: -3px;
+  border-left: 3px solid transparent;
+  border-right: 3px solid transparent;
+  border-top: 4px solid #4a3520;
+}
+
+/* No anchor this frame (canvas not laid out yet, or the unit isn't in the
+   current battle) — hide rather than let the plate sit at 0,0 in the
+   corner, which is where an unpositioned absolute element lands. */
+.battle-enemy-row.unanchored,
+.battle-party-row.unanchored {
+  display: none;
+}
+
+.battle-enemy-name,
+.battle-party-row > span:first-child {
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.battle-enemy-row .hp-bar,
+.battle-party-row .hp-bar {
+  width: 100%;
+  margin: 0;
+  border: 1px solid rgba(74, 53, 32, 0.55);
+  border-radius: 1px;
+}
+
+/* Raw current/max under the bar. A percentage-width bar alone can't tell a
+   40-HP chip off a 4000-HP one, and the later worlds run into the
+   thousands — the numbers are what make a hit feel measured. */
+.battle-plate-hp {
+  font-size: 10px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+.battle-enemy-row.defeated,
+.battle-party-row.defeated {
+  opacity: 0.4;
+}
+
+.battle-enemy-row.targetable {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+/* The unit that would actually get hit if Attack were pressed right now —
+   either the player's explicit click or the engine's own default (see
+   syncEnemyRows) — same gold "chosen" accent .team-tile-legendary/etc.
+   already use elsewhere, distinct from the party side's green "it's their
+   turn" accent (.battle-party-row.active) so the two meanings never look
+   the same. */
+/* Both highlight states carry their meaning in the BORDER and the outer
+   glow, with only a whisper of tint on the plate itself. Washing the whole
+   plate in 0.35-0.4 accent (as the corner rows used to) drops a dark
+   rarity-coloured name onto a same-hue ground — the active member's name
+   came out dark-green-on-green and simply could not be read. The parchment
+   has to stay parchment for the label to work. */
+.battle-enemy-row.targeted {
+  border-color: var(--accent-gold);
+  border-width: 2px;
+  padding: 1px 5px 2px;
+  background: rgba(var(--bg-panel-rgb), 0.94);
+  box-shadow: 0 0 7px 1px rgba(var(--accent-gold-rgb), 0.75), 0 2px 4px rgba(0, 0, 0, 0.45);
+}
+
+.battle-enemy-row.targeted::after {
+  border-top-color: var(--accent-gold);
+}
+
+.battle-party-row.active {
+  border-color: var(--accent-green);
+  border-width: 2px;
+  padding: 1px 5px 2px;
+  background: rgba(var(--bg-panel-rgb), 0.94);
+  box-shadow: 0 0 7px 1px rgba(var(--accent-green-rgb), 0.7), 0 2px 4px rgba(0, 0, 0, 0.45);
+}
+
+.battle-party-row.active::after {
+  border-top-color: var(--accent-green);
+}
+
+/* .battle-box: now ONLY the run-ending outcome recap (see ui/battle.ts's
+   showOutcome) — real per-turn combat is pure floating action bubbles +
+   canvas juice (see .battle-bubbles below), not a text box. .battle-box-grid
+   /.battle-retreat-grid survive as the shared button-grid look for the
+   revival/stage-cleared prompts, which are real decisions, not narration. */
+
+.battle-box {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  min-height: 44px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--gap-md);
+  padding: 8px 10px;
+  background: rgba(var(--bg-panel-rgb), 0.94);
+  border: 1px solid var(--accent-green);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+/* Hidden during a live Defend skill-check: the canvas-drawn needle track is
+   also anchored near the bottom of the scene, and the two independently-
+   positioned bottom-anchored rectangles can overlap at some window sizes —
+   ceding the whole bottom strip to the canvas track while it's interactive
+   removes the overlap (and the dead-click trap) entirely, rather than
+   trying to keep two bottom-anchored layouts in sync pixel-for-pixel. */
+.battle-box.hidden {
+  display: none;
+}
+
+.battle-box-text {
+  color: var(--text-bright);
+  line-height: 1.4;
+  min-height: 1.4em;
+}
+
+.battle-box-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--gap-md);
+}
+
+.battle-box-grid.hidden {
+  display: none;
+}
+
+.battle-box-grid button {
+  background: var(--btn-bg);
+  border: 1px solid var(--accent-green);
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font: inherit;
+  font-size: 11px;
+  padding: var(--pad-btn-lg);
+  cursor: pointer;
+}
+
+.battle-box-grid button:hover:not(:disabled) {
+  background: var(--btn-bg-hover);
+}
+
+.battle-box-grid button:disabled {
+  background: var(--bg-inset);
+  border-color: var(--border-disabled);
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+.battle-retreat-grid {
+  background: var(--bg-inset) !important;
+  border-color: rgba(var(--border-disabled-rgb), 0.8) !important;
+}
+
+/* Floating action bubbles (ui/battle.ts) — the direct replacement for the
+   old bottom Attack/Defend/Ability/Retreat button row. The wrapper spans
+   the whole battle body (pointer-events:none, like .battle-top/.battle-party
+   above it) so only the bubbles themselves — absolutely positioned and
+   individually pointer-events:auto — are actually clickable; JS sets each
+   bubble's left/top from the current actor's live canvas position every
+   tick (see positionBubbles). */
+.battle-bubbles {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.battle-bubbles.hidden {
+  display: none;
+}
+
+.battle-bubble {
+  position: absolute;
+  /* CENTRING USES `translate:`, NOT `transform:` — this is load-bearing.
+     positionBubbles() writes left/top as the bubble's CENTRE, so something has
+     to pull the box back by half its size. That used to be
+     `transform: translate(-50%, -50%)`, which the global
+     `button:active:not(:disabled) { transform: translateY(1px) }` rule at the
+     bottom of this file silently overrode — it wins on both specificity
+     (0,2,1 vs 0,2,0) and source order. Pressing a bubble therefore REPLACED
+     the centring with a 1px nudge, teleporting the button +20px/+21px, and
+     `transition: transform` animated it away over exactly the ~100ms a human
+     click lasts. By mouseup the pointer was off the button and no click event
+     fired at all — measured: ~17% of presses landed.
+     Using the independent `translate` property keeps position and effects on
+     separate channels, so a `transform` rule can never move this button again. */
+  translate: -50% -50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Carved wooden tokens, not round bubbles. Circles read as generic app
+     chrome dropped on top of the art; the rest of this game's interface is
+     wood, brass and carved plank, so these match it — a squared token with a
+     bevelled edge, grain, and a nailed-plaque feel. */
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 3px;
+  background:
+    repeating-linear-gradient(
+      180deg,
+      rgba(90, 62, 38, 0.22) 0 2px,
+      rgba(90, 62, 38, 0) 2px 5px
+    ),
+    linear-gradient(180deg, #c9a874, #a5824f);
+  border: 2px solid #4a3520;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 240, 210, 0.5),
+    inset 0 -2px 0 rgba(74, 53, 32, 0.35),
+    0 2px 5px rgba(0, 0, 0, 0.5);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: transform 0.1s ease, background-color 0.1s ease;
+}
+
+.battle-bubble:hover {
+  filter: brightness(1.12);
+  transform: scale(1.06);
+}
+
+/* `:not(:disabled)` is here to WIN, not to guard: it lifts specificity to
+   (0,3,0) over the global press rule's (0,2,1), so the squish actually applies.
+   Without it this rule is dead code — which is what it was. */
+.battle-bubble:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+/* Retreat reads as the "risky exit" among the four — muted border instead
+   of the shared green, echoing .battle-retreat-grid's own de-emphasis. */
+/* Retreat reads as the risky exit — a darker, colder token rather than the
+   warm wood of the three "fight" actions. */
+.battle-bubble-retreat {
+  background: linear-gradient(180deg, #8e8578, #6b6357);
+  border-color: #3a352d;
+}
+
+/* Deliberately NOT `opacity` — a translucent token over the green
+   battlefield let the field straight through and the "wooden" token came
+   out tinted green, reading as a different material from the other three
+   rather than as the same token unlit. A weathered, colour-drained plank
+   says "no charge" while staying visibly part of the set. */
+.battle-bubble.disabled {
+  background: repeating-linear-gradient(180deg, rgba(58, 56, 52, 0.22) 0 2px, rgba(58, 56, 52, 0) 2px 5px),
+    linear-gradient(180deg, #8e8b81, #6c6960);
+  border-color: #3c3a35;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 250, 0.22), inset 0 -2px 0 rgba(40, 38, 34, 0.4),
+    0 2px 4px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+.battle-bubble.disabled .battle-bubble-icon {
+  opacity: 0.45;
+}
+
+.battle-bubble-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.battle-bubble-key {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  min-width: 11px;
+  height: 11px;
+  padding: 0 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--accent-gold);
+  color: var(--text-on-accent);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 0 0 1.5px rgba(var(--bg-panel-rgb), 0.92);
+}
+
+/* One-time special-move warning banner — non-blocking, fades on its own
+   (see ui/battle.ts's showHint), never gates the bubbles from showing at
+   the same time. Sits just under the stage-info line. */
+.battle-hint {
+  position: absolute;
+  top: 34px;
+  left: 8px;
+  right: 8px;
+  padding: 5px 8px;
+  background: rgba(var(--bg-panel-rgb), 0.92);
+  border: 1px solid var(--accent-gold);
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font-size: 10px;
+  line-height: 1.4;
+  text-align: center;
+  pointer-events: none;
+}
+
+.battle-hint.hidden {
+  display: none;
+}
+
+/* Compact "active boons this run" HUD row — sits between .battle-stage-info
+   and .battle-party, same pointer-events: none / text-shadow treatment as
+   the rest of the transparent top HUD (nothing here is ever clickable). */
+.battle-boons-hud {
+  position: absolute;
+  top: 34px;
+  left: 8px;
+  right: 28px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm);
+  pointer-events: none;
+}
+
+.battle-boons-hud.hidden {
+  display: none;
+}
+
+.battle-boon-chip {
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(var(--accent-green-rgb), 0.35);
+  color: var(--text-bright);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+}
+
+/* Boon-offer / chest-reveal screens — reuse .battle-box's darkened bordered
+   chrome (see the shared class on both elements in ui/battle.ts), but with
+   a gold border/glow instead of the combat-menu green: these are reward
+   moments, not another turn-order prompt, and gold is this app's existing
+   "special reward" signal (case-card-legendary, prestige/update border —
+   see the :root token comments). Room for cards/reward lines instead of a
+   text line + command grid. */
+.battle-boon-panel,
+.battle-chest-panel {
+  min-height: 0;
+  gap: var(--gap-lg);
+  padding: 10px 12px;
+  border-color: var(--accent-gold);
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.4),
+    0 0 12px rgba(var(--accent-gold-rgb), 0.2);
+  cursor: default;
+}
+
+.battle-boon-title,
+.battle-chest-title {
+  /* --accent-gold (dark), not --accent-gold-light (pale) — this panel's
+     background is the now-light --bg-panel (via .battle-box), not the dark
+     --btn-gold-bg the pale variant is tuned for. */
+  color: var(--accent-gold);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  text-align: center;
+  text-transform: uppercase;
+  text-shadow: 0 0 8px rgba(var(--accent-gold-rgb), 0.35);
+}
+
+.battle-boon-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--gap-lg);
+}
+
+.battle-boon-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  background: var(--btn-bg);
+  border: 1px solid var(--border-divider);
+  border-top: 2px solid var(--accent-green);
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font: inherit;
+  padding: var(--pad-btn-lg);
+  padding-top: 14px;
+  min-height: 84px;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    transform 0.12s ease-out,
+    border-color 0.12s ease-out,
+    box-shadow 0.12s ease-out,
+    background 0.12s ease-out;
+}
+
+.battle-boon-card:hover {
+  background: var(--btn-bg-hover);
+  border-color: var(--accent-gold);
+  border-top-color: var(--accent-gold);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(var(--accent-gold-rgb), 0.25);
+}
+
+.battle-boon-card.hidden {
+  visibility: hidden;
+}
+
+.battle-boon-card-tag {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  font-size: 8px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: rgba(var(--accent-green-rgb), 0.3);
+  color: var(--text-primary);
+}
+
+.battle-boon-card-tag.instant {
+  background: rgba(var(--accent-gold-rgb), 0.25);
+  /* --accent-gold, not --accent-gold-light — sits on the now light-warm
+     --btn-bg card surface, see .battle-boon-title above for the same fix. */
+  color: var(--accent-gold);
+}
+
+.battle-boon-card-name {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--accent-gold);
+}
+
+.battle-boon-card-icon {
+  margin-right: 4px;
+}
+
+.battle-boon-chip-icon {
+  margin-right: 3px;
+}
+
+.battle-chest-title-icon {
+  margin-right: 5px;
+}
+
+.battle-chest-wood-icon {
+  margin-right: 4px;
+}
+
+.battle-boon-card-desc {
+  font-size: 10px;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.battle-chest-rewards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  color: var(--text-bright);
+  font-size: 11px;
+}
+
+.battle-chest-continue {
+  align-self: center;
+}
+
+/* Shared motion/feedback ------------------------------------------------ */
+
+/* Brief "that worked" flash — the same brightness-pulse language as the
+   gacha reel's case-landed-pulse, reused as the one motion idiom for
+   confirming a state change elsewhere (level-up, equip, purchase, heal). */
+@keyframes flash-pulse {
+  0% {
+    filter: brightness(1);
+  }
+  35% {
+    filter: brightness(1.4);
+  }
+  100% {
+    filter: brightness(1);
+  }
+}
+
+.flash-pulse {
+  animation: flash-pulse 0.5s ease-out;
+}
+
+/* Primary-CTA emphasis — the highest-stakes button per screen (Gacha's
+   Pull ×1/×10, Adventure's Embark, Team's Heal All) gets the same bordered
+   treatment already established by #travel/#prestige-btn, instead of
+   rendering identically to minor actions like "Level"/"Unequip". Declared
+   last + with an element+class selector so it reliably wins over the
+   plain `.shop-row button` / `.adv-muster > button` element+class rules of
+   equal specificity earlier in the file. */
+button.btn-primary {
+  border: 1px solid var(--accent-green);
+  font-weight: 600;
+}
+
+button.btn-primary:hover:not(:disabled) {
+  background: var(--btn-bg-hover);
+}
+
+button.btn-primary:disabled {
+  border-color: var(--border-disabled);
+}
+
+/* Save-slot picker (src/ui/slot-picker.ts) — an opaque, full-window boot
+   overlay (the game may not even be loaded underneath yet), also reused
+   from settings for slot switching. Token pairs only: --text-bright /
+   --text-primary on --bg-base/--bg-panel are the app's vetted AA combos.
+   Delete's confirm state uses --danger strictly for the border (non-text,
+   3:1 rule); its label stays --text-bright for AA at small sizes. */
+#slot-picker {
+  position: absolute;
+  inset: 0;
+  z-index: 40; /* above takeover chrome (10), below nothing — boot-modal */
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-lg);
+  padding: 14px;
+  overflow-y: auto;
+}
+
+#slot-picker h2 {
+  color: var(--text-primary);
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-align: center;
+}
+
+/* Birdhouse art in column 1, the slot's text summary in column 2. The art is
+   the icon, not a replacement for the text — pixel art can't say "12k wood,
+   4h ago", which is what this screen exists to tell you. Zero vertical gap
+   between cards so the three posts abut into one continuous post. */
+.slot-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  column-gap: 12px;
+  text-align: left;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-lg);
+  padding: 4px 12px;
+  font: inherit;
+  color: var(--text-bright);
+  cursor: pointer;
+}
+
+.slot-art {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.slot-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  min-width: 0;
+}
+
+.slot-subhead {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: -4px;
+}
+
+.slot-card:hover {
+  border-color: var(--accent-green);
+  background: var(--bg-inset);
+}
+
+.slot-title {
+  font-weight: 600;
+}
+
+.slot-sub {
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.slot-delete {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font: inherit;
+  font-size: 10px;
+  padding: var(--pad-btn-compact);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-disabled);
+  color: var(--text-bright);
+  cursor: pointer;
+}
+
+.slot-delete.armed {
+  border-color: var(--danger);
+  font-weight: 600;
+}
+
+.slot-hint {
+  color: var(--text-secondary);
+  font-size: 10px;
+  text-align: center;
+}
+
+#slot-cancel {
+  align-self: center;
+  font: inherit;
+  font-size: 11px;
+  padding: var(--pad-btn);
+  border-radius: var(--radius-sm);
+  background: var(--btn-bg);
+  border: 1px solid var(--border-panel);
+  color: var(--text-bright);
+  cursor: pointer;
+}
+
+#slot-cancel:hover {
+  background: var(--btn-bg-hover);
+}
+
+/* Unlocks browser + post-prestige reveal (src/ui/unlocks.ts). Same token
+   discipline as the slot picker. Locked cards are "silhouetted": identity
+   masked in the markup itself (name renders as "? ? ?"), visually dimmed
+   via the disabled-tier tokens rather than opacity so text still meets AA. */
+#unlocks,
+#prestige-reveal {
+  position: absolute;
+  inset: 8px;
+  z-index: 30;
+  background: var(--bg-base);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+  padding: 10px;
+  overflow-y: auto;
+}
+
+#unlocks.hidden {
+  display: none;
+}
+
+#unlocks-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--text-primary);
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+
+#unlocks-head button,
+#prestige-reveal-done {
+  font: inherit;
+  font-size: 11px;
+  padding: var(--pad-btn);
+  border-radius: var(--radius-sm);
+  background: var(--btn-bg);
+  border: 1px solid var(--border-panel);
+  color: var(--text-bright);
+  cursor: pointer;
+}
+
+#unlocks-head button:hover,
+#prestige-reveal-done:hover {
+  background: var(--btn-bg-hover);
+}
+
+#unlocks-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+}
+
+#prestige-reveal h2 {
+  color: var(--accent-gold);
+  font-size: 13px;
+  letter-spacing: 1px;
+  text-align: center;
+  margin: 4px 0;
+}
+
+.unlock-card {
+  position: relative;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+}
+
+.unlock-card.locked {
+  background: var(--bg-inset);
+  border-color: var(--border-disabled);
+}
+
+.unlock-tag {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  color: var(--text-secondary);
+  font-size: 9px;
+}
+
+.unlock-name {
+  color: var(--text-bright);
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.unlock-card.locked .unlock-name {
+  color: var(--text-secondary);
+  letter-spacing: 2px;
+}
+
+.unlock-blurb {
+  color: var(--text-primary);
+  font-size: 10px;
+}
+
+.unlock-card.locked .unlock-blurb {
+  color: var(--text-secondary);
+}
+
+#prestige-reveal-done {
+  align-self: center;
+  margin-top: 4px;
+}
+
+/* Battle-XP bar (ui/team.ts detail pane) — sibling of .hp-bar, same shape,
+   gold fill so it never reads as health. */
+.xp-bar {
+  height: 4px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.xp-bar-fill {
+  height: 100%;
+  background: var(--accent-gold);
+}
+
+.xp-label {
+  font-size: 9px;
+}
+
+/* Class tags: Bruiser/Warden/Scout — team detail pane pill (icon + name)
+   and battle-row marker (icon only, name+blurb in its tooltip). Both now
+   carry a real pixel-art icon (scene/ui-icons.ts CLASS_ICON) instead of a
+   bare letter — see ui/team.ts/ui/battle.ts. */
+.team-class-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  color: var(--text-primary);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+  font-size: 9px;
+}
+
+/* .battle-class-tag IS the <img> (pixelIcon's className param renders it
+   directly onto the icon element, no wrapping span) — display/padding/
+   border apply straight to the image. */
+.battle-class-tag {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 4px;
+  padding: 1px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+/* Button micro-press: every enabled button dips 1px while held — a tiny,
+   universal tactile beat that costs no layout (transform only).
+   CONVENTION: this rule owns `transform` for every button in the app, and it
+   REPLACES whatever transform that button had. So never position an element
+   with `transform: translate(...)` if it is (or contains) a button — use the
+   independent `translate:` property for layout and leave `transform` free for
+   effects. `.battle-bubble` learned this the hard way: it centred itself with a
+   transform, this rule discarded that on every press, and the button slid out
+   from under the pointer mid-click so no click event ever fired. */
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+/* SFX settings rows (index.html #settings).
+   NOTE the colour: this row used --text-bright, which is a colour chosen for
+   the app's DARK surfaces. #settings was later re-skinned as a light cream
+   plank, so the label was bright-on-bright and barely readable. Everything on
+   the board uses the --plank-* family. */
+#sfx-volume-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-md);
+  width: 100%;
+  color: var(--plank-ink);
+}
+
+/* Volume is now the ONLY volume control in the app (the gramophone prop's
+   6x8-CSS-px pips were removed), so it gets a real target: a full-width track
+   with a large thumb, styled into the plank family instead of a raw native
+   range sitting on a wooden board. */
+#sfx-volume {
+  flex: 1;
+  appearance: none;
+  -webkit-appearance: none;
+  height: 14px;
+  background: transparent;
+  cursor: pointer;
+}
+
+#sfx-volume::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, #9c7d4f, var(--notch-bg));
+  border: 1px solid var(--plank-label);
+}
+
+#sfx-volume::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #d3b587, var(--notch-bg));
+  border: 1px solid var(--plank-label);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+#sfx-volume:focus-visible {
+  outline: 2px solid var(--accent-green);
+  outline-offset: 2px;
+}
+
+
+
+/* Settings buttons added after the original pair (#slot-switch,
+   #unlocks-btn, #stats-btn) — same treatment as #budget-save/#check-updates
+   so the panel reads as one control family, not a mix of themed and native. */
+#slot-switch,
+#unlocks-btn,
+#stats-btn {
+  background: var(--btn-bg);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font: inherit;
+  padding: var(--pad-btn);
+  cursor: pointer;
+}
+
+#slot-switch:hover,
+#unlocks-btn:hover,
+#stats-btn:hover {
+  background: var(--btn-bg-hover);
+}
+
+/* Lifetime Stats panel (src/ui/stats.ts) — same overlay chrome as #unlocks. */
+#stats-panel {
+  position: absolute;
+  inset: 8px;
+  z-index: 30;
+  background: var(--bg-base);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+  padding: 10px;
+  overflow-y: auto;
+}
+
+#stats-panel.hidden {
+  display: none;
+}
+
+#stats-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--text-primary);
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+
+#stats-head button {
+  font: inherit;
+  font-size: 11px;
+  padding: var(--pad-btn);
+  border-radius: var(--radius-sm);
+  background: var(--btn-bg);
+  border: 1px solid var(--border-panel);
+  color: var(--text-bright);
+  cursor: pointer;
+}
+
+#stats-head button:hover {
+  background: var(--btn-bg-hover);
+}
+
+#stats-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+}
+
+.stats-group {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+}
+
+.stats-group-title {
+  color: var(--text-secondary);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.stats-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+  font-size: 11px;
+}
+
+.stats-row-label {
+  color: var(--text-primary);
+}
+
+.stats-row-value {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+
+/* --- Cosmetic dye tray (Style tab) ---------------------------------------
+   The swatch grid can't live inside a .shop-card — .shop-grid is 2-column and
+   16 pots would be unreadable at that width — so the tray hangs full-width
+   below the card grid, mirroring the tile-grid + detail-panel shape the Team
+   tab already uses. */
+.dye-tray {
+  margin-top: var(--gap-md);
+  padding: var(--gap-md);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-panel);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-md);
+}
+
+.dye-tray-head {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-md);
+}
+
+.dye-tray-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  min-height: 32px;
+}
+
+.dye-tray-title {
+  font-weight: 700;
+  color: var(--text-bright);
+}
+
+.dye-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: var(--gap-sm);
+}
+
+.dye-pot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.dye-pot:hover:not(:disabled) {
+  background: var(--btn-bg-hover);
+}
+
+/* Same gold selection language as an equipped cosmetic card, so "this is the
+   active one" reads identically in both places. */
+.dye-pot.selected {
+  border-color: var(--accent-gold);
+  background: rgba(var(--accent-gold-rgb), 0.12);
+  box-shadow: 0 0 5px rgba(var(--accent-gold-rgb), 0.4);
+}
+
+.dye-pot.locked {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.dye-pot:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.dye-reset {
+  align-self: flex-start;
+}
+
+/* Second action on an owned cosmetic card, below the equip button. */
+.dye-open {
+  margin-top: var(--gap-sm);
+}
+
+/* Build tab: the cottage's own progress line. It reports status only — the
+   cottage is raised by clicking it in the world, never bought from a menu. */
+.build-cottage-line {
+  width: 100%;
+  margin-bottom: var(--gap-md);
+  padding: 6px 8px;
+  background: var(--bg-inset);
+  border-left: 3px solid var(--accent-gold);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+/* --- Build Mode bar ------------------------------------------------------
+   Sits above the strip while placing: names what's on the cursor, shows the
+   rest of your placeable inventory as clickable slots, and carries the exit.
+   Build Mode previously had no visible way out at all — only Esc. */
+#build-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 32px;
+  translate: -50% 0; /* NOT transform — see the button:active convention note */
+  display: flex;
+  align-items: center;
+  gap: var(--gap-md);
+  max-width: 92%;
+  padding: 5px 8px;
+  background: linear-gradient(180deg, var(--plank-bg), var(--plank-bg-dark));
+  border: 2px solid var(--plank-edge);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.45);
+  color: var(--plank-ink);
+  font-size: 11px;
+  z-index: 6;
+}
+
+#build-bar.hidden {
+  display: none;
+}
+
+#build-label {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+#build-slots {
+  display: flex;
+  gap: var(--gap-sm);
+  overflow-x: auto;
+}
+
+.build-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 3px 5px;
+  background: linear-gradient(180deg, #d3b587, var(--notch-bg));
+  border: 1px solid var(--plank-label);
+  border-radius: 2px;
+  color: var(--plank-ink);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.build-slot.selected {
+  border-color: var(--accent-gold);
+  box-shadow: 0 0 5px rgba(var(--accent-gold-rgb), 0.55);
+}
+
+.build-slot:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+#build-exit {
+  background: linear-gradient(180deg, #d3b587, var(--notch-bg));
+  border: 1px solid var(--plank-label);
+  border-radius: 2px;
+  color: var(--plank-ink);
+  font: inherit;
+  padding: var(--pad-btn);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* Chest decoration row — the one reward you carry home and place, so it gets
+   its own emphasis rather than sitting in the list of numbers. */
+.battle-chest-decor {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  margin-top: var(--gap-sm);
+  padding: 4px 6px;
+  background: rgba(var(--accent-gold-rgb), 0.16);
+  border-left: 3px solid var(--accent-gold);
+  border-radius: var(--radius-sm);
+  font-weight: 700;
+}
+
+/* A slot holding a chest-won copy — free to place, so it's called out. */
+.build-slot.stocked {
+  border-color: var(--accent-gold);
+  background: linear-gradient(180deg, #f0d79a, #d9b467);
 }

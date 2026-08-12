@@ -35,6 +35,40 @@ export class Lake {
     this.cy = Math.round(groundTop + this.ry + 2 + this.ncy * (gh - 2 * this.ry - 4));
   }
 
+  /** Nudge the pond clear of a rectangle — in practice the homestead yard.
+   *
+   * The lake's position is seeded per plot and the yard is always anchored
+   * bottom-left, so sooner or later the two land on each other: the fence
+   * runs through the shallows and the lantern stands in the water. Biasing
+   * the seed away from that corner instead would make every plot's pond sit
+   * in the same place, which costs more than it buys — a nudge only moves
+   * the ponds that actually conflict.
+   *
+   * Moves RIGHT by preference, since the homestead hugs the left edge, and
+   * falls back to moving UP when there isn't room to the right. Both are
+   * clamped to keep the pond on the plot. */
+  avoidRect(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    w: number,
+    groundTop: number,
+    groundBottom: number,
+  ): void {
+    const mx = this.rx + 5;
+    const my = this.ry + 4;
+    if (this.cx + mx <= x0 || this.cx - mx >= x1 || this.cy + my <= y0 || this.cy - my >= y1) return;
+
+    const wantCx = x1 + mx + 1;
+    if (wantCx <= w - this.rx - 2) {
+      this.cx = wantCx;
+      return;
+    }
+    const wantCy = y0 - my - 1;
+    this.cy = Math.max(groundTop + this.ry + 2, Math.min(groundBottom - this.ry - 2, wantCy));
+  }
+
   private dist2(x: number, y: number, rx: number, ry: number): number {
     const dx = (x - this.cx) / rx;
     const dy = (y - this.cy) / ry;
@@ -52,6 +86,22 @@ export class Lake {
 
   update(dt: number): void {
     this.t += dt;
+  }
+
+  /** Position along a swim path inside the CURRENT water body, for the
+   * Cache Koi mechanic (see Game's koi fields) — `phase` is an angle in
+   * radians, animated by the caller once per frame. Scales with `level`
+   * exactly like render()'s own water ellipse, so the koi is always
+   * visually swimming in water, never drawn over dry bed, at any budget
+   * level (render()'s scale floors at 0.18, so there's always at least a
+   * small puddle to swim in). Inset further (0.62) from the water's own
+   * edge so the koi never clips the shoreline. */
+  koiPosition(phase: number): { x: number; y: number } {
+    const scale = (0.18 + 0.82 * this.level) * 0.62;
+    return {
+      x: Math.round(this.cx + Math.cos(phase) * this.rx * scale),
+      y: Math.round(this.cy + Math.sin(phase) * this.ry * scale),
+    };
   }
 
   render(ctx: CanvasRenderingContext2D, dx: number): void {

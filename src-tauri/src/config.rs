@@ -29,6 +29,16 @@ pub struct Config {
     /// Read real account usage via the local Claude Code login (default on).
     #[serde(default)]
     pub use_real_usage: Option<bool>,
+    /// Last-used game save slot (1-3). None until the player first picks
+    /// one; when set, boot skips the slot picker straight into this slot.
+    #[serde(default)]
+    pub current_slot: Option<u8>,
+    /// SFX master mute (app-level, not per-slot). None = unmuted.
+    #[serde(default)]
+    pub sfx_muted: Option<bool>,
+    /// SFX master volume 0.0-1.0. None = default (0.5).
+    #[serde(default)]
+    pub sfx_volume: Option<f32>,
 }
 
 impl Default for Config {
@@ -41,6 +51,9 @@ impl Default for Config {
             window_h: None,
             hide_on_blur: None,
             use_real_usage: None,
+            current_slot: None,
+            sfx_muted: None,
+            sfx_volume: None,
         }
     }
 }

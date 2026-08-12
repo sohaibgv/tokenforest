@@ -4,7 +4,33 @@
 
 import { reportFell, type ChopEvent, type Snapshot } from "../bridge";
 import {
-  AXES,
+  buildEnemy,
+  chestDecoration,
+  chestReward,
+  continueFee,
+  embarkCost,
+  reviveCost,
+  type ChestReward,
+} from "../adventure";
+import {
+  isBattleOver,
+  previewBattle,
+  resolvePartyTurn,
+  startBattle,
+  type BattleAction,
+  type BattleSnapshot,
+  type TurnEvent,
+} from "../battle";
+import {
+  BOON_HEAL_PCT,
+  BOON_HP_PCT,
+  boonWoodMult,
+  drawBoonOffer,
+  type BoonId,
+} from "../boons";
+import { maxWorldIndex } from "../unlocks";
+import {
+  amberTradeCost,
   BOOSTS,
   COSMETICS,
   ESPRESSO_DURATION,
@@ -17,46 +43,242 @@ import {
   GOLDEN_LOG_THRESHOLD,
   GOLDEN_LOG_TTL,
   HELPERS,
+  accrueCacheKoi,
+  accrueOverflow,
+  accruePassiveFocus,
+  amberLanternFull,
+  BARN_MAX_PHASE,
+  BARN_PHASE_NAME,
+  barnPhaseCost,
+  barnUnlocked,
+  buildableById,
+  canOwnMore,
+  buildableCost,
+  CACHE_KOI_TTL,
+  COTTAGE_MAX_PHASE,
+  COTTAGE_PHASE_NAME,
+  cottagePhaseCost,
+  dyedPalette,
+  travelAmberCost,
+  travelSweatWoodCost,
+  POV_GRADE_MULT,
+  povYieldMult,
+  SKILL_SPEED_BASE,
+  SKILL_SPEED_PER_TIER,
+  SKILL_SPEED_RANGE,
+  focusHeatColor,
+  getWorld,
+  logStackTier,
+  mixHex,
+  itemDefById,
+  itemGachaCost,
+  itemGachaCost10x,
+  koiReward,
+  POWERUP_GACHA_COST,
+  POWERUP_GACHA_COST_10X,
+  PROVISIONS,
+  SAP_PRESS_AMBER_YIELD,
+  sapPressBuildCost,
+  sapPressCost,
   TOKENS_PER_CHARGE,
+  unlockedSwatches,
   WOOD_YIELD,
-  WORLDS,
+  WORKER_DEFS_BY_ID,
+  WORKER_GACHA_COST,
+  WORKER_GACHA_COST_10X,
+  type CosmeticId,
+  type ItemDef,
+  type ItemEffectId,
+  type ItemSlot,
+  type PowerupId,
+  type ProvisionId,
+  type Rarity,
+  type UtilityPerkId,
 } from "../economy";
+import { pullItem, pullPowerup, pullWorker } from "../gacha";
 
 const HELPER_BY_ID = Object.fromEntries(HELPERS.map((h) => [h.id, h]));
-import type { GameSave } from "../game-state";
+
+/** Concrete numbers behind a just-decided fight's outcome — see
+ * Game.lastOutcomeSummary()/finalizeBattleOutcome(). */
+export interface BattleOutcomeSummary {
+  outcome: "win" | "loss";
+  /** This stage's own reward, regardless of whether the run ended here. */
+  stageWood: number;
+  stageAmber: number;
+  /** True on a stage-5 win, or any loss — the run ended and pending rewards
+   * were banked (bankedWood/bankedAmber/bankPct below); false on a win at
+   * stages 1-4, where the reward is still just pending (see AdventureState). */
+  runOver: boolean;
+  bankedWood: number;
+  bankedAmber: number;
+  /** 100 normally; 50 on a non-narrow-escape loss. */
+  bankPct: number;
+  /** Names of party members left resting by this loss (empty on a win or a
+   * narrow escape, where nobody drops to 0 HP). */
+  restingNames: string[];
+  narrowEscape: boolean;
+}
+
+/** What a just-opened milestone chest (stage 3 clear / stage 5 full clear)
+ * actually granted — see Game.grantChest/pendingChestReveal. Unlike
+ * BattleOutcomeSummary/lastOutcome, this is intentionally NOT persisted:
+ * the reward itself is already applied to the save for real the instant
+ * it's granted (wood/amber/shards/inventory), so there's nothing to lose by
+ * an app restart clearing this — the player just doesn't get to see the
+ * reveal screen replay, exactly the same acceptable tradeoff the existing
+ * (also non-persisted) win/loss outcome text already has. */
+export interface ChestRevealSummary {
+  wood: number;
+  amber: number;
+  itemName: string;
+  itemRarity: Rarity;
+  shardRarity: Rarity;
+  shardAmount: number;
+  /** A homestead decoration the chest carried home, if any — credited to
+   * decorStock so it can be placed for free. */
+  decorName?: string;
+  decorId?: string;
+}
+import type {
+  AdventureLogEntry,
+  AdventureState,
+  GameSave,
+} from "../game-state";
 import { scheduleSave } from "../game-state";
-import { Effect } from "./effects";
+import {
+  DEFAULT_WORKER_ATK,
+  effectiveAtk,
+  equippedItem,
+  grantXp,
+  levelUpCost,
+  MAX_LEVEL,
+  optimizeEquipment,
+  stageXpReward,
+  syncHp,
+  type TeamMemberSave,
+} from "../team";
+import { playSfx } from "../sfx";
+import { Effect, LeafBurst, SteamWisp, type SceneEffect } from "./effects";
+import { CELL, Grid, type Cell } from "./grid";
 import { FloatingText, abbrev } from "./floating-text";
 import { Plot } from "./plot";
-import { hashString } from "./rng";
-import { Sky } from "./sky";
+import { hashString, mulberry32 } from "./rng";
 import {
-  AMBER_GEM,
+  FOREMAN_WORK_FRAMES,
+  NPC_IDS,
+  NPCS,
+  pickLine,
+  type NpcId,
+} from "../npc/npcs";
+import { buildUsageView, type UsageView } from "../npc/usage-view";
+import { renderLine, type NpcLine } from "../npc/lines";
+import { Ambience, type DayPhase } from "./ambience";
+import { pushHomesteadDrawables } from "./homestead";
+import { renderBattleScene, renderSkillCheckTrack } from "./battle-render";
+import { renderPovScene } from "./pov-render";
+import {
+  BATTLE_ZOOM,
+  battleEnemySlot,
+  battleEnemyZoom,
+  battlePartySlot,
+  deathSquash,
+} from "./battle-layout";
+import {
+  drawBubble,
+  hitBubble,
+  hitChoice,
+  layoutBubble,
+  wrapLines,
+  type Dialogue,
+  drawAmbient,
+  layoutAmbient,
+} from "../npc/dialogue";
+import { Sky } from "./sky";
+import { pushTimberLineDrawables } from "./travel";
+import {
+  BARN_PHASE_SPRITES,
+  BUILDABLE_SPRITES,
+  ENCAMPMENT,
+  CACHE_KOI,
+  COTTAGE_PHASE_SPRITES,
   drawSprite,
   drawText,
+  ENEMY_KIND_SPRITES,
   GLOW_LG,
   GLOW_SM,
+  LANTERN_FRAME,
+  LANTERN_GLASS,
+  LANTERN_HOOK,
+  LANTERN_POST,
   LOG,
+  LOG_END,
+  LOG_STAKE,
+  HANDCAR_UP,
+  RARITY_WOODCUTTER_SPRITES,
+  RIPPLE1,
+  RIPPLE2,
+  SAP_PRESS_DOWN,
+  SAP_PRESS_IDLE,
+  SIGN_NO_AI,
+  SIGNPOST_IDLE,
+  SIGNPOST_SWAY,
   SLASH1,
   SLASH2,
   SPARK,
+  spriteSize,
   textWidth,
+  WHETSTONE,
   withPalette,
+  type EnemyFrameSet,
+  type PixelMap,
 } from "./sprites";
-import type { PendingChop } from "./woodcutter";
+import type { ManualChop, PendingChop } from "./woodcutter";
 import { Tree } from "./forest";
 import { Woodcutter } from "./woodcutter";
 
+export type SkillGrade = "great" | "good" | "miss";
+
+export interface SkillCheck {
+  pos: number; // 0..100, current needle position
+  dir: 1 | -1; // current sweep direction — bounces at 0/100, never times out
+  speed: number; // %/sec
+  zoneStart: number; // 0..100
+  zoneWidth: number; // percentage points
+  greatStart: number; // subset of the zone, centered
+  greatWidth: number;
+}
+
+/** Simplified stand-ins for the tree behind a POV close-up — the real
+ * Forest.renderTree draws in absolute plot coordinates, which don't compose
+ * cleanly with the zoomed/centered POV transform, so POV just draws the
+ * right silhouette for the kind directly. */
 const MAX_WOODCUTTERS = 8;
 const COALESCE_SECS = 0.5;
 const SLIDE_SECS = 1.4;
 const WOOD_COLOR = "#f0a04a";
 const TOKEN_COLOR = "#ffe9a8";
+/** frenzyBurst item effect: seconds of faster swings granted on a Great POV
+ * skill-check result — see Woodcutter.grantBurst/FRENZY_BURST_FACTOR. */
+const FRENZY_BURST_SECS = 6;
 
 interface ChopBuffer {
   tokens: number;
   hits: number;
   age: number;
+}
+
+/** Per-swing damage/yield inputs resolveChop needs, resolved once per chop
+ * from whichever member (if any) is doing the chopping — mirrors how
+ * atkForWc/leadAtk already resolve `atk` alone, extended to also carry the
+ * chopper's Woodchopping item yield bonus and effect (see
+ * chopModsForWc/chopModsForLead). */
+interface ChopMods {
+  atk: number;
+  /** 1 = no bonus; e.g. 1.125 = equipped item's yieldPct is +12.5%. */
+  itemYieldMult: number;
+  effectId?: ItemEffectId;
+  effectMagnitude?: number;
 }
 
 export interface TravelStatus {
@@ -72,6 +294,9 @@ export class Game {
   h = 117;
   readonly save: GameSave;
   private skyH = 30;
+  /** Passive ambient life (birds/butterflies/fireflies/leaves). Purely
+   * decorative — never clickable, never touches the save or the economy. */
+  private ambience = new Ambience(mulberry32(0x5eed1f));
   private sky = new Sky();
   private plot: Plot;
   private plotWorld: number;
@@ -80,6 +305,10 @@ export class Game {
   private slide = 0;
   private density = 1;
   private woodcutters = new Map<string, Woodcutter>();
+  /** Live session id -> assigned roster member id (null = default-worker
+   * filler). Set once per new session, kept for that session's lifetime —
+   * see applySnapshot(). Runtime-only, not persisted. */
+  private slotAssignment = new Map<string, string | null>();
   private floats: FloatingText[] = [];
   private buffers = new Map<string, ChopBuffer>();
   private extraCount = 0;
@@ -87,13 +316,142 @@ export class Game {
   private gnomeTimer = 0;
   // Interaction layer (none of this persists except via save fields).
   private tokenCarry = 0;
-  private effects: Effect[] = [];
+  /** Separate carry-over accumulator for Focus (vs. tokenCarry above, which
+   * drives Amber) — split so a focusEfficiencyPct Woodchopping item can
+   * boost Focus gain without also boosting Amber. Identical to tokenCarry
+   * in every tick where no such item is in play. */
+  private focusCarry = 0;
+  private effects: SceneEffect[] = [];
   private spot: { tree: Tree; x: number; y: number; ttl: number } | null = null;
   private spotTimer = 8;
   private goldenLog: { x: number; y: number; ttl: number } | null = null;
+  /** Focus-overflow meter (see economy.ts accrueOverflow) — transient, like
+   * focusCarry/tokenCarry. Earned-but-unspawned logs queue in
+   * overflowLogsPending until the single golden-log slot frees up. */
+  private overflowCarry = 0;
+  private overflowLogsPending = 0;
+  /** Cache Koi (see economy.ts's accrueCacheKoi/koiReward) — fed by
+   * cache-read tokens rather than counted ones, so it accrues independently
+   * of Focus/Amber/Golden-Log progress. `koi` is the one currently
+   * swimming (phase = angle along Lake.koiPosition, ttl counts down to
+   * despawn); null when none is up. */
+  private koiCarry = 0;
+  private koi: { phase: number; ttl: number } | null = null;
+  /** Seconds for one full swim-path lap — slow enough to track, fast
+   * enough to feel alive rather than static. */
+  private static readonly KOI_SWIM_SECS = 4;
+  /** Click hit-test radius (px) around the koi's current rendered center. */
+  private static readonly KOI_CLICK_RADIUS = 5;
+  /** Sap Press: a physical world object at the forest's edge (bottom-right,
+   * a fixed screen position — deliberately NOT part of the procedural tree
+   * layout, so it's always in the same reachable spot regardless of plot
+   * seed) — click the lever to squeeze wood into amber (economy.pressSap),
+   * replacing the old flat Boosts-tab shop card. `pressT` counts down a
+   * short press animation (lever frame swap + amber-drip particles); 0 =
+   * idle, clickable again. */
+  /** Fractional seconds carried toward the next passive Focus charge. */
+  private passiveFocusCarry = 0;
+  private sapPressT = 0;
+  /** Post-click sway on the Crossroads Signpost. */
+  private signpostT = 0;
+  private static readonly SIGNPOST_ANIM_SECS = 0.4;
+  /** Countdown to the next whetstone steam wisp (see update). */
+  private steamT = 0;
+  /** Focus fraction above which the whetstone starts steaming — deliberately
+   * higher than FOCUS_HEAT_FLOOR so glow comes first and steam reads as the
+   * second, more urgent stage. */
+  private static readonly STEAM_FLOOR = 0.6;
+  private static readonly SAP_PRESS_ANIM_SECS = 0.35;
   private frenzyT = 0;
   private espressoT = 0;
   private animT = 0;
+  // POV mode: watch one woodcutter close-up with a DBD-style skill check.
+  // None of this persists — it's pure UI/interaction state, same treatment
+  // as `spot`/`goldenLog` above.
+  private povTarget: Woodcutter | null = null;
+  /** Seconds since POV opened, driving the walk-up-to-the-tree animation. */
+  private povWalkT = 0;
+  private static readonly POV_WALK_SECS = 0.55;
+  private povSkillCheck: SkillCheck | null = null;
+  private povFlash: { grade: SkillGrade; t: number; wood: number | null } | null =
+    null;
+  /** Bare extension hook for a future item perk ("chainsaw execution on a
+   * perfect skill check") — not wired to anything yet. */
+  onSkillCheckResult: ((grade: SkillGrade, wc: Woodcutter) => void) | null =
+    null;
+  /** Set by ui/adventure.ts — lets the on-canvas "resume adventure" HUD icon
+   * open the Adventure overlay directly when there's a run in progress but
+   * no live battle to jump straight into (see hitAdventureIndicator). */
+  onWantAdventureOverlay: (() => void) | null = null;
+  /** Set by main.ts — the Crossroads Signpost standing in the clearing is the
+   * in-world way into Settings. Routed through a hook because scene/* must
+   * never import ui/*; main.ts points it at the same toggle the #gear button
+   * uses, so both entrances share one code path. */
+  onWantSettings: (() => void) | null = null;
+
+  // Battle mode: full-window turn-based fight, same "temporarily grow the
+  // widget window" pattern as POV. Turn state itself lives in
+  // save.adventure.battle (persisted); battleViewOpen is only whether the
+  // window is currently showing it — nothing about the fight advances off a
+  // wall clock, so leaving this view is always a free, lossless pause.
+  private battleViewOpen = false;
+  private battleAnimQueue: TurnEvent[] = [];
+  private battleAnim: { event: TurnEvent; t: number; dur: number } | null =
+    null;
+  private battleShakeT = 0;
+  /** Shake amplitude in px, set per-hit by onBattleEventStart (damage-scaled). */
+  private battleShakeMag = 4;
+  private battleFlashId: string | null = null;
+  private battleFlashT = 0;
+  private battleEndT = 0;
+  /** The one member currently mid-timing-check, and which action it's for —
+   * Defend (existing) and Attack (the "Paper Mario"-style crit-timing
+   * minigame — see beginBattleTiming/finishBattleTiming) share this same
+   * single slot and the same underlying sweep-the-bar mechanic
+   * (rollSkillCheck/advanceSkillCheck/gradeSkillCheck), just graded into a
+   * different outcome. `targetEnemyId` only ever matters for "attack" —
+   * threaded through to resolvePartyTurn exactly like submitTurnAction's own
+   * param already does for the non-timed path. */
+  private battlePendingAction: {
+    memberId: string;
+    action: "attack" | "defend";
+    targetEnemyId?: string;
+  } | null = null;
+  /** Unit id -> seconds elapsed in its death collapse. A unit only enters this
+   * map on the frame its HP first hits 0, so the squash plays once rather than
+   * restarting every frame it stays dead. */
+  private deathAnims = new Map<string, number>();
+  /** Ids already seen at 0 HP, so a corpse that stays on screen (or a battle
+   * resumed from a save with someone already down) doesn't re-trigger. */
+  private deathSeen = new Set<string>();
+  private static readonly DEATH_SECS = 0.55;
+
+  private battleSkillCheck: SkillCheck | null = null;
+  /** Seconds left of the "ignore clicks" window after a timing check opens
+   * (see beginBattleTiming/handleBattleClick). */
+  private battleSkillCheckGrace = 0;
+  private static readonly SKILL_CHECK_GRACE_SECS = 0.22;
+  private battleFlash: { grade: SkillGrade; t: number } | null = null;
+  /** A finished battle is logged and has adv.battle cleared the instant
+   * it's decided — never left half-applied on disk. Banking is the one
+   * exception: a win/loss that leaves the party fully wiped first offers a
+   * "Team Down" revive (see AdventureState.pendingRevival/resolveRevival),
+   * so bankAdventure may not run until that's resolved. These three hold
+   * just enough to keep rendering the scene for a brief summary beat
+   * afterward, since save.adventure may already be null by then (a
+   * run-ending win/loss also clears it via bankAdventure). */
+  private lastBattleSnapshot: BattleSnapshot | null = null;
+  private lastBattleWorld = 0;
+  private lastBattlePartyIds: string[] = [];
+  /** Concrete numbers for the just-finished fight's outcome screen (see
+   * ui/battle.ts's showOutcome) — stashed at finalize time since a
+   * run-ending win/loss already banks + clears save.adventure, so by the
+   * time the UI reads this the pending/adv numbers it would want are gone. */
+  private lastOutcome: BattleOutcomeSummary | null = null;
+  /** A just-opened milestone chest, awaiting dismissal — see grantChest/
+   * pendingChestReveal/dismissChestReveal. Session-only, not persisted (see
+   * ChestRevealSummary for why that's safe). */
+  private chestReveal: ChestRevealSummary | null = null;
 
   constructor(save: GameSave) {
     this.save = save;
@@ -104,18 +462,1317 @@ export class Game {
     }
     this.layout();
     this.refreshModifiers();
+    // Wires the chainsawExecution/frenzyBurst Woodchopping item effects to
+    // every POV skill-check result (see applyWoodchoppingItemEffects).
+    // timberSplash is applied inside resolveChop instead — see there for why.
+    this.onSkillCheckResult = (grade, wc) =>
+      this.applyWoodchoppingItemEffects(grade, wc);
+
+    // Resuming mid-boon-pick (or mid-revive-decision — the two are always
+    // offered from the very same stage win, see finalizeBattleOutcome,
+    // though the revive offer is always resolved first by the normal UI
+    // flow) after a genuine app restart: the stage that was just won is
+    // already decided, but lastBattleSnapshot (normally only alive for the
+    // rest of THIS session — see its own doc comment) starts null on a
+    // fresh process, which would leave renderBattle with nothing to draw
+    // behind the boon-pick/revive UI. Seed that same fallback with a
+    // minimal already-decided snapshot of the cleared stage's enemy so the
+    // scene still renders — nothing here runs any turn logic against it,
+    // submitTurnAction/resolvePartyTurn are never called with it.
+    if (save.adventure?.pendingBoonOffer || save.adventure?.pendingRevival) {
+      const adv = save.adventure;
+      // `adv.stage` is 0 for a run that ended in a LOSS before clearing
+      // anything — the revival prompt is offered with nothing cleared — so
+      // the old bare `as 1|2|3|4|5` cast was simply false in exactly the case
+      // this branch exists to handle, and buildEnemy then threw here, in the
+      // constructor, taking the whole boot down with it. Which stage this
+      // decorative snapshot names does not matter (see above: no turn logic
+      // ever runs against it), only that it is a real one.
+      const clearedStage = Math.min(5, Math.max(1, adv.stage)) as
+        1 | 2 | 3 | 4 | 5;
+      this.lastBattleSnapshot = {
+        // Every enemy of the just-cleared stage, all already at 0 hp — same
+        // "already decided win" fallback the old single-enemy version had,
+        // ids assigned the same way startBattle itself assigns them.
+        enemies: buildEnemy(adv.world, clearedStage).map((spec, index) => ({
+          id: `enemy-${index}`,
+          spec,
+          hp: 0,
+        })),
+        round: 1,
+        turnOrder: [],
+        turnIndex: 0,
+        phase: "done",
+        guarding: {},
+        reflectBonus: 0,
+        lastStandArmed: false,
+        charmed: false,
+        roped: false,
+        narrowEscape: false,
+        enemyTurnCount: 0,
+        skipNext: {},
+        roundDamage: {},
+        events: [],
+        outcome: "win",
+      };
+      this.lastBattleWorld = adv.world;
+      this.lastBattlePartyIds = [...adv.partyIds];
+    }
   }
 
   private makePlot(world: number, plotIndex: number): Plot {
-    return new Plot(hashString(`w${world}-p${plotIndex}`), WORLDS[world].mult);
-  }
-
-  private axeDamage(): number {
-    return AXES[this.save.ownedAxe].damage;
+    return new Plot(
+      hashString(`w${world}-p${plotIndex}`),
+      getWorld(world).mult,
+    );
   }
 
   private has(helper: string): boolean {
     return (this.save.helpers as string[]).includes(helper);
+  }
+
+  hasPowerup(id: PowerupId): boolean {
+    return (this.save.powerups as string[]).includes(id);
+  }
+
+  // --- team / gacha ---------------------------------------------------
+
+  private memberById(id: string): TeamMemberSave | undefined {
+    return this.save.team.find((m) => m.id === id);
+  }
+
+  private rarityForMember(
+    memberId: string | null,
+  ): "common" | "rare" | "epic" | "legendary" {
+    if (!memberId) return "common";
+    const member = this.memberById(memberId);
+    if (!member) return "common";
+    return WORKER_DEFS_BY_ID[member.defId]?.rarity ?? "common";
+  }
+
+  /** Rarity of `memberId`'s equipped Woodchopping item, defaulting to
+   * "common" for a null/filler member (over-cap workers with no roster
+   * assignment) or a member with nothing equipped — Woodchopping always
+   * shows a weapon (never bare-handed), so "no item" just means "draw the
+   * common-tier axe" rather than "draw nothing", unlike Adventuring/Battle
+   * (see the party-member loop in renderBattle). */
+  private weaponRarityForMember(memberId: string | null): Rarity {
+    if (!memberId) return "common";
+    const member = this.memberById(memberId);
+    if (!member) return "common";
+    return (
+      equippedItem(member, "woodchopping", this.save.inventory)?.rarity ??
+      "common"
+    );
+  }
+
+  /** `memberId`'s WorkerDef.accent (per-character palette overlay, Part E),
+   * or null for a filler/unassigned slot — sibling to rarityForMember()/
+   * weaponRarityForMember() above, feeding Woodcutter.accent the same way
+   * those feed `rarity`/`weaponRarity`. */
+  private accentForMember(
+    memberId: string | null,
+  ): Record<string, string> | null {
+    if (!memberId) return null;
+    const member = this.memberById(memberId);
+    if (!member) return null;
+    return WORKER_DEFS_BY_ID[member.defId]?.accent ?? null;
+  }
+
+  /** Pick the highest-priority available, unclaimed roster member for a
+   * brand-new live session slot. Existing sessions keep whatever they were
+   * first assigned — see applySnapshot(). */
+  private pickMember(excludeSourceId: string): string | null {
+    const taken = new Set<string>();
+    for (const [sourceId, memberId] of this.slotAssignment) {
+      if (sourceId !== excludeSourceId && memberId) taken.add(memberId);
+    }
+    for (const member of this.save.team) {
+      if (member.status === "available" && !taken.has(member.id)) {
+        return member.id;
+      }
+    }
+    return null;
+  }
+
+  /** Damage dealt by a specific woodcutter this swing. */
+  private atkForWc(wc: Woodcutter): number {
+    if (wc.variant === "gnome") return this.leadAtk();
+    if (wc.memberId) {
+      const member = this.memberById(wc.memberId);
+      if (member)
+        return effectiveAtk(
+          member,
+          this.save.inventory,
+          this.save.prestigeLevel,
+        );
+    }
+    return DEFAULT_WORKER_ATK;
+  }
+
+  /** Best currently-assigned member's ATK — used by gnomes and the
+   * over-cap fallback path, which have no sprite of their own. */
+  private leadAtk(): number {
+    let best = DEFAULT_WORKER_ATK;
+    for (const memberId of this.slotAssignment.values()) {
+      if (!memberId) continue;
+      const member = this.memberById(memberId);
+      if (member)
+        best = Math.max(
+          best,
+          effectiveAtk(member, this.save.inventory, this.save.prestigeLevel),
+        );
+    }
+    // Fall back to the strongest member on the ROSTER when no slots are
+    // assigned. Slots only fill while a Claude Code session is live, so
+    // without this a manual click swung at an idle forest did
+    // DEFAULT_WORKER_ATK (1) damage no matter how geared the team was —
+    // against tree HP that scales 10x per world, that's 500 clicks to fell
+    // one tree at World 2 and 10,000 at World 4. The click still paid out
+    // wood (chips scale with the world mult), so it read as "I get wood but
+    // the tree never falls".
+    //
+    // This is not an infinite-damage tap: every manual chop costs 1 Focus,
+    // and Focus is capped (FOCUS_CAP) and only refills from real token usage,
+    // so the number of swings stays bounded by exactly the same meter it
+    // always was. It just makes those swings land as hard as your team
+    // actually hits.
+    if (best === DEFAULT_WORKER_ATK) {
+      for (const member of this.save.team) {
+        best = Math.max(
+          best,
+          effectiveAtk(member, this.save.inventory, this.save.prestigeLevel),
+        );
+      }
+    }
+    return best;
+  }
+
+  /** Best currently-assigned member's equipped Woodchopping yieldPct bonus,
+   * as a multiplier (1 = none) — the yield-side counterpart of leadAtk,
+   * used by every chop that isn't tied to one specific woodcutter sprite. */
+  private leadYieldMult(): number {
+    let best = 1;
+    for (const memberId of this.slotAssignment.values()) {
+      if (!memberId) continue;
+      const member = this.memberById(memberId);
+      if (!member) continue;
+      const item = equippedItem(member, "woodchopping", this.save.inventory);
+      best = Math.max(best, 1 + (item?.woodchopping?.yieldPct ?? 0));
+    }
+    return best;
+  }
+
+  /** Damage + yield/effect inputs for a specific woodcutter's swing — the
+   * per-member counterpart to chopModsForLead(), pulling the chopper's
+   * equipped Woodchopping item's yieldPct/effectId/effectMagnitude the same
+   * way atkForWc already pulls their atk. */
+  private chopModsForWc(wc: Woodcutter): ChopMods {
+    const atk = this.atkForWc(wc);
+    if (wc.variant === "gnome" || !wc.memberId) {
+      return { atk, itemYieldMult: this.leadYieldMult() };
+    }
+    const member = this.memberById(wc.memberId);
+    const item = member
+      ? equippedItem(member, "woodchopping", this.save.inventory)
+      : null;
+    return {
+      atk,
+      itemYieldMult: 1 + (item?.woodchopping?.yieldPct ?? 0),
+      effectId: item?.effectId,
+      effectMagnitude: item?.effectMagnitude,
+    };
+  }
+
+  /** Chop mods for a chop with no specific woodcutter sprite behind it
+   * (manual clicks, golden-spot bursts, over-cap buffer flushes) — uses the
+   * same "best currently-assigned member" fallback leadAtk already used. */
+  private chopModsForLead(): ChopMods {
+    return { atk: this.leadAtk(), itemYieldMult: this.leadYieldMult() };
+  }
+
+  pullWorkerGacha(count: 1 | 10): ReturnType<typeof pullWorker>[] {
+    const cost = count === 10 ? WORKER_GACHA_COST_10X : WORKER_GACHA_COST;
+    if (this.save.wood < cost) return [];
+    this.save.wood -= cost;
+    const results = Array.from({ length: count }, () => pullWorker(this.save));
+    scheduleSave(this.save, true);
+    return results;
+  }
+
+  pullItemGacha(world: number, count: 1 | 10): ReturnType<typeof pullItem>[] {
+    if (world > this.save.worldIndex) return [];
+    const cost = count === 10 ? itemGachaCost10x(world) : itemGachaCost(world);
+    if (this.save.wood < cost) return [];
+    this.save.wood -= cost;
+    const results = Array.from({ length: count }, () =>
+      pullItem(this.save, world),
+    );
+    scheduleSave(this.save, true);
+    return results;
+  }
+
+  pullPowerupGacha(count: 1 | 10): ReturnType<typeof pullPowerup>[] {
+    const cost = count === 10 ? POWERUP_GACHA_COST_10X : POWERUP_GACHA_COST;
+    if (this.save.wood < cost) return [];
+    this.save.wood -= cost;
+    const results = Array.from({ length: count }, () => pullPowerup(this.save));
+    scheduleSave(this.save, true);
+    return results;
+  }
+
+  /** Clears `instanceId` out of every team member's equipped slots
+   * (woodchopping/adventuring/utility/utility2), wherever it currently
+   * appears — an item instance must never be equipped in more than one
+   * place at once. Calls syncHp on any member actually changed, since
+   * losing a stat-bearing item can shrink their maxHp. Used by equipItem
+   * to make moving gear between (or within) members a safe, automatic
+   * "unequip from wherever it was, then equip here" transfer. */
+  private unequipInstanceEverywhere(instanceId: string): void {
+    for (const other of this.save.team) {
+      let changed = false;
+      if (other.equipped.woodchopping === instanceId) {
+        other.equipped.woodchopping = null;
+        changed = true;
+      }
+      if (other.equipped.adventuring === instanceId) {
+        other.equipped.adventuring = null;
+        changed = true;
+      }
+      if (other.equipped.utility === instanceId) {
+        other.equipped.utility = null;
+        changed = true;
+      }
+      if (other.equipped.utility2 === instanceId) {
+        other.equipped.utility2 = null;
+        changed = true;
+      }
+      if (changed) syncHp(other, this.save.inventory, this.save.prestigeLevel);
+    }
+  }
+
+  /** `slot` defaults to the item's own slot; pass "utility2" explicitly to
+   * target the extraUtility Power-up's second Utility slot instead — since
+   * a Utility item's def.slot is always just "utility", there's no other
+   * way to tell the two slots apart. Refuses "utility2" for a non-Utility
+   * item or without the Power-up owned. An item instance already equipped
+   * elsewhere (on this member or any other) is automatically unequipped
+   * from there first, so a single click safely transfers gear between
+   * workers instead of ending up double-equipped. */
+  equipItem(
+    memberId: string,
+    instanceId: string,
+    slot?: ItemSlot | "utility2",
+  ): boolean {
+    const member = this.memberById(memberId);
+    const inst = this.save.inventory.find((i) => i.id === instanceId);
+    if (!member || !inst) return false;
+    const def = itemDefById(inst.defId);
+    if (!def) return false;
+    const targetSlot = slot ?? def.slot;
+    if (targetSlot === "utility2") {
+      if (def.slot !== "utility" || !this.hasPowerup("extraUtility"))
+        return false;
+      this.unequipInstanceEverywhere(instanceId);
+      member.equipped.utility2 = instanceId;
+    } else {
+      if (def.slot !== targetSlot) return false;
+      this.unequipInstanceEverywhere(instanceId);
+      member.equipped[targetSlot] = instanceId;
+    }
+    syncHp(member, this.save.inventory, this.save.prestigeLevel);
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  unequipItem(memberId: string, slot: ItemSlot | "utility2"): boolean {
+    const member = this.memberById(memberId);
+    if (!member) return false;
+    if (slot === "utility2") member.equipped.utility2 = null;
+    else member.equipped[slot] = null;
+    syncHp(member, this.save.inventory, this.save.prestigeLevel);
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  reorderTeam(memberId: string, newIndex: number): boolean {
+    const idx = this.save.team.findIndex((m) => m.id === memberId);
+    if (idx === -1) return false;
+    const clamped = Math.max(0, Math.min(newIndex, this.save.team.length - 1));
+    const [member] = this.save.team.splice(idx, 1);
+    this.save.team.splice(clamped, 0, member);
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  levelUpMember(memberId: string): boolean {
+    const member = this.memberById(memberId);
+    if (!member || member.level >= MAX_LEVEL) return false;
+    const def = WORKER_DEFS_BY_ID[member.defId];
+    const rarity = def?.rarity ?? "common";
+    const cost = levelUpCost(member);
+    if (this.save.shards[rarity] < cost) return false;
+    this.save.shards[rarity] -= cost;
+    member.level += 1;
+    syncHp(member, this.save.inventory, this.save.prestigeLevel);
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  // --- adventure mode ---------------------------------------------------
+  //
+  // Turn-based, player-paced: progress is a strict function of explicit
+  // paid actions. Nothing here is touched by update(dt) — walking away is
+  // always free, and there's nothing to "miss" by not watching.
+
+  private partyFor(ids: string[]): TeamMemberSave[] {
+    return ids
+      .map((id) => this.memberById(id))
+      .filter((m): m is TeamMemberSave => !!m);
+  }
+
+  /** Bank a fraction of the pending run rewards, release the party back to
+   * the roster, and end the run. Shared by a win-clear, a loss, and an
+   * explicit retreat. Returns the actual amounts banked so callers (the
+   * outcome-summary builder below) can show real numbers instead of
+   * re-deriving them after save.adventure is already gone. */
+  private bankAdventure(pct: number): { wood: number; amber: number } {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv) return { wood: 0, amber: 0 };
+    const wood = Math.floor(adv.pendingWood * pct);
+    const amber = Math.floor(adv.pendingAmber * pct);
+    s.wood += wood;
+    s.amber += amber;
+    s.totalWoodEarned += wood;
+    s.stats.woodFromAdventures += wood;
+    for (const id of adv.partyIds) {
+      const m = this.memberById(id);
+      if (m && m.status === "adventuring") {
+        m.status = m.currentHp > 0 ? "available" : "resting";
+      }
+    }
+    s.adventure = null;
+    return { wood, amber };
+  }
+
+  /** Finalizes an already-decided loss for real: marks any still-downed
+   * party members resting (skipped on a narrow escape, where nobody's
+   * actually at 0 HP — see battle.ts's `roped` save), bumps the
+   * adventuresFailed stat, banks the appropriate fraction of pending
+   * rewards (50% normally, 100% on a narrow escape) via bankAdventure, and
+   * refreshes lastOutcome/lastOutcomeSummary() so the UI's post-decision
+   * recap (see ui/battle.ts's showOutcome) reflects the real banked
+   * numbers. Shared by finalizeBattleOutcome's loss branch (the
+   * deadCount === 0 fallback there — not actually reachable, since a
+   * "loss" outcome from battle.ts always means a full wipe, but kept so
+   * that path stays honest) and resolveRevival's "skip"/failed-afford
+   * branch for a full-wipe Team Down offer — same "the wipe is now final"
+   * work either way, just possibly deferred behind a revive decision
+   * first (see AdventureState.pendingRevival.afterWipe). */
+  private finalizeLoss(adv: AdventureState, battle: BattleSnapshot): void {
+    const s = this.save;
+    s.stats.adventuresFailed += 1;
+    const restingNames: string[] = [];
+    if (!battle.narrowEscape) {
+      for (const id of adv.partyIds) {
+        const m = this.memberById(id);
+        if (m && m.currentHp <= 0) {
+          m.status = "resting";
+          restingNames.push(WORKER_DEFS_BY_ID[m.defId]?.name ?? m.defId);
+        }
+      }
+    } else {
+      adv.carried = adv.carried.filter((p) => p !== "emergencyRope");
+    }
+    const bankPct = battle.narrowEscape ? 100 : 50;
+    const banked = this.bankAdventure(bankPct / 100);
+    this.lastOutcome = {
+      outcome: "loss",
+      stageWood: 0,
+      stageAmber: 0,
+      runOver: true,
+      bankedWood: banked.wood,
+      bankedAmber: banked.amber,
+      bankPct,
+      restingNames,
+      narrowEscape: battle.narrowEscape,
+    };
+  }
+
+  /** Read-only preview for the Muster screen — win odds + expected reward
+   * against stage 1, averaged over 200 simulated auto-battles against a
+   * cloned party (same engine as the real fight — see battle.ts). */
+  previewAdventure(
+    world: number,
+    partyIds: string[],
+  ): { cost: number; winPct: number; avgWoodOnWin: number } | null {
+    if (
+      world > this.save.worldIndex ||
+      partyIds.length < 1 ||
+      partyIds.length > 3
+    )
+      return null;
+    const party = this.partyFor(partyIds);
+    if (party.length !== partyIds.length) return null;
+    const mult = getWorld(world).mult;
+    const cost = embarkCost(mult);
+    const { winPct, avgWoodOnWin } = previewBattle(
+      party,
+      buildEnemy(world, 1),
+      this.save.inventory,
+      this.save.prestigeLevel,
+    );
+    return { cost, winPct, avgWoodOnWin };
+  }
+
+  /** Deducts the embark cost and opens the interactive fight for stage 1 —
+   * the embark cost IS the first attempt, no separate fee. */
+  startAdventure(
+    world: number,
+    partyIds: string[],
+    carried: ProvisionId[],
+  ): boolean {
+    const s = this.save;
+    if (s.adventure) return false;
+    if (world > s.worldIndex || partyIds.length < 1 || partyIds.length > 3)
+      return false;
+    if (new Set(partyIds).size !== partyIds.length) return false;
+    const party = this.partyFor(partyIds);
+    if (party.length !== partyIds.length) return false;
+    if (party.some((m) => m.status !== "available")) return false;
+    const cost = embarkCost(getWorld(world).mult);
+    if (s.wood < cost) return false;
+
+    // Pack Mule (prestige-unlocked Power-up): carry 3 provisions, base 2.
+    const carryCap = this.hasPowerup("packMule") ? 3 : 2;
+    const cappedCarried = carried
+      .filter((id) => (s.provisions[id] ?? 0) > 0 && id !== "trailRations")
+      .slice(0, carryCap);
+    for (const id of cappedCarried) s.provisions[id] -= 1;
+
+    s.wood -= cost;
+    for (const m of party) m.status = "adventuring";
+    s.adventure = {
+      world,
+      partyIds: [...partyIds],
+      stage: 0,
+      pendingWood: 0,
+      pendingAmber: 0,
+      carried: cappedCarried,
+      abilityUsed: false,
+      startedAt: new Date().toISOString(),
+      log: [],
+      battle: null,
+      boons: {},
+      pendingBoonOffer: null,
+      pendingRevival: null,
+      freeReviveUsed: false,
+    };
+    s.stats.adventuresEmbarked += 1;
+    this.startBattleForNextStage();
+    return true;
+  }
+
+  /** "Push On": pay the next stage's fee, then open the interactive turn-
+   * based fight for it. Returns false if there's no run, it's already fully
+   * cleared, a fight is already in progress, a boon pick is still pending
+   * (see finalizeBattleOutcome — no skipping the "pick exactly one" gate),
+   * a Team Down revive offer is still pending (see resolveRevival — this one
+   * CAN be skipped, but must still be explicitly resolved one way or another
+   * before pushing on), or the fee can't be afforded. */
+  beginStageBattle(): boolean {
+    const s = this.save;
+    const adv = s.adventure;
+    if (
+      !adv ||
+      adv.battle ||
+      adv.stage >= 5 ||
+      adv.pendingBoonOffer ||
+      adv.pendingRevival
+    )
+      return false;
+    const fee = continueFee(getWorld(adv.world).mult, adv.stage + 1);
+    if (s.wood < fee) return false;
+    s.wood -= fee;
+    this.startBattleForNextStage();
+    return true;
+  }
+
+  private startBattleForNextStage(): void {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv) return;
+    const nextStage = (adv.stage + 1) as 1 | 2 | 3 | 4 | 5;
+    const party = this.partyFor(adv.partyIds);
+    const enemies = buildEnemy(adv.world, nextStage);
+    adv.battle = startBattle(party, enemies, s.inventory, {
+      charmed: adv.carried.includes("fortuneCharm"),
+      roped: adv.carried.includes("emergencyRope"),
+      boons: adv.boons,
+    });
+    this.battleAnimQueue = [];
+    this.battleAnim = null;
+    this.battleEndT = 0;
+    // A fresh battle never inherits UI-interaction state from whatever
+    // came before it (a stray Defend skill-check from an abandoned fight,
+    // a still-decaying hit flash, etc.) — see retreatAdventure() for the
+    // matching cleanup when a mid-flight battle is abandoned instead.
+    this.battleSkillCheck = null;
+    this.battlePendingAction = null;
+    this.battleFlash = null;
+    this.battleFlashId = null;
+    this.battleFlashT = 0;
+    this.battleShakeT = 0;
+    if (this.povTarget) this.exitPov();
+    this.closeDialogue();
+    this.battleViewOpen = true;
+    scheduleSave(s, true);
+  }
+
+  /** Whoever's turn it currently is, or null if no battle is active. */
+  currentBattleActorId(): string | null {
+    const battle = this.save.adventure?.battle;
+    if (!battle || battle.outcome) return null;
+    return battle.turnOrder[battle.turnIndex] ?? null;
+  }
+
+  /** Canvas-space position of the current actor's formation slot — public
+   * passthrough to the private battlePartySlot() lookup, for the floating
+   * action-bubble UI (ui/battle.ts) to anchor itself to. Index is the
+   * member's position in adv.partyIds (front/backLeft/backRight), same
+   * ordering renderBattle already draws by. Null whenever there's no live
+   * battle or the actor isn't part of the current party (shouldn't happen,
+   * but the UI has nothing sane to anchor to either way). */
+  currentBattleActorScreenPos(): { x: number; y: number } | null {
+    const adv = this.save.adventure;
+    const actorId = this.currentBattleActorId();
+    if (!adv || !actorId) return null;
+    const index = adv.partyIds.indexOf(actorId);
+    if (index < 0) return null;
+    return battlePartySlot(index, this);
+  }
+
+  /** Screen position (logical canvas px) of the TOP OF THE HEAD of a battle
+   * unit — party member or enemy alike — for ui/battle.ts to hang its
+   * floating nameplate above. Battle sprites are drawn feet-anchored at
+   * their slot (`drawSprite(..., -size.h)` after translating to slot.y), so
+   * the head is simply slot.y minus the scaled sprite height.
+   *
+   * Deliberately measured off each unit's IDLE frame rather than its
+   * CURRENT pose: a windup frame is taller than a strike frame, so keying
+   * off the live pose made the plate jump a few px on every swing. The
+   * plate holding still while the sprite animates under it is the point —
+   * it reads as a fixed label, not another moving part. Same reason it
+   * ignores the idle bob and lunge offsets.
+   *
+   * Null when `id` isn't a unit in the current battle. */
+  battleUnitHeadPos(id: string): { x: number; y: number } | null {
+    const battle = this.battleSnapshot();
+    if (!battle) return null;
+    const enemyIdx = battle.enemies.findIndex((u) => u.id === id);
+    if (enemyIdx >= 0) {
+      const unit = battle.enemies[enemyIdx];
+      const frames =
+        ENEMY_KIND_SPRITES[unit.spec.kind as keyof typeof ENEMY_KIND_SPRITES] ??
+        ENEMY_KIND_SPRITES.protestor;
+      const slot = battleEnemySlot(enemyIdx, battle.enemies.length, this);
+      const zoom = battleEnemyZoom(enemyIdx, battle.enemies.length);
+      // Protestors hold a picket sign ABOVE their heads (see renderBattle's
+      // SIGN_NO_AI draw), so their true silhouette is taller than the body
+      // sprite. Without this the nameplate landed on top of the placard and
+      // the two overlapping bits of art read as one unreadable smear.
+      const overhead =
+        unit.spec.kind === "protestor" ? spriteSize(SIGN_NO_AI).h * 1.6 : 0;
+      return {
+        x: slot.x,
+        y: slot.y - spriteSize(frames.idle).h * zoom - overhead,
+      };
+    }
+    const partyIds = this.save.adventure?.partyIds ?? this.lastBattlePartyIds;
+    const idx = partyIds.indexOf(id);
+    if (idx < 0) return null;
+    const member = this.save.team.find((m) => m.id === id);
+    const rarity =
+      (member && WORKER_DEFS_BY_ID[member.defId]?.rarity) || "common";
+    const slot = battlePartySlot(idx, this);
+    const zoom =
+      BATTLE_ZOOM[idx] ?? BATTLE_ZOOM[BATTLE_ZOOM.length - 1];
+    return {
+      x: slot.x,
+      y: slot.y - spriteSize(RARITY_WOODCUTTER_SPRITES[rarity].stand).h * zoom,
+    };
+  }
+
+  /** Read-only battle state for the UI to render — falls back to the last
+   * finished battle's snapshot during its brief post-outcome summary beat,
+   * since a run-ending win/loss already clears save.adventure.battle (and
+   * possibly save.adventure itself) the instant it's decided. */
+  battleSnapshot(): BattleSnapshot | null {
+    return this.save.adventure?.battle ?? this.lastBattleSnapshot;
+  }
+
+  battleAwaitingSkillCheck(): boolean {
+    return this.battleSkillCheck !== null;
+  }
+
+  /** Which action the live timing check (if any) is actually for — lets the
+   * UI label/color the sweep track "Attack" (crit-timing) vs "Defend"
+   * (mitigation-timing) instead of one generic look for both. */
+  battlePendingActionKind(): "attack" | "defend" | null {
+    return this.battlePendingAction?.action ?? null;
+  }
+
+  /** True while a queued turn event is still animating — the DOM action
+   * menu waits for this so the player can't fire the next turn faster than
+   * the current one's animation, keeping turns readable one at a time. */
+  battleAnimating(): boolean {
+    return this.battleAnim !== null || this.battleAnimQueue.length > 0;
+  }
+
+  /** True once an equipped Adventuring-slot item on this member has an
+   * effect AND the once-per-run charge hasn't been spent yet. */
+  battleCanAbility(memberId: string): boolean {
+    const adv = this.save.adventure;
+    if (!adv || adv.abilityUsed) return false;
+    const member = this.memberById(memberId);
+    if (!member) return false;
+    return !!equippedItem(member, "adventuring", this.save.inventory)?.effectId;
+  }
+
+  /** Ability goes straight through; Attack and Defend both open a canvas
+   * timing skill-check first (see finishBattleTiming)
+   * rather than submitting immediately — the floating-bubble battle UI
+   * (ui/battle.ts) has no button-click-submits-instantly path anymore.
+   * `targetEnemyId` is only meaningful for "attack" (see resolvePartyTurn) —
+   * the UI only ever supplies one when the player explicitly picked a
+   * living enemy from the multi-enemy target list; omitted (a single-enemy
+   * fight, or the player never picked) falls back to the engine's own
+   * lowest-index-living-enemy default. */
+  submitTurnAction(
+    memberId: string,
+    action: BattleAction,
+    targetEnemyId?: string,
+  ): TurnEvent[] {
+    if (action === "defend") {
+      this.beginBattleTiming(memberId, "defend");
+      return [];
+    }
+    if (action === "attack") {
+      this.beginBattleTiming(memberId, "attack", targetEnemyId);
+      return [];
+    }
+    return this.applyTurnAction(
+      memberId,
+      action,
+      undefined,
+      undefined,
+      undefined,
+    );
+  }
+
+  private applyTurnAction(
+    memberId: string,
+    action: BattleAction,
+    defendGrade: SkillGrade | undefined,
+    targetEnemyId?: string,
+    attackGrade?: SkillGrade,
+  ): TurnEvent[] {
+    const s = this.save;
+    const adv = s.adventure;
+    const battle = adv?.battle;
+    if (!adv || !battle || battle.outcome) return [];
+    if (action === "ability" && adv.abilityUsed) return [];
+    const party = this.partyFor(adv.partyIds);
+    const events = resolvePartyTurn(
+      battle,
+      party,
+      memberId,
+      action,
+      defendGrade,
+      s.inventory,
+      s.prestigeLevel,
+      Math.random,
+      adv.boons,
+      targetEnemyId,
+      attackGrade,
+    );
+    if (action === "ability" && events.some((e) => e.kind === "ability")) {
+      adv.abilityUsed = true;
+    }
+    this.battleAnimQueue.push(...events);
+    const outcome = isBattleOver(battle);
+    if (outcome) this.finalizeBattleOutcome(outcome);
+    scheduleSave(s, true);
+    return events;
+  }
+
+  /** Opens the shared sweep-the-bar timing check for either Attack (crit
+   * bonus) or Defend (mitigation grade) — same underlying mechanic
+   * (rollSkillCheck/advanceSkillCheck), the grade it produces is just
+   * consumed differently once the player clicks (see handleBattleClick). */
+  private beginBattleTiming(
+    memberId: string,
+    action: "attack" | "defend",
+    targetEnemyId?: string,
+  ): void {
+    if (this.currentBattleActorId() !== memberId) return;
+    this.battlePendingAction = { memberId, action, targetEnemyId };
+    const member = this.memberById(memberId);
+    const widenPct = member ? this.skillCheckWidenForMember(member) : 0;
+    this.battleSkillCheck = this.rollSkillCheck(
+      this.save.adventure?.world,
+      widenPct,
+    );
+    this.battleFlash = null;
+    // Ignore clicks for a beat after the check opens. The action bubbles are
+    // small targets, so players naturally click again when a press doesn't
+    // seem to land — and without this guard that second click lands on the
+    // freshly-opened timing bar and instantly grades it, almost always as a
+    // miss. The result felt like "Attack does nothing, then randomly turns
+    // into a Defend-style skill check".
+    this.battleSkillCheckGrace = Game.SKILL_CHECK_GRACE_SECS;
+  }
+
+  /** Resolves whichever timing check is currently open — routes to the
+   * Attack or Defend outcome depending on battlePendingAction.action, since
+   * both share this one skill-check slot (see beginBattleTiming). */
+  private finishBattleTiming(grade: SkillGrade): void {
+    const pending = this.battlePendingAction;
+    this.battleSkillCheck = null;
+    this.battlePendingAction = null;
+    this.battleFlash = { grade, t: 0 };
+    if (!pending) return;
+    if (pending.action === "attack") {
+      this.applyTurnAction(
+        pending.memberId,
+        "attack",
+        undefined,
+        pending.targetEnemyId,
+        grade,
+      );
+    } else {
+      this.applyTurnAction(pending.memberId, "defend", grade);
+    }
+  }
+
+  /** Applies the same Adventure-level side effects resolveStage used to
+   * apply for the old whole-stage roll — log entry, pending reward/stage
+   * advance, and (on the run's final beat: a stage-5 win, or a loss with
+   * nobody left to offer a revive to) the actual bank + status update — all
+   * applied atomically, in the same tick the fight is decided, so
+   * save.adventure.battle is never left on disk in a "decided but not yet
+   * resolved" state. The one exception is a genuine full-party-wipe loss:
+   * that gets the same "Team Down" revive chance a partial-death win
+   * already offers FIRST (see the loss branch below), and the actual
+   * bank/resting-status update is deferred to resolveRevival until the
+   * player decides — see AdventureState.pendingRevival.afterWipe. A
+   * snapshot is stashed on the side purely so the battle view can keep
+   * rendering the scene for a brief summary beat (see update()/
+   * closeBattleView()) even after save.adventure (or just .battle) has
+   * already been cleared. */
+  private finalizeBattleOutcome(outcome: "win" | "loss"): void {
+    const s = this.save;
+    const adv = s.adventure;
+    const battle = adv?.battle;
+    if (!adv || !battle) return;
+    const nextStage = (adv.stage + 1) as 1 | 2 | 3 | 4 | 5;
+    // Captured now — a stage-5 win banks + clears s.adventure below (via
+    // bankAdventure), so `adv.world` wouldn't be readable anymore by the
+    // time the milestone-chest check runs afterward.
+    const advWorld = adv.world;
+
+    let stageWood = 0;
+    let stageAmber = 0;
+    let runOver = false;
+
+    if (outcome === "win") {
+      // expeditionBonusPct: epic/legendary Adventuring gear's cleared-stage
+      // reward bonus, summed across the party the same additive way
+      // startBattle sums passive reflectPct.
+      const party = this.partyFor(adv.partyIds);
+      const expeditionBonus = party.reduce((sum, m) => {
+        const item = equippedItem(m, "adventuring", s.inventory);
+        return sum + (item?.adventuring?.expeditionBonusPct ?? 0);
+      }, 0);
+      // woodReward is summed across every enemy in the battle (was just the
+      // single enemy's reward pre-multi-enemy) — every enemy in one battle
+      // shares the same .stage, so the stage-5 amber check below still only
+      // needs to read it off the first unit.
+      const totalWoodReward = battle.enemies.reduce(
+        (sum, u) => sum + u.spec.woodReward,
+        0,
+      );
+      // Lumber Blessing (prestige-unlocked boon) multiplies stage wood on
+      // top of the party's expeditionBonusPct — the sim's run driver mirrors
+      // this exact line.
+      stageWood = Math.round(
+        totalWoodReward * (1 + expeditionBonus) * boonWoodMult(adv.boons),
+      );
+      stageAmber = Math.round(
+        (battle.enemies[0]?.spec.stage === 5
+          ? 30
+          : Math.random() < 0.2
+            ? 5
+            : 0) *
+          (1 + expeditionBonus),
+      );
+      adv.pendingWood += stageWood;
+      adv.pendingAmber += stageAmber;
+      adv.stage = nextStage;
+      // Battle XP: every party member (living or downed — they fought) earns
+      // the stage's XP the moment it's won, auto-leveling through the same
+      // level/levelMult math shard leveling uses. Mid-run levels apply to
+      // the run's remaining stages — the sim's run driver mirrors this.
+      const xpReward = stageXpReward(nextStage, advWorld);
+      for (const m of party) {
+        grantXp(m, xpReward, s.inventory, s.prestigeLevel);
+      }
+      if (nextStage === 5) {
+        s.stats.adventuresCleared += 1;
+        runOver = true;
+      }
+    }
+
+    // Combined name for a potentially multi-enemy fight — "&" for exactly
+    // 2, an Oxford-style comma list + "&" for 3+, unchanged (just that one
+    // enemy's name) for the overwhelmingly common single-enemy case.
+    const enemyNames = battle.enemies.map((u) => u.spec.name);
+    const combinedEnemyName =
+      enemyNames.length <= 1
+        ? (enemyNames[0] ?? "")
+        : enemyNames.length === 2
+          ? `${enemyNames[0]} & ${enemyNames[1]}`
+          : `${enemyNames.slice(0, -1).join(", ")} & ${enemyNames[enemyNames.length - 1]}`;
+
+    const entry: AdventureLogEntry = {
+      stage: nextStage,
+      enemyName: combinedEnemyName,
+      outcome,
+      woodGained: stageWood,
+      amberGained: stageAmber,
+      narrowEscape: battle.narrowEscape,
+    };
+    adv.log.push(entry);
+    if (adv.log.length > 8) adv.log.shift();
+
+    this.lastBattleSnapshot = battle;
+    this.lastBattleWorld = adv.world;
+    this.lastBattlePartyIds = [...adv.partyIds];
+    adv.battle = null;
+    this.battleEndT = 0;
+
+    if (outcome === "win") {
+      const banked = runOver ? this.bankAdventure(1) : { wood: 0, amber: 0 };
+      this.lastOutcome = {
+        outcome,
+        stageWood,
+        stageAmber,
+        runOver,
+        bankedWood: banked.wood,
+        bankedAmber: banked.amber,
+        bankPct: 100,
+        restingNames: [],
+        narrowEscape: battle.narrowEscape,
+      };
+
+      // Milestone chest: stage-3 clear (run continues) or stage-5 full
+      // clear (run just ended, s.adventure is already null by this point)
+      // — a real, permanent reward applied straight to the save (see
+      // grantChest), never reduced by anything that happens afterward.
+      if (nextStage === 3 || nextStage === 5) {
+        this.grantChest(advWorld, nextStage);
+      }
+
+      // Boon offer: every non-run-ending stage win (1-4) — not stage 5,
+      // since the run is over and there's no "rest of this run" left for a
+      // boon to apply to. Drawn once here and persisted on
+      // adv.pendingBoonOffer (see src/boons.ts's drawBoonOffer) so a
+      // pause-then-resume of an in-progress pick — even across an app
+      // restart — shows the identical 3 options, never a fresh random
+      // redraw. beginStageBattle refuses to start the next fight while
+      // this is set, enforcing the "must pick, no skip" rule.
+      // Team Down revive offer: same non-run-ending gate as the boon offer
+      // above, checked first since ui/battle.ts's finishRewardFlow shows it
+      // ahead of a pending boon pick (a downed teammate is more urgent).
+      // This is the WIN-case offer only — it can only ever trigger with 1+
+      // survivors (a full wipe never reaches a win outcome). The paid
+      // option is ALWAYS offered whenever anyone's down, regardless of
+      // whether the free roll below succeeds; the free roll is guaranteed
+      // once down to a single survivor, otherwise an independent 50%
+      // chance per downed member (1 - 0.5^deadCount: 50% for 1 down, 75%
+      // for 2, ...). Cost is a flat amber amount (see adventure.ts's
+      // reviveCost — unlike embarkCost/continueFee/chestReward, it does NOT
+      // scale with world tier, since amber income barely does either). The
+      // LOSS-case ("Team Down" after a full wipe) offer lives in the
+      // `outcome === "loss"` branch below — same shape, different odds
+      // rule and a very different resolution (see resolveRevival).
+      if (!runOver && s.adventure) {
+        const party = this.partyFor(s.adventure.partyIds);
+        const deadCount = party.filter((m) => m.currentHp <= 0).length;
+        if (deadCount > 0) {
+          const survivorCount = party.length - deadCount;
+          // Gated by freeReviveUsed: once this run's single free revive has
+          // already been spent (see resolveRevival), the roll always
+          // resolves to false — the underlying odds/guarantee formula below
+          // is untouched, only whether `free: true` is allowed at all.
+          const freeRevive =
+            !s.adventure.freeReviveUsed &&
+            (survivorCount <= 1
+              ? true
+              : Math.random() < 1 - Math.pow(0.5, deadCount));
+          s.adventure.pendingRevival = {
+            free: freeRevive,
+            cost: reviveCost(),
+            afterWipe: false,
+          };
+        }
+        s.adventure.pendingBoonOffer = drawBoonOffer(
+          party,
+          s.inventory,
+          s.adventure.abilityUsed,
+          Math.random,
+          s.prestigeLevel,
+        );
+      }
+    } else {
+      // A "loss" outcome from battle.ts only ever means a genuine full
+      // party wipe (see battle.ts's `party.every(m => m.currentHp <= 0)`
+      // gate — the lastStandArmed/roped saves are already exhausted by the
+      // time outcome becomes "loss"), so deadCount is computed properly
+      // here rather than assumed, even though it should always equal
+      // party.length. Give the wipe the same "Team Down" revive chance a
+      // partial-death WIN already gets (see the win branch above) BEFORE
+      // committing to ending the run — unlike that win-case offer, there is
+      // no "guaranteed free if <=1 survivor" carve-out here: a wipe leaves
+      // 0 survivors, and auto-guaranteeing every wipe a free save would
+      // remove all real stakes from losing, so this uses the plain
+      // per-downed-member probabilistic roll only.
+      const party = this.partyFor(adv.partyIds);
+      const deadCount = party.filter((m) => m.currentHp <= 0).length;
+      if (deadCount > 0) {
+        // Same freeReviveUsed gate as the win branch above — only the
+        // allow-`free: true` gate, the per-downed-member odds formula
+        // itself is untouched.
+        const freeRevive =
+          !adv.freeReviveUsed && Math.random() < 1 - Math.pow(0.5, deadCount);
+        adv.pendingRevival = {
+          free: freeRevive,
+          cost: reviveCost(),
+          afterWipe: true,
+        };
+        // Deferred: none of the usual loss finalization (resting marks,
+        // adventuresFailed, banking) happens yet — see finalizeLoss, run
+        // from resolveRevival once the player decides one way or another.
+        // lastOutcome reflects "nothing banked yet" so anything reading it
+        // before that (see ui/battle.ts's showOutcome's afterWipe check)
+        // gets sane, if intentionally incomplete, numbers rather than a
+        // stale summary from some earlier fight.
+        this.lastOutcome = {
+          outcome,
+          stageWood: 0,
+          stageAmber: 0,
+          runOver: false,
+          bankedWood: 0,
+          bankedAmber: 0,
+          bankPct: battle.narrowEscape ? 100 : 50,
+          restingNames: [],
+          narrowEscape: battle.narrowEscape,
+        };
+      } else {
+        // Not actually reachable per battle.ts's wipe gate above (a "loss"
+        // outcome always means everyone's at 0 HP) — kept so this stays a
+        // complete, honest path regardless of that invariant.
+        this.finalizeLoss(adv, battle);
+      }
+    }
+    scheduleSave(s, true);
+  }
+
+  /** Read-only summary of the most recently finished fight, for the battle
+   * HUD's outcome text (see ui/battle.ts's showOutcome) — null before any
+   * fight has finished this session. */
+  lastOutcomeSummary(): BattleOutcomeSummary | null {
+    return this.lastOutcome;
+  }
+
+  /** The 3 boon ids currently awaiting a pick, or null — see
+   * finalizeBattleOutcome/AdventureState.pendingBoonOffer. */
+  boonOffer(): BoonId[] | null {
+    return this.save.adventure?.pendingBoonOffer ?? null;
+  }
+
+  /** Picks one of the currently offered boons: stacks it into
+   * adv.boons (read every subsequent turn by battle.ts for the four
+   * ongoing-passive boons), and applies the two instant-effect boons'
+   * one-time payload right here. Returns false if `id` isn't actually one
+   * of the 3 currently offered (stale UI click, e.g. after an unrelated
+   * resume already cleared the offer). */
+  pickBoon(id: BoonId): boolean {
+    const adv = this.save.adventure;
+    if (!adv?.pendingBoonOffer?.includes(id)) return false;
+    adv.boons = adv.boons ?? {};
+    adv.boons[id] = (adv.boons[id] ?? 0) + 1;
+    adv.pendingBoonOffer = null;
+
+    // Iron Skin/Second Wind touch real HP pools once, right now — the same
+    // "apply once, at pick time" treatment equipment changes already get
+    // from team.ts's syncHp — rather than being folded into the per-turn
+    // multipliers battle.ts reads for the other three boons. Downed (0 HP)
+    // members are left alone here: "heal the party" only ever means the
+    // living for a boon pick. Reviving a downed member is a separate,
+    // higher-priority "Team Down" offer shown before this one ever comes up
+    // (see finalizeBattleOutcome/resolveRevival below).
+    if (id === "ironSkin" || id === "secondWind") {
+      const party = this.partyFor(adv.partyIds);
+      for (const m of party) {
+        if (m.currentHp <= 0) continue;
+        if (id === "ironSkin") {
+          const bump = Math.round(m.maxHp * BOON_HP_PCT);
+          m.maxHp += bump;
+          m.currentHp = Math.min(m.maxHp, m.currentHp + bump);
+        } else {
+          m.currentHp = Math.min(
+            m.maxHp,
+            m.currentHp + Math.round(m.maxHp * BOON_HEAL_PCT),
+          );
+        }
+      }
+    } else if (id === "vengefulSpirit") {
+      adv.abilityUsed = false;
+    }
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  /** The pending "Team Down" revive offer, or null — see
+   * finalizeBattleOutcome/AdventureState.pendingRevival. Mirrors
+   * boonOffer()'s pattern for ui/battle.ts to read from. `afterWipe`
+   * distinguishes a win-case offer (partial-death win, run continues either
+   * way) from a loss-case offer (full wipe, run-ending unless revived) —
+   * see resolveRevival. */
+  revivalOffer(): { free: boolean; cost: number; afterWipe: boolean } | null {
+    return this.save.adventure?.pendingRevival ?? null;
+  }
+
+  /** Resolves the pending Team Down offer (see finalizeBattleOutcome):
+   * "free" only succeeds if the free roll already came up true
+   * (pendingRevival.free); "paid" spends pendingRevival.cost amber, a no-op
+   * returning false if there isn't enough; "skip" declines outright — unlike
+   * a boon pick, skipping is allowed here (the player may want to save
+   * amber rather than spend on a revive). A successful free/paid revive
+   * heals the WHOLE current party to full HP, not just the downed members
+   * — same "clamp to maxHp" idea pickBoon's Second Wind/Iron Skin healing
+   * already uses, just unconditional here instead of skipping <=0 HP
+   * members, and collapsing to a plain full-heal since every member's
+   * target is exactly maxHp rather than a partial percentage.
+   *
+   * `pendingRevival.afterWipe` forks what happens next. A WIN-case offer
+   * (afterWipe false) just heals-or-doesn't and returns — the run was
+   * already continuing regardless of the choice; finishRewardFlow moves on
+   * to the boon offer either way. A WIPE-case offer (afterWipe true) is a
+   * real fork: "skip", or an attempted "free"/"paid" that fails validation
+   * (shouldn't happen through the UI — ui/battle.ts hides the free button
+   * unless pendingRevival.free and disables the paid button when
+   * unaffordable — but handled here too rather than leaving pendingRevival
+   * stuck forever and soft-locking beginStageBattle's guard), finalizes the
+   * loss for real via finalizeLoss — exactly the work finalizeBattleOutcome's
+   * loss branch used to do immediately, before this feature existed. A
+   * validated "free"/"paid" instead discards the old, terminally-"done"
+   * battle object (it can't be resumed mid-turn) and retries the very same
+   * stage that was just lost — adv.stage was never incremented on a loss,
+   * so startBattleForNextStage() naturally re-fights it, at no extra wood
+   * fee (the player already paid via amber, or via the free roll). */
+  resolveRevival(choice: "free" | "paid" | "skip"): boolean {
+    const s = this.save;
+    const adv = s.adventure;
+    const revival = adv?.pendingRevival;
+    if (!adv || !revival) return false;
+    // Stashed by finalizeBattleOutcome regardless of outcome/branch (see
+    // its doc comment) — the one piece of the just-finished fight
+    // finalizeLoss needs (battle.narrowEscape) that isn't already on adv.
+    const battle = this.lastBattleSnapshot;
+
+    if (choice === "free" && !revival.free) {
+      if (revival.afterWipe && battle) {
+        adv.pendingRevival = null;
+        this.finalizeLoss(adv, battle);
+        scheduleSave(s, true);
+      }
+      return false;
+    }
+    if (choice === "paid" && s.amber < revival.cost) {
+      if (revival.afterWipe && battle) {
+        adv.pendingRevival = null;
+        this.finalizeLoss(adv, battle);
+        scheduleSave(s, true);
+      }
+      return false;
+    }
+    if (choice === "paid") s.amber -= revival.cost;
+
+    if (choice === "skip") {
+      adv.pendingRevival = null;
+      if (revival.afterWipe && battle) this.finalizeLoss(adv, battle);
+      scheduleSave(s, true);
+      return true;
+    }
+
+    // "free" (validated true) or "paid" (validated + spent) from here.
+    // Spending the run's one-per-run free revive happens exactly here, not
+    // at either offer/roll site above (see AdventureState.freeReviveUsed) —
+    // an offered-but-declined-or-unused free revive shouldn't burn it.
+    if (choice === "free") adv.freeReviveUsed = true;
+    const party = this.partyFor(adv.partyIds);
+    for (const m of party) m.currentHp = m.maxHp;
+    adv.pendingRevival = null;
+    if (revival.afterWipe) {
+      // Already null (finalizeBattleOutcome clears adv.battle regardless of
+      // branch) — cleared again explicitly so this reads correctly even if
+      // that invariant ever changes.
+      adv.battle = null;
+      this.startBattleForNextStage(); // schedules its own save
+      return true;
+    }
+    scheduleSave(s, true);
+    return true;
+  }
+
+  /** What the most recently opened milestone chest granted, awaiting
+   * dismissal — see grantChest/ChestRevealSummary. */
+  pendingChestReveal(): ChestRevealSummary | null {
+    return this.chestReveal;
+  }
+
+  /** Dismisses the chest-reveal screen — purely a UI-state clear, the
+   * reward itself was already applied for real the instant grantChest ran. */
+  dismissChestReveal(): void {
+    this.chestReveal = null;
+  }
+
+  /** Opens a milestone chest (stage 3 / stage 5 full clear): bonus wood +
+   * amber, a guaranteed item pull from the current world's pool, and
+   * shards — all granted for real, immediately, independent of whether the
+   * run's own pendingWood/pendingAmber ever get fully banked. The item pull
+   * reuses gacha.ts's normal pullItem, deliberately INCLUDING its pity-
+   * counter update: a free chest pull still counts as "a pull" against the
+   * shared per-world item pity counter, same as a paid one, rather than a
+   * separate exploitable path that never advances (or resets) it. */
+  private grantChest(world: number, stage: 3 | 5): void {
+    const s = this.save;
+    const reward: ChestReward = chestReward(world, stage);
+    s.wood += reward.wood;
+    s.amber += reward.amber;
+    s.totalWoodEarned += reward.wood;
+    const pull = pullItem(s, world);
+    s.shards[reward.shardRarity] += reward.shardAmount;
+    // Homestead decoration, credited as a free placeable rather than as wood —
+    // the reward is "you can put one more of these in your yard".
+    const decorId = chestDecoration(stage, Math.random());
+    if (decorId) {
+      const stock = this.save.decorStock ?? {};
+      this.save.decorStock = { ...stock, [decorId]: (stock[decorId] ?? 0) + 1 };
+    }
+    const decorSpec = decorId ? buildableById(decorId) : undefined;
+
+    this.chestReveal = {
+      wood: reward.wood,
+      amber: reward.amber,
+      itemName: pull.def.name,
+      itemRarity: pull.def.rarity,
+      shardRarity: reward.shardRarity,
+      shardAmount: reward.shardAmount,
+      decorId: decorSpec?.id,
+      decorName: decorSpec?.name,
+    };
+    scheduleSave(s, true);
+  }
+
+  /** Bank 100% of pending rewards and end the run — always available. If a
+   * fight is mid-flight (not yet decided), it's abandoned, forfeiting that
+   * stage's reward, same as any other retreat. */
+  retreatAdventure(): boolean {
+    const adv = this.save.adventure;
+    if (!adv) return false;
+    if (adv.battle && adv.battle.outcome === null) {
+      adv.battle = null;
+      this.battleViewOpen = false;
+      this.battleAnimQueue = [];
+      this.battleAnim = null;
+      // Abandoning mid-flight (possibly mid-timing-check) must not leave
+      // that check's state to leak into whatever battle starts next.
+      this.battleSkillCheck = null;
+      this.battlePendingAction = null;
+    }
+    this.bankAdventure(1);
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  /** Instant-use shop item: heals the whole roster to full HP. */
+  useTrailRations(): boolean {
+    const s = this.save;
+    const spec = PROVISIONS.find((p) => p.id === "trailRations")!;
+    if (s.wood < spec.cost) return false;
+    s.wood -= spec.cost;
+    for (const m of s.team) {
+      m.currentHp = m.maxHp;
+      if (m.status === "resting") m.status = "available";
+    }
+    scheduleSave(s, true);
+    return true;
+  }
+
+  /** Fortune Charm / Emergency Rope: purchased into `provisions`, carried
+   * onto a run at embark time. */
+  buyProvision(id: ProvisionId): boolean {
+    const s = this.save;
+    const spec = PROVISIONS.find((p) => p.id === id);
+    if (!spec || spec.instant) return false;
+    if (s.amber < spec.cost) return false;
+    s.amber -= spec.cost;
+    s.provisions[id] = (s.provisions[id] ?? 0) + 1;
+    scheduleSave(s, true);
+    return true;
+  }
+
+  adventureStatus(): {
+    world: number;
+    stage: number;
+    partyIds: string[];
+    pendingWood: number;
+    pendingAmber: number;
+    battleInProgress: boolean;
+  } | null {
+    const adv = this.save.adventure;
+    if (!adv) return null;
+    return {
+      world: adv.world,
+      stage: adv.stage,
+      partyIds: [...adv.partyIds],
+      pendingWood: adv.pendingWood,
+      pendingAmber: adv.pendingAmber,
+      // "There's something live to jump back into" — a fight in progress,
+      // OR a boon pick still awaiting a decision (no skip button — Push On
+      // stays unavailable, see beginStageBattle, so the Field screen must
+      // offer Resume instead), OR a Team Down revive offer still awaiting a
+      // decision (skip IS allowed here, but Push On still stays unavailable
+      // until it's explicitly resolved one way or another — same
+      // beginStageBattle gate), OR a milestone-chest reveal this session
+      // hasn't dismissed yet.
+      battleInProgress:
+        (!!adv.battle && adv.battle.outcome === null) ||
+        !!adv.pendingBoonOffer ||
+        !!adv.pendingRevival ||
+        !!this.chestReveal,
+    };
+  }
+
+  /** Wood cost of the next Push On, for UI display — 0 if no run active. */
+  nextStageFee(): number {
+    const adv = this.save.adventure;
+    if (!adv) return 0;
+    return continueFee(getWorld(adv.world).mult, adv.stage + 1);
   }
 
   // --- layout -------------------------------------------------------------
@@ -130,14 +1787,91 @@ export class Game {
 
   private layout(): void {
     this.skyH = Math.max(24, Math.round(this.h * 0.26));
-    this.plot.resize(this.w, this.groundTop(), this.groundBottom());
+    // Trees must not grow inside the homestead — the yard is a cleared plot
+    // of land with a fence round it, and a tree standing in the middle of it
+    // reads as the fence having been drawn over the forest rather than as a
+    // place carved out of it. Passed as a callback because yardRect() reads
+    // the grid's dimensions, which only become correct partway through
+    // Forest.resize (see its `reserved` parameter).
+    this.plot.resize(this.w, this.groundTop(), this.groundBottom(), (grid) => {
+      // Runs with the grid freshly sized, which is the only moment the yard's
+      // footprint is knowable AND the trees haven't been snapped yet. Push
+      // the pond out of the homestead first, so the water cells reserved
+      // below describe where the water actually ends up.
+      const y = this.yardRect();
+      // Corner-to-corner in logical px, taken off the grid's own mapping
+      // rather than assuming its origin — `center` is the cell midpoint, so
+      // back off half a cell to reach the yard's outer edges.
+      const nw = grid.center({ cx: y.cx, cy: y.cy });
+      const se = grid.center({ cx: y.cx + y.cols - 1, cy: y.cy + y.rows - 1 });
+      this.plot.lake.avoidRect(
+        nw.x - CELL / 2,
+        nw.y - CELL / 2,
+        se.x + CELL / 2,
+        se.y + CELL / 2,
+        this.w,
+        this.groundTop(),
+        this.groundBottom(),
+      );
+      // Reserve the yard AND the water. Trees already avoid the lake when a
+      // plot is first seeded, but that check runs in normalized space before
+      // any nudge, so without this a displaced pond can end up with trunks
+      // standing in it.
+      const out = this.yardCells();
+      // The rail corridor. A tree standing between the rails reads as broken
+      // art, and the track has to run unbroken edge to edge for the two ends
+      // to read as one route (see pushRailDrawables).
+      const rail = this.railRow();
+      for (let cx = 0; cx < grid.cols; cx++) out.push({ cx, cy: rail });
+
+      // And the ground each character stands on, plus a one-cell apron.
+      // Tree canopies are far wider than their cell, so reserving only the
+      // exact cell still left the fisher peering out from inside a trunk.
+      // Runs after the lake nudge above, so the fisher — whose spot is
+      // derived from the water's edge — is resolved against the final lake.
+      for (const id of NPC_IDS) {
+        if (!this.npcPresent(id)) continue;
+        const p = this.npcPos(id);
+        const c = grid.cellAt(p.x, p.y);
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) out.push({ cx: c.cx + dx, cy: c.cy + dy });
+        }
+      }
+      for (let cy = 0; cy < grid.rows; cy++) {
+        for (let cx = 0; cx < grid.cols; cx++) {
+          const f = grid.footing({ cx, cy });
+          if (this.plot.lake.contains(f.x, f.y)) out.push({ cx, cy });
+        }
+      }
+      return out;
+    });
+    // The incoming plot during a travel slide carries no homestead yet.
     this.nextPlot?.resize(this.w, this.groundTop(), this.groundBottom());
+    this.ambience.resize(
+      this.w,
+      this.skyH,
+      this.groundTop(),
+      this.groundBottom(),
+    );
+  }
+
+  /** Which critters are out. Read off the sky's own darkness ramp rather
+   * than the wall clock, so ambience always agrees with the sky the player
+   * is actually looking at. */
+  private dayPhase(): DayPhase {
+    const d = this.sky.darkness;
+    if (d > 0.55) return "night";
+    return d > 0.22 ? "dusk" : "day";
   }
 
   resize(w: number, h: number): void {
     this.w = w;
     this.h = h;
     this.layout();
+    // The grid — and therefore the yard — is derived from the canvas, so a
+    // resize can strand placed buildables outside it. Runs after layout()
+    // so it reads the NEW footprint.
+    this.reconcilePlacements();
     for (const wc of this.woodcutters.values()) {
       wc.x = Math.min(wc.x, this.w - 12);
       wc.y = Math.max(this.skyH + 10, Math.min(wc.y, this.h - 3));
@@ -149,6 +1883,11 @@ export class Game {
 
   applySnapshot(s: Snapshot): void {
     this.hasData = true;
+    // Kept so the NPCs can be specific about your usage (see npc/usage-view).
+    // Nothing else reads it; the rest of the app consumes the derived values
+    // below. Null until the backend first answers — which in a plain browser
+    // is forever, hence UsageView.blind.
+    this.lastSnapshot = s;
     // Lake level: real account utilization when available, else the
     // budget-estimate density carried on the block.
     this.density = s.real
@@ -171,10 +1910,25 @@ export class Game {
       let wc = this.woodcutters.get(src.id);
       if (!wc) {
         const entryY =
-          this.skyH + 14 + ((this.woodcutters.size * 17) % (this.h - this.skyH - 22));
+          this.skyH +
+          14 +
+          ((this.woodcutters.size * 17) % (this.h - this.skyH - 22));
         wc = new Woodcutter(src.id, src.kind === "subagent", entryY);
+        this.slotAssignment.set(src.id, this.pickMember(src.id));
+        wc.memberId = this.slotAssignment.get(src.id) ?? null;
+        wc.rarity = this.rarityForMember(wc.memberId);
+        wc.weaponRarity = this.weaponRarityForMember(wc.memberId);
+        wc.accent = this.accentForMember(wc.memberId);
         this.applyModifiers(wc);
         this.woodcutters.set(src.id, wc);
+      } else if (!this.slotAssignment.has(src.id)) {
+        // Shouldn't normally happen (slot cleared without the sprite
+        // despawning), but re-pick defensively rather than leave it null.
+        this.slotAssignment.set(src.id, this.pickMember(src.id));
+        wc.memberId = this.slotAssignment.get(src.id) ?? null;
+        wc.rarity = this.rarityForMember(wc.memberId);
+        wc.weaponRarity = this.weaponRarityForMember(wc.memberId);
+        wc.accent = this.accentForMember(wc.memberId);
       }
       wc.activity = src.state === "waiting" ? "waiting" : "working";
       wc.leaving = false;
@@ -195,32 +1949,1525 @@ export class Game {
       this.buffers.set(e.sourceId, { tokens: e.counted, hits: 1, age: 0 });
     }
 
-    // Token accrual: every 1k counted charges +1 Focus (capped) and +1 Amber.
+    // Amber accrual: every 1k counted tokens charges +1 Amber, boosted by an
+    // equipped amberIncome Utility item / the Amber Vein Power-up (see
+    // amberIncomeMult). Kept on its own carry-over accumulator (tokenCarry)
+    // separate from Focus's (focusCarry, below) so the two can be boosted
+    // independently.
     this.tokenCarry += e.counted;
-    const gained = Math.floor(this.tokenCarry / TOKENS_PER_CHARGE);
-    if (gained > 0) {
+    const amberTicks = Math.floor(this.tokenCarry / TOKENS_PER_CHARGE);
+    if (amberTicks > 0) {
       this.tokenCarry %= TOKENS_PER_CHARGE;
-      this.save.amber += gained;
-      this.save.focus = Math.min(FOCUS_CAP, this.save.focus + gained);
+      this.save.amber += Math.round(amberTicks * this.amberIncomeMult());
       scheduleSave(this.save);
     }
 
-    // Heavy single turns drop a clickable golden log.
-    if (e.counted > GOLDEN_LOG_THRESHOLD && !this.goldenLog && !this.nextPlot) {
+    // Focus accrual: a focusEfficiencyPct Woodchopping item effectively
+    // lowers the tokens-per-Focus-point requirement for whoever's chopping
+    // — implemented as a boost to the tokens counted toward the next Focus
+    // charge (equivalent net effect, composes cleanly with the shared
+    // TOKENS_PER_CHARGE threshold instead of needing a second constant).
+    const focusMult = 1 + this.focusEfficiencyForSource(e.sourceId);
+    // Focus Overflow: tokens that arrive while Focus is already pinned at
+    // the cap feed the overflow meter instead of vanishing — every
+    // OVERFLOW_LOG_TOKENS earns a Golden Log (spawned by update() when the
+    // single log slot is free).
+    if (this.save.focus >= FOCUS_CAP) {
+      const overflow = accrueOverflow(this.overflowCarry, e.counted);
+      this.overflowCarry = overflow.carry;
+      this.overflowLogsPending += overflow.logs;
+    }
+
+    // Cache Koi: cache-read tokens (context reused instead of re-sent —
+    // "free" relative to counted usage) feed a separate meter that spawns
+    // a catchable fish in the lake. Independent of the Focus-cap gate
+    // above — cache reads accrue this regardless of whether Focus is full.
+    const koiEarn = accrueCacheKoi(this.koiCarry, e.cacheRead);
+    this.koiCarry = koiEarn.carry;
+    if (koiEarn.koi > 0 && !this.koi) {
+      this.koi = { phase: Math.random() * Math.PI * 2, ttl: CACHE_KOI_TTL };
+    }
+    this.focusCarry += e.counted * focusMult;
+    const focusTicks = Math.floor(this.focusCarry / TOKENS_PER_CHARGE);
+    if (focusTicks > 0) {
+      this.focusCarry %= TOKENS_PER_CHARGE;
+      this.save.focus = Math.min(FOCUS_CAP, this.save.focus + focusTicks);
+      scheduleSave(this.save);
+    }
+
+    // Heavy single turns drop a clickable golden log — the threshold is
+    // effectively lowered (spawns more often) by an equipped rareMapSpawn
+    // Utility item / the Golden Sense Power-up, expressed as a spawn-rate
+    // multiplier dividing the threshold (see goldenLogSpawnMult).
+    const goldenLogThreshold = GOLDEN_LOG_THRESHOLD / this.goldenLogSpawnMult();
+    if (e.counted > goldenLogThreshold && !this.goldenLog && !this.nextPlot) {
       this.goldenLog = {
         x: Math.round(12 + Math.random() * (this.w - 24)),
-        y: Math.round(this.skyH + 14 + Math.random() * (this.h - this.skyH - 22)),
+        y: Math.round(
+          this.skyH + 14 + Math.random() * (this.h - this.skyH - 22),
+        ),
         ttl: GOLDEN_LOG_TTL,
       };
     }
   }
 
+  // --- POV mode -------------------------------------------------------
+
+  /** Bbox hit-test against live woodcutter sprites, front-most first. */
+  hitWoodcutter(lx: number, ly: number): Woodcutter | null {
+    const candidates = [...this.woodcutters.values()]
+      .filter((wc) => !wc.gone)
+      .sort((a, b) => b.y - a.y);
+    for (const wc of candidates) {
+      const { w, h } = spriteSize(RARITY_WOODCUTTER_SPRITES[wc.rarity].stand);
+      if (
+        lx >= wc.x - 1 &&
+        lx <= wc.x + w + 1 &&
+        ly >= wc.y - h - 1 &&
+        ly <= wc.y + 1
+      ) {
+        return wc;
+      }
+    }
+    return null;
+  }
+
+  isPovActive(): boolean {
+    return this.povTarget !== null;
+  }
+
+  enterPov(wc: Woodcutter): void {
+    if (this.battleViewOpen) return; // POV and battle are mutually exclusive takeovers
+    this.closeDialogue();
+    if (this.povTarget) this.povTarget.endPov();
+    this.povTarget = wc;
+    this.povSkillCheck = null;
+    this.povFlash = null;
+    this.povWalkT = 0; // replay the walk-up every time the view opens
+    wc.beginPov();
+  }
+
+  exitPov(): void {
+    this.povTarget?.endPov();
+    this.povTarget = null;
+    this.povSkillCheck = null;
+    this.povFlash = null;
+  }
+
+  /** Click-on-canvas or Space while POV is active. If the cutter is sitting
+   * idle waiting for a swing to start (awaitingStart — whether or not any
+   * token-work happens to be queued), this starts one; otherwise it grades
+   * the live skill check, if one is currently awaiting input. No-op
+   * otherwise. Shared by both input paths (canvas click via handleClick,
+   * and the Space key in main.ts) so neither has to duplicate the gate. */
+  handlePovInput(): void {
+    if (!this.povTarget) return;
+    // Can't swing until he's actually reached the trunk — otherwise a click the
+    // instant POV opens fires an axe from halfway across the frame.
+    if (this.povWalkT < Game.POV_WALK_SECS) return;
+    if (this.povTarget.awaitingStart) {
+      this.povTarget.beginSwing();
+      return;
+    }
+    if (!this.povSkillCheck || !this.povTarget.awaitingInput) return;
+    const sc = this.povSkillCheck;
+    this.finishSkillCheck(this.gradeSkillCheck(sc, sc.pos));
+  }
+
+  // --- battle mode ------------------------------------------------------
+
+  isBattleViewOpen(): boolean {
+    return this.battleViewOpen;
+  }
+
+  /** Re-opens an already-in-progress battle (see startBattleForNextStage
+   * for starting a new one), OR a still-unresolved boon pick / not-yet-
+   * dismissed chest reveal from the most recent stage win — used by the HUD
+   * indicator / Adventure overlay's "Resume Battle" whenever there's
+   * something live to jump back into. */
+  openBattleView(): boolean {
+    const adv = this.save.adventure;
+    // Resumable whenever there's still a run going (a live fight, a pending
+    // boon pick, or the no-battle "stage cleared, push on or retreat"
+    // in-between-stages window — see ui/battle.ts's showStageCleared) OR a
+    // milestone chest hasn't been dismissed yet (the one case that can be
+    // true with `adv` already null — a stage-5 full clear banks + clears
+    // save.adventure before its chest is even granted).
+    if (!adv && !this.chestReveal) return false;
+    if (this.povTarget) this.exitPov();
+    this.closeDialogue();
+    this.battleViewOpen = true;
+    return true;
+  }
+
+  /** Leaves the battle view — whether that's pausing a still-live fight
+   * (its turn state stays untouched on disk, save.adventure.battle is
+   * exactly as it was), pausing on the no-battle "stage cleared" prompt
+   * between stages, or dismissing an already-finished run's summary beat
+   * early (already fully applied/banked by finalizeBattleOutcome, so there's
+   * nothing left to do here but stop showing it). */
+  closeBattleView(): void {
+    this.battleViewOpen = false;
+    this.battleAnimQueue = [];
+    this.battleAnim = null;
+    // Keep the fallback snapshot alive as long as there's still something to
+    // resume into — the run hasn't ended (covers a live fight, a pending
+    // boon pick, and the no-battle "stage cleared" prompt alike, since all
+    // three leave `adv` non-null) or a milestone chest reveal hasn't been
+    // dismissed yet. renderBattle needs it to draw the party/enemy sprites
+    // behind whatever UI is showing on the next openBattleView(), same as
+    // the constructor's app-restart seeding above (see its doc comment).
+    if (!this.save.adventure && !this.chestReveal) {
+      this.lastBattleSnapshot = null;
+    }
+  }
+
+  /** Click/Space while the battle view is open — resolves a pending Attack
+   * or Defend timing check if one is live, otherwise just consumes the
+   * click (real turn actions come from the floating bubble UI, not a
+   * generic canvas click). */
+  /** Watches every battle unit for the frame its HP first reaches 0 and kicks
+   * off the death beat: a squash-and-stretch collapse (see deathSquash) plus a
+   * spray of blood. Previously a defeated unit simply swapped to a static
+   * "defeated" frame with no transition at all, so kills landed with no impact
+   * — the sprite was just suddenly lying down. */
+  private updateDeaths(dt: number): void {
+    for (const [id, t] of this.deathAnims) {
+      const next = t + dt;
+      if (next >= Game.DEATH_SECS) this.deathAnims.delete(id);
+      else this.deathAnims.set(id, next);
+    }
+
+    const battle = this.battleSnapshot();
+    if (!battle) return;
+    const check = (
+      id: string,
+      hp: number,
+      pos: { x: number; y: number } | null,
+    ): void => {
+      if (hp > 0) {
+        // Revived (or a fresh unit reusing an id) — allow a future death.
+        this.deathSeen.delete(id);
+        return;
+      }
+      if (this.deathSeen.has(id)) return;
+      this.deathSeen.add(id);
+      this.deathAnims.set(id, 0);
+      if (!pos) return;
+      // Reuses LeafBurst rather than adding a near-identical class — its
+      // gravity-and-sway arc is exactly a spatter, only the colors differ.
+      // Same "reuse the existing particle system" call as the Sap Press.
+      this.effects.push(
+        new LeafBurst(
+          pos.x,
+          pos.y - 6,
+          ["#8c1c1c", "#b52d2d", "#5e1010"],
+          14,
+          0.7,
+        ),
+      );
+      this.battleShakeT = Math.max(this.battleShakeT, 0.18);
+    };
+
+    for (let i = 0; i < battle.enemies.length; i++) {
+      const u = battle.enemies[i];
+      check(u.id, u.hp, battleEnemySlot(i, battle.enemies.length, this));
+    }
+    const adv = this.save.adventure;
+    if (adv) {
+      for (const m of this.partyFor(adv.partyIds)) {
+        const idx = adv.partyIds.indexOf(m.id);
+        check(m.id, m.currentHp, idx >= 0 ? battlePartySlot(idx, this) : null);
+      }
+    }
+  }
+
+  /** Vertical squash factor for a unit mid-collapse: a quick stretch as it
+   * drops, then a hard squash as it hits the ground, easing out to rest.
+   * 1 = no deformation (not dying, or the beat is over). */
+  private deathSquash(id: string): number {
+    return deathSquash(this.deathAnims.get(id), Game.DEATH_SECS);
+  }
+
+  handleBattleClick(): boolean {
+    if (this.battleSkillCheck) {
+      // Swallow the click while the opening grace window is live (see
+      // beginBattleTiming) — but still consume it, so it can't fall through
+      // and start a window-drag mid-fight.
+      if (this.battleSkillCheckGrace > 0) return true;
+      const sc = this.battleSkillCheck;
+      this.finishBattleTiming(this.gradeSkillCheck(sc, sc.pos));
+    }
+    return true;
+  }
+
+  /** Bbox hit-test for the top-left "N away · stage M" HUD icon, clickable
+   * whenever a run is in progress at all — not just mid-battle — so it's
+   * always a working path back in, whether that means resuming a live
+   * fight or opening the Adventure overlay to Push On between stages. */
+  /** Superseded by the encampment: adventuring is now a place on the map, so
+   * this stays only as the resume path for a run already in progress and is
+   * anchored to the camp rather than a floating corner badge. */
+  private hitAdventureIndicator(lx: number, ly: number): boolean {
+    if (!this.save.adventure) return false;
+    return this.hitEncampment(lx, ly);
+    // eslint-disable-next-line no-unreachable
+    // Follows the badge to its home on the signpost (see render). Sits ABOVE
+    // the signpost's own box, so the two can't both claim a click.
+    const sp = this.signpostPos();
+    return (
+      lx >= sp.x + 5 && lx <= sp.x + 30 && ly >= sp.y - 24 && ly <= sp.y - 16
+    );
+  }
+
+  /** Deliberately NOT part of the procedural tree layout, so the press is
+   * always in a predictable, reachable spot regardless of plot seed — but
+   * placed by fraction like every other prop so it scales with the window. */
+  sapPressOwned(): boolean {
+    return this.save.sapPressBuilt === true;
+  }
+
+  sapPressPurchaseCost(): number {
+    return sapPressBuildCost(getWorld(this.save.worldIndex).mult);
+  }
+
+  /** Buys the Sap Press. It then stands in the clearing permanently and works
+   * exactly as before — this only gates whether you have one at all. */
+  buySapPress(): boolean {
+    if (this.sapPressOwned()) return false;
+    const cost = this.sapPressPurchaseCost();
+    if (this.save.wood < cost) return false;
+    this.save.wood -= cost;
+    this.save.sapPressBuilt = true;
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  private sapPressPos(): { x: number; y: number } {
+    return this.propSpot(0.955, 0.99);
+  }
+
+  // --- Environmental resource props -----------------------------------------
+  //
+  // Wood / amber / focus used to be a readout drawn in the top-left corner.
+  // They're now physical objects standing around the clearing.
+  //
+  // Placement is by FRACTION of the clearing, never fixed pixel offsets. The
+  // canvas is as wide as the player's window — 840 logical px on a 1680px
+  // window, against a 180px default — so hardcoded offsets bunched every prop
+  // into the leftmost ~9% and left the middle of the clearing empty. Depth
+  // varies per prop as well, because props sharing one ground line read as a
+  // toolbar strip pasted along the bottom edge rather than objects standing in
+  // a world. Varying y also lets them depth-sort in among the trees.
+
+  /** Converts a (fraction-across, fraction-into-the-clearing) pair to canvas
+   * coords, then nudges the result off the lake — the lake is seeded per plot,
+   * so any fixed spot can land in open water on some seeds. */
+  private propSpot(fx: number, fy: number): { x: number; y: number } {
+    const top = this.groundTop() + 8;
+    const bottom = this.groundBottom();
+    const x = Math.round(this.w * fx);
+    const y = Math.round(top + (bottom - top) * fy);
+    return this.avoidLake(x, y);
+  }
+
+  /** Walks a point horizontally out of the lake, away from its centre. Bounded
+   * so a pathological lake can never push a prop off-canvas; if it somehow
+   * can't escape, the original point stands (a prop briefly in the shallows
+   * beats a prop teleported off screen). */
+  private avoidLake(x: number, y: number): { x: number; y: number } {
+    const lake = this.plot.lake;
+    if (!lake.contains(x, y)) return { x, y };
+    const dir = x < lake.cx ? -1 : 1;
+    for (let step = 2; step <= lake.rx + 12; step += 2) {
+      const nx = x + dir * step;
+      if (nx < 8 || nx > this.w - 8) break;
+      if (!lake.contains(nx, y)) return { x: nx, y };
+    }
+    return { x, y };
+  }
+
+  // --- Homestead ------------------------------------------------------------
+  //
+  // The cottage and its fenced yard are the plot of land everything else lives
+  // on: the resource readouts are its furnishings, and bought buildables get
+  // placed on its free grid cells.
+  //
+  // The yard is anchored in GRID CELLS rather than pixels so it lines up with
+  // the tiles buildables snap to — a yard measured in pixels would leave
+  // placements half-in and half-out of the fence at some window sizes.
+
+  /** Yard footprint in cells: origin plus span. Sized as a fraction of the
+   * grid so the homestead stays proportionate on any window, with a floor so
+   * it never collapses below something buildable on a tiny canvas. */
+  private yardRect(): { cx: number; cy: number; cols: number; rows: number } {
+    const grid = this.plot.forest.gridRef();
+    // The plot GROWS with the cottage: each phase widens it and (from phase 2)
+    // deepens it, so raising the cottage tangibly buys you more room to build
+    // rather than just a nicer sprite. Clamped to a fraction of the grid so a
+    // fully-built homestead still can't swallow a small window.
+    const phase = this.cottagePhase();
+    // Width is a FRACTION of the grid, not a fixed cell count. The old
+    // `baseCols + phase * 3` was tuned when the canvas rendered at half CSS
+    // size and the grid was ~70 columns wide, where a fully-built yard came
+    // to a comfortable 30% of the plot. Once the renderer started targeting
+    // a constant ~240px logical width the grid dropped to ~20 columns and
+    // the very same numbers made the homestead swallow 75% of the world —
+    // fence and all, pond included. A fraction holds the intended
+    // proportion at any grid size.
+    const cols = Math.max(
+      5,
+      Math.min(grid.cols - 4, Math.round(grid.cols * (0.25 + phase * 0.05))),
+    );
+    const baseRows = Math.max(3, Math.min(4, Math.round(grid.rows * 0.14)));
+    const rows = Math.min(
+      Math.max(3, Math.round(grid.rows * 0.4)),
+      baseRows + Math.max(0, phase - 1),
+    );
+    return {
+      cx: Math.max(0, Math.round(grid.cols * 0.06)),
+      cy: Math.max(0, grid.rows - rows - 1),
+      cols,
+      rows,
+    };
+  }
+
+  /** Every cell the homestead covers, plus a one-cell apron. The apron
+   * matters: the fence is drawn on the yard's boundary and tree canopies are
+   * wider than their cell, so a tree in the very next cell still overhangs
+   * the rails. Reserving one ring out keeps the clearing looking cleared. */
+  private yardCells(): Cell[] {
+    const y = this.yardRect();
+    const out: Cell[] = [];
+    for (let dy = -1; dy <= y.rows; dy++) {
+      for (let dx = -1; dx <= y.cols; dx++) {
+        out.push({ cx: y.cx + dx, cy: y.cy + dy });
+      }
+    }
+    return out;
+  }
+
+  /** Cell the cottage itself stands on — back-left of the yard. */
+  private cottageCell(): Cell {
+    const y = this.yardRect();
+    return { cx: y.cx + 1, cy: y.cy };
+  }
+
+  /** Where each resource readout stands inside the yard. These are the
+   * cottage's furnishings — the whole point of the homestead is that wood,
+   * amber and focus are all visible in one plot of land instead of scattered
+   * across the clearing at fraction-of-canvas positions, which is what made
+   * them read as a toolbar strip.
+   *
+   * Laid out along the yard's front row (nearest the viewer) so nothing hides
+   * behind the cottage, with the lantern one row back since it hangs high. */
+  private yardPropCells(): Record<
+    "logStack" | "whetstone" | "signpost" | "lantern",
+    Cell
+  > {
+    const y = this.yardRect();
+    const front = y.cy + y.rows - 1;
+    // Props are spread across a FRACTION of the yard's width, not parked at
+    // fixed column offsets. The old version used literal columns 1/4/7/9 and
+    // clamped anything past the edge to the last column — so in a yard
+    // narrower than 10 cells the signpost and lantern both collapsed onto
+    // the whetstone's cell and three props drew on top of each other. Yard
+    // width now varies with both the grid size and the cottage phase, so
+    // anything absolute here is a collision waiting to happen.
+    const span = Math.max(1, y.cols - 1);
+    const col = (f: number): number =>
+      y.cx + Math.max(0, Math.min(y.cols - 1, Math.round(f * span)));
+    return {
+      logStack: { cx: col(0.1), cy: front },
+      whetstone: { cx: col(0.37), cy: front },
+      signpost: { cx: col(0.63), cy: front },
+      lantern: { cx: col(0.88), cy: Math.max(y.cy, front - 2) },
+    };
+  }
+
+  private cottagePos(): { x: number; y: number } {
+    return this.plot.forest.gridRef().footing(this.cottageCell());
+  }
+
+  // --- The Timber Line: how you move between worlds -------------------------
+  //
+  // Travel was a single raft on the lake (forward = click, back = an
+  // undiscoverable right-click), then a dirt-road stub on the left and a plank
+  // bridge on the right. The second version fixed the discoverability but not
+  // the reading: two unrelated props at opposite screen edges, sharing no
+  // visual language, so nothing said they were the two ends of one route.
+  //
+  // Now there is ONE narrow-gauge logging railway running along the back of
+  // the clearing. Its left end is a halt with a handcar you ride back down the
+  // line; its right end runs out onto a timber trestle over the ravine that a
+  // foreman rebuilds for you — and paying WOOD to rebuild a TIMBER
+  // trestle is what makes the travel cost read as a reason rather than a toll.
+  //
+  // The economics are untouched: travelStatus/repairBridge/crossBridge/
+  // travelBackTo below are exactly as they were. This is presentation.
+
+  /** The track runs along the BACK row of the plot, tucked under the treeline.
+   * The old road/bridge sat at ~0.42 of the grid's depth, which cut the
+   * clearing in half; along the back it frames the plot instead, and both ends
+   * land naturally at the screen edges. Trees are kept off this row by
+   * layout()'s reservation callback. */
+  private railRow(): number {
+    return 0;
+  }
+
+  private railFooting(cx: number): { x: number; y: number } {
+    return this.plot.forest.gridRef().footing({ cx, cy: this.railRow() });
+  }
+
+  private haltPos(): { x: number; y: number } {
+    return this.railFooting(0);
+  }
+
+  /** The handcar sits just along the rails from the platform, so the two read
+   * as one installation without the car covering the departures board. */
+  private handcarPos(): { x: number; y: number } {
+    const p = this.railFooting(1);
+    return { x: p.x + 2, y: p.y };
+  }
+
+  /** The chasm the bridge crosses, in logical px.
+   *
+   * Deliberately leaves a strip of FAR BANK on screen to the right. The old
+   * crossing ran off the edge, so you never saw a span start and finish and
+   * it never read as a bridge — you have to be able to see both ends. Kept
+   * to the right ~13% so it costs the plot very little usable ground. */
+  private ravineRect(): { x0: number; x1: number; top: number; bottom: number } {
+    return {
+      x0: Math.round(this.w * 0.8),
+      x1: Math.round(this.w * 0.93),
+      top: this.groundTop(),
+      bottom: this.h,
+    };
+  }
+
+  private trestlePos(): { x: number; y: number } {
+    const grid = this.plot.forest.gridRef();
+    return this.railFooting(Math.max(0, grid.cols - 3));
+  }
+
+  /** The wright stands one step in FRONT of the track (a row nearer the
+   * viewer), not on it — a person standing between the rails reads as about
+   * to be run down, and he'd also be occluded by his own trestle. */
+  private foremanPos(): { x: number; y: number } {
+    // At the bridge head, on the NEAR bank, just in front of the track.
+    //
+    // He used to stand a couple of rows below and to the right of the
+    // crossing, which put him adrift in open grass — "the man at the bridge"
+    // was not something the picture actually said. Anchoring him to the
+    // ravine's near lip does say it, and it also solves the occlusion
+    // complaint: the ravine cells are reserved from trees and props (see
+    // layout), so nothing can ever be placed in front of him.
+    const rav = this.ravineRect();
+    const y = this.railFooting(0).y + 8;
+    return { x: rav.x0 - 7, y: Math.min(this.h - 4, y) };
+  }
+
+  private hitNpc(id: NpcId, lx: number, ly: number): boolean {
+    if (!this.npcPresent(id)) return false;
+    const p = this.npcPos(id);
+    const size = this.npcSize(id);
+    // The sprite, plus 2px of slop. Nothing more.
+    //
+    // The foreman used to ALSO answer for the whole trestle box, which made
+    // his click target a large invisible rectangle stretching off to the
+    // right — you would open his rate card by clicking apparently empty
+    // ground, and clicking the man himself was the unreliable part. Now that
+    // he stands at the bridge head, "click the person" is both the obvious
+    // gesture and the only one.
+    return (
+      Math.abs(lx - p.x) <= size.w / 2 + 2 && ly >= p.y - size.h - 2 && ly <= p.y + 2
+    );
+  }
+
+  /** Whether a character is on this plot at all. The foreman only exists
+   * where there is a crossing to build; the others are always about. */
+  private npcPresent(id: NpcId): boolean {
+    if (id === "foreman") return this.travelStatus() !== null;
+    return true;
+  }
+
+  /** A read-only view of the live telemetry plus the player's stores, for
+   * lines that want to be specific. Rebuilt per pick rather than cached: the
+   * numbers move constantly and a stale quote is worse than no quote. */
+  private usageView(): UsageView {
+    return buildUsageView(this.lastSnapshot, this.density, {
+      wood: this.save.wood,
+      amber: this.save.amber,
+      focus: this.save.focus,
+    });
+  }
+
+  /** Anchor for a character's speech, just above their head. */
+  private npcSpeakerPoint(id: NpcId): { x: number; y: number } {
+    const p = this.npcPos(id);
+    return { x: p.x, y: p.y - this.npcSize(id).h - 1 };
+  }
+
+  /** Click-to-talk: a fresh random line, in a modal bubble with one dismiss
+   * row. The foreman is the exception — when there is business to do, his
+   * business takes priority over his chatter (see openForemanDialogue). */
+  private talkTo(id: NpcId): void {
+    if (id === "foreman" && this.foremanHasBusiness()) {
+      this.openForemanDialogue();
+      return;
+    }
+    const u = this.usageView();
+    const line = pickLine(NPCS[id].lines, u, { previous: this.lastLine.get(id) ?? null });
+    if (!line) return;
+    this.lastLine.set(id, line);
+    this.dialogue = {
+      speaker: this.npcSpeakerPoint(id),
+      lines: wrapLines(renderLine(line, u), Math.min(76, this.w - 16)),
+      choices: [{ label: "AYE", onPick: () => {} }],
+    };
+    this.dialogueHover = null;
+  }
+
+  /** Tick the unprompted chatter.
+   *
+   * Rules, in order of how annoying their absence would be:
+   *   - never during a takeover (battle, POV, build mode, a world slide) or
+   *     while a real conversation is open;
+   *   - one speaker at a time, globally, so two characters never talk over
+   *     each other;
+   *   - a long random gap, re-rolled each time, so the rhythm never becomes
+   *     predictable enough to notice.
+   * Ambient bubbles are drawn but never hit-tested, so a mutter can't eat a
+   * click meant for the world underneath it. */
+  private updateAmbient(dt: number): void {
+    if (this.ambient) {
+      this.ambient.ttl -= dt;
+      if (this.ambient.ttl <= 0) this.ambient = null;
+      return;
+    }
+    const busy =
+      this.battleViewOpen ||
+      this.povTarget !== null ||
+      this.nextPlot !== null ||
+      this.buildModeActive() ||
+      this.dialogue !== null;
+    if (busy) return;
+    this.ambientCooldown -= dt;
+    if (this.ambientCooldown > 0) return;
+    this.ambientCooldown =
+      Game.AMBIENT_MIN_GAP + Math.random() * (Game.AMBIENT_MAX_GAP - Game.AMBIENT_MIN_GAP);
+
+    const present = NPC_IDS.filter((id) => this.npcPresent(id));
+    if (present.length === 0) return;
+    const id = present[Math.floor(Math.random() * present.length)];
+    const u = this.usageView();
+    const line = pickLine(NPCS[id].lines, u, { ambient: true, previous: this.lastLine.get(id) ?? null });
+    if (!line) return;
+    this.lastLine.set(id, line);
+    this.ambient = {
+      speaker: this.npcSpeakerPoint(id),
+      lines: wrapLines(renderLine(line, u), Math.min(70, this.w - 16)),
+      ttl: Game.AMBIENT_LIFE,
+      life: Game.AMBIENT_LIFE,
+    };
+  }
+
+  /** Queue every present character into the depth-sorted pass, so a
+   * woodcutter walking past one is occluded by them exactly like a tree. */
+  private pushNpcDrawables(
+    ctx: CanvasRenderingContext2D,
+    drawables: { y: number; draw: () => void }[],
+  ): void {
+    for (const id of NPC_IDS) {
+      if (!this.npcPresent(id)) continue;
+      const p = this.npcPos(id);
+      drawables.push({
+        y: p.y + 0.3,
+        draw: () => {
+          if (id === "fisher") this.drawFisherLine(ctx, p);
+          const def = NPCS[id];
+          // The foreman's hammer frames are driven by the rebuild beat when
+          // he's working; otherwise everyone just breathes on their own slow
+          // cycle, offset per character so they never sync up.
+          let frame = def.idle;
+          if (id === "foreman" && this.trestleBuildT > 0) {
+            frame = Math.sin(this.animT * 14) > 0 ? FOREMAN_WORK_FRAMES.up : FOREMAN_WORK_FRAMES.down;
+          } else if (def.alt && def.altRate) {
+            const phase = id.charCodeAt(0);
+            if (Math.sin(this.animT * def.altRate + phase) > 0.86) frame = def.alt;
+          }
+          const size = spriteSize(frame);
+          // The fisher's rod is baked pointing RIGHT, so he has to be
+          // mirrored whenever he's sitting on the far bank — otherwise he
+          // casts off into the grass while his line runs the other way.
+          const flip = id === "fisher" && !this.fisherFacesRight();
+          drawSprite(ctx, frame, p.x - Math.floor(size.w / 2), p.y - size.h, flip);
+        },
+      });
+    }
+  }
+
+  /** Which way the fisher is turned: toward the water, always. Shared by the
+   * sprite flip and the line/float placement so the two can never disagree. */
+  private fisherFacesRight(): boolean {
+    return this.fisherPos().x < this.plot.lake.cx;
+  }
+
+  /** The fisher's line, from his rod tip out to the water, with a float
+   * bobbing on the surface. Drawn procedurally rather than baked into the
+   * sprite because the lake's position is seeded per plot — a painted-on line
+   * would point at grass half the time. */
+  private drawFisherLine(ctx: CanvasRenderingContext2D, p: { x: number; y: number }): void {
+    const lake = this.plot.lake;
+    const size = spriteSize(NPCS.fisher.idle);
+    const facingRight = this.fisherFacesRight();
+    const tipX = p.x + (facingRight ? size.w / 2 : -size.w / 2);
+    const tipY = p.y - size.h + 2;
+    // Land the float a little inside the near edge of the water.
+    const floatX = Math.round(lake.cx + (facingRight ? -lake.rx * 0.45 : lake.rx * 0.45));
+    const bob = Math.round(Math.sin(this.animT * 1.7) * 1);
+    const floatY = Math.round(lake.cy + lake.ry * 0.25) + bob;
+    ctx.strokeStyle = "rgba(235, 240, 245, 0.45)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(tipX) + 0.5, Math.round(tipY) + 0.5);
+    ctx.lineTo(floatX + 0.5, floatY + 0.5);
+    ctx.stroke();
+    ctx.fillStyle = "#d64545";
+    ctx.fillRect(floatX, floatY, 1, 2);
+  }
+
+  /** Pull any placed buildable that has ended up outside the yard back into
+   * it, onto the nearest free cell.
+   *
+   * The yard is defined in GRID CELLS and the grid is rebuilt from the
+   * canvas on every resize, so its footprint moves whenever the window
+   * does — it is anchored to the bottom-left, so shrinking the logical
+   * canvas slides the yard up and leaves anything placed near the old
+   * bottom edge stranded outside it. A stranded item is invisible (it draws
+   * off the plot) and unreachable (Build Mode only hit-tests yard cells),
+   * so it reads as "my bench got deleted".
+   *
+   * Best-effort by design: an item with nowhere free to go keeps its
+   * current cell rather than being dropped. Losing the placement is bad;
+   * losing the ITEM would be much worse. */
+  private reconcilePlacements(): void {
+    const placed = this.save.placed;
+    if (!placed || placed.length === 0) return;
+    const y = this.yardRect();
+    const grid = this.plot.forest.gridRef();
+    const inYard = (cx: number, cy: number): boolean =>
+      cx >= y.cx &&
+      cx < y.cx + y.cols &&
+      cy >= y.cy &&
+      cy < y.cy + y.rows &&
+      grid.inBounds({ cx, cy });
+
+    if (placed.every((p) => inYard(p.cx, p.cy))) return;
+
+    // Rebuild against a live occupancy set so two relocated items can't be
+    // sent to the same cell.
+    const taken = new Set<string>();
+    taken.add(Grid.key(this.cottageCell()));
+    if (this.barnAvailable()) taken.add(Grid.key(this.barnCell()));
+    for (const c of Object.values(this.yardPropCells())) taken.add(Grid.key(c));
+    for (const p of placed)
+      if (inYard(p.cx, p.cy)) taken.add(Grid.key({ cx: p.cx, cy: p.cy }));
+
+    let moved = 0;
+    const next = placed.map((p) => {
+      if (inYard(p.cx, p.cy)) return p;
+      let best: Cell | null = null;
+      let bestD = Infinity;
+      for (let dy = 0; dy < y.rows; dy++) {
+        for (let dx = 0; dx < y.cols; dx++) {
+          const c = { cx: y.cx + dx, cy: y.cy + dy };
+          if (!grid.inBounds(c) || taken.has(Grid.key(c))) continue;
+          // Nearest free cell to where it used to be, so a reflow feels like
+          // the yard shifting under the furniture rather than a reshuffle.
+          const d = (c.cx - p.cx) ** 2 + (c.cy - p.cy) ** 2;
+          if (d < bestD) {
+            bestD = d;
+            best = c;
+          }
+        }
+      }
+      if (!best) return p;
+      taken.add(Grid.key(best));
+      moved++;
+      return { ...p, cx: best.cx, cy: best.cy };
+    });
+    if (moved > 0) {
+      this.save.placed = next;
+      scheduleSave(this.save, false);
+    }
+  }
+
+  /** Buys a buildable and drops it on the first free yard cell. Returns false
+   * if it's unaffordable or the yard is full — the caller surfaces which. */
+  placeBuildable(id: string): boolean {
+    const spec = buildableById(id);
+    if (!spec) return false;
+    const cost = buildableCost(spec, getWorld(this.save.worldIndex).mult);
+    if (this.save.wood < cost) return false;
+    const free = this.freeYardCells();
+    if (free.length === 0) return false;
+    const cell = free[0];
+    this.save.wood -= cost;
+    this.save.placed = [
+      ...(this.save.placed ?? []),
+      { id, cx: cell.cx, cy: cell.cy },
+    ];
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  /** How many free (chest-won) copies of a buildable are in stock. */
+  decorInStock(id: string): number {
+    return this.save.decorStock?.[id] ?? 0;
+  }
+
+  yardIsFull(): boolean {
+    return this.freeYardCells().length === 0;
+  }
+
+  /** Every readout now stands on its own yard cell rather than at a
+   * fraction-of-canvas position — see yardPropCells for why. */
+  private logStackPos(): { x: number; y: number } {
+    return this.plot.forest.gridRef().footing(this.yardPropCells().logStack);
+  }
+
+  private whetstonePos(): { x: number; y: number } {
+    return this.plot.forest.gridRef().footing(this.yardPropCells().whetstone);
+  }
+
+  private lanternPos(): { x: number; y: number } {
+    return this.plot.forest.gridRef().footing(this.yardPropCells().lantern);
+  }
+
+  //
+  // NOTE: the brief describes a crank for "music volume" and a needle for SFX.
+  // This game has no music — src/sfx.ts is entirely synthesized one-shots — so
+  // rather than inventing a music bus, the crank drives SFX VOLUME and the
+  // tone-arm drives SFX MUTE. Don't go looking for an audio track; there isn't
+  // one.
+  //
+  // Volume reads as an 8-pip brass arc rather than crank angle: at a 5px radius
+  // an angle simply isn't legible as a value. The crank still animates to the
+  // level, but the pips are the actual readout.
+  /** Crossroads Signpost — the in-world entrance to Settings. Sits between the
+   * whetstone (x 31..41) and the lantern post, on the ground line like every
+   * other prop. Unlike the three resource props this one IS clickable, so its
+   * hit box has to be tight: a miss falls through to startDragging(). */
+  private signpostPos(): { x: number; y: number } {
+    return this.plot.forest.gridRef().footing(this.yardPropCells().signpost);
+  }
+
+  private hitSignpost(lx: number, ly: number): boolean {
+    const p = this.signpostPos();
+    return Math.abs(lx - p.x) <= 5 && ly >= p.y - 16 && ly <= p.y;
+  }
+
+  /** The BRIDGE's box in canvas-logical coords, for main.ts to park the
+   * transparent keyboard-accessible travel affordance over. Null when there's
+   * no onward world at all, so the affordance hides with it rather than
+   * leaving a focusable ghost at the map edge. */
+  travelTargetRect(): { x: number; y: number; w: number; h: number } | null {
+    if (!this.travelStatus()) return null;
+    // Points at the WRIGHT, not the trestle: he is what you interact with now.
+    const p = this.foremanPos();
+    return { x: p.x - 8, y: p.y - 12, w: 16, h: 16 };
+  }
+
+  /** The pile is ONE pyramid — 3 logs along the base, four rows, 7 total, so
+   * at 4px per log it is exactly CELL (12px) wide and sits inside a single tile.
+   * It used to be 6 wide (24px), straddling two cells, which meant the Build
+   * Mode grid showed a free tile that the pile visually covered —
+   * and the tier only decides how many of those 18 slots are filled. It
+   * deliberately does NOT give each tier its own width/height, because that
+   * made the stack change shape at every boundary: a full Cord packed 7 logs
+   * into a tight 2-row stack, then a fresh Wall spread the same 7 across a
+   * 6-wide base and read as a thinner, sparser pile despite being more wood.
+   * With a single fixed pyramid, growth is strictly additive — logs only ever
+   * get stacked on, never rearranged. */
+  private static readonly PILE_BASE = 3;
+  private static readonly PILE_ROWS = 4;
+  /** Filled-slot range per tier. Each tier starts where the last one ended, so
+   * the count is continuous across thresholds as well as monotonic. */
+  private static readonly LOG_PILE = {
+    kindling: { from: 1, to: 2 },
+    cord: { from: 2, to: 4 },
+    wall: { from: 4, to: 7 },
+  } as const;
+
+  /** Filled log slots for the current wood, 1..18. */
+  private logPileCount(): number {
+    const { tier, within } = logStackTier(this.save.wood, this.save.worldIndex);
+    const { from, to } = Game.LOG_PILE[tier];
+    return Math.max(1, from + Math.round((to - from) * within));
+  }
+
+  /** Builds the view the Timber Line renderer needs (see scene/travel.ts) and
+   * hands off. Everything about HOW the line looks lives over there now; this
+   * only knows where the pieces are. */
+  private pushRailDrawables(
+    ctx: CanvasRenderingContext2D,
+    drawables: { y: number; draw: () => void }[],
+  ): void {
+    pushTimberLineDrawables(ctx, drawables, {
+      w: this.w,
+      animT: this.animT,
+      railY: this.railFooting(0).y,
+      halt: this.haltPos(),
+      handcar: this.handcarPos(),
+      trestle: this.trestlePos(),
+      ravine: this.ravineRect(),
+      hasTrestle: this.travelStatus() !== null,
+      hasWayBack: this.backTravelOptions().length > 0,
+      bridgeRepaired: this.bridgeRepaired(),
+      trestleBuildT: this.trestleBuildT,
+      trestleBuildSecs: Game.TRESTLE_BUILD_SECS,
+      handcarDepartT: this.handcarDepartT,
+      handcarDepartSecs: Game.HANDCAR_DEPART_SECS,
+    });
+  }
+
+  /** Queues the homestead — fence, cottage, and every placed buildable — into
+   * the depth-sorted pass, so a worker walking past the cottage is occluded by
+   * it exactly like a tree. */
+  /** Builds the view the homestead renderer needs (see scene/homestead.ts)
+   * and hands off. */
+  private pushYardDrawables(
+    ctx: CanvasRenderingContext2D,
+    drawables: { y: number; draw: () => void }[],
+  ): void {
+    pushHomesteadDrawables(ctx, drawables, {
+      plot: this.plot,
+      save: this.save,
+      yardRect: () => this.yardRect(),
+      cottagePos: () => this.cottagePos(),
+      cottagePhase: () => this.cottagePhase(),
+      barnPos: () => this.barnPos(),
+      barnPhase: () => this.barnPhase(),
+      barnAvailable: () => this.barnAvailable(),
+      encampmentPos: () => this.encampmentPos(),
+    });
+  }
+
+  /** Pixel width of the pile's widest row. The pile is CENTRED on this, so at
+   * PILE_BASE=3 it is exactly one CELL wide and stays inside its own tile. */
+  private logPileWidth(): number {
+    return Game.PILE_BASE * spriteSize(LOG_END).w;
+  }
+
+  private drawLogStack(ctx: CanvasRenderingContext2D): void {
+    const { x, y } = this.logStackPos();
+    const { tier } = logStackTier(this.save.wood, this.save.worldIndex);
+    const count = this.logPileCount();
+    const { w: lw, h: lh } = spriteSize(LOG_END);
+    const left = x - Math.floor(this.logPileWidth() / 2);
+
+    // Retaining stakes appear once the pile is a real stack rather than a
+    // handful of kindling.
+    if (tier !== "kindling") {
+      // Stakes sit INSIDE the pile's own footprint. Drawn outside it they
+      // extended past the cell, and since the log stack is the yard's
+      // left-most prop that put the left stake straight through the fence's
+      // side rail.
+      const stake = spriteSize(LOG_STAKE);
+      drawSprite(ctx, LOG_STAKE, left, y - stake.h);
+      drawSprite(
+        ctx,
+        LOG_STAKE,
+        left + this.logPileWidth() - stake.w,
+        y - stake.h,
+      );
+    }
+
+    let placed = 0;
+    for (let r = 0; r < Game.PILE_ROWS && placed < count; r++) {
+      const inRow = Math.max(1, Game.PILE_BASE - r);
+      // Each row is itself centred over the one below, so the pyramid tapers
+      // symmetrically instead of leaning right.
+      const rowLeft = left + Math.floor(((Game.PILE_BASE - inRow) * lw) / 2);
+      for (let c = 0; c < inRow && placed < count; c++) {
+        drawSprite(ctx, LOG_END, rowLeft + c * lw, y - (r + 1) * lh);
+        placed++;
+      }
+    }
+  }
+
+  /** Whetstone — the Focus meter's fixed home. The wheel takes the same heat
+   * ramp as the axe blade, so the two read as one meter expressed twice. */
+  private drawWhetstone(ctx: CanvasRenderingContext2D): void {
+    const { x, y } = this.whetstonePos();
+    const heat = focusHeatColor(this.save.focus);
+    const size = spriteSize(WHETSTONE);
+    const draw = (): void =>
+      drawSprite(ctx, WHETSTONE, x - Math.floor(size.w / 2), y - size.h);
+    if (heat) {
+      withPalette({ e: heat }, draw);
+    } else {
+      draw();
+    }
+  }
+
+  /** Hanging lantern. The amber level is painted into LANTERN_FRAME's hollow
+   * interior bottom-up; the light cone it casts is drawn later, in
+   * renderPropLabels, so the night overlay can't wash it out. */
+  private drawLantern(ctx: CanvasRenderingContext2D): void {
+    const { x, y } = this.lanternPos();
+    const post = spriteSize(LANTERN_POST);
+    const postX = x;
+    const postY = y - post.h;
+    drawSprite(ctx, LANTERN_POST, postX, postY);
+
+    const f = this.lanternFill();
+    const frame = this.lanternFramePos();
+    drawSprite(ctx, LANTERN_FRAME, frame.x, frame.y);
+    if (f > 0) {
+      const g = LANTERN_GLASS;
+      const fillH = Math.max(1, Math.round(g.h * f));
+      ctx.fillStyle = "#ffd75e";
+      ctx.fillRect(frame.x + g.x, frame.y + g.y + (g.h - fillH), g.w, fillH);
+    }
+  }
+
+  private lanternFill(): number {
+    return Math.max(0, Math.min(1, this.save.amber / amberLanternFull()));
+  }
+
+  /** Top-left of LANTERN_FRAME, derived from the post's hook pixel so the two
+   * sprites can't drift apart if either is re-authored. The frame is centered
+   * horizontally under the hook and hangs from it. */
+  private lanternFramePos(): { x: number; y: number } {
+    const { x, y } = this.lanternPos();
+    const post = spriteSize(LANTERN_POST);
+    const frame = spriteSize(LANTERN_FRAME);
+    return {
+      x: x + LANTERN_HOOK.x - Math.floor(frame.w / 2),
+      y: y - post.h + LANTERN_HOOK.y,
+    };
+  }
+
+  /** The props' etched counts, plus the lantern's light cone. Runs after the
+   * night overlay (see render) — the whole point of the always-visible counts
+   * is that an exact value never needs a hover, and there is no canvas hover
+   * infrastructure to fall back on, so they must survive nightfall.
+   *
+   * All labels are UPPERCASE/numeric: FONT has no lowercase glyphs. */
+  /** Grid + ghost preview, shown only while Build Mode is armed. */
+  private renderBuildOverlay(ctx: CanvasRenderingContext2D): void {
+    const grid = this.plot.forest.gridRef();
+    const yard = this.yardRect();
+
+    // Tint the buildable plot and rule its cells, so "here, on these squares"
+    // is unmistakable without the grid ever intruding on normal play.
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    for (let dy = 0; dy < yard.rows; dy++) {
+      for (let dx = 0; dx < yard.cols; dx++) {
+        const c = { cx: yard.cx + dx, cy: yard.cy + dy };
+        if (!grid.inBounds(c)) continue;
+        const f = grid.footing(c);
+        const x = f.x - CELL / 2;
+        const y = f.y - CELL;
+        const free = this.canPlaceAt(c);
+        ctx.fillStyle = free
+          ? "rgba(120, 200, 130, 0.16)"
+          : "rgba(200, 90, 70, 0.16)";
+        ctx.fillRect(x, y, CELL, CELL);
+        ctx.strokeStyle = free
+          ? "rgba(180, 240, 190, 0.5)"
+          : "rgba(230, 140, 120, 0.45)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, CELL - 1, CELL - 1);
+      }
+    }
+    ctx.restore();
+
+    const hover = this.hoverCell;
+    if (!hover) return;
+    const valid = this.canPlaceAt(hover);
+    const f = grid.footing(hover);
+
+    // Highlight the aimed cell solidly — the tint above is context, this is aim.
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = valid ? "#8ef0a0" : "#ff6b5a";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(f.x - CELL / 2 + 0.5, f.y - CELL + 0.5, CELL - 1, CELL - 1);
+    ctx.restore();
+
+    // Ghost of the thing being placed, at the exact anchor the real object will
+    // use (footing, bottom-centre) so what you preview is what you get.
+    const id =
+      this.buildMovingIndex !== null
+        ? (this.save.placed ?? [])[this.buildMovingIndex]?.id
+        : this.buildSelection;
+    const map = id ? BUILDABLE_SPRITES[id] : undefined;
+    if (!map) return;
+    const size = spriteSize(map);
+    ctx.save();
+    // drawSprite paints raw fillRects with no alpha of its own, so the ghost's
+    // translucency has to come from the context.
+    ctx.globalAlpha = valid ? 0.65 : 0.35;
+    drawSprite(ctx, map, Math.round(f.x - size.w / 2), f.y - size.h);
+    ctx.restore();
+  }
+
+  /** The homestead's status board: wood, amber and focus on ONE sign hung on
+   * the cottage, instead of three little plaques floating above three separate
+   * props scattered across the yard.
+   *
+   * The old plaques were bare 7px fill-rects with no frame, no icon and no unit
+   * cue — nothing told you which number was which — drawn in a brown from the
+   * same family as the log pile behind them, with text double-drawn 1px apart
+   * (drawEngraved) which at a 3x5 glyph size smears the strokes rather than
+   * incising them. Here each row gets its own colour-coded pip and the numbers
+   * are left-aligned in a column, so the three read as one table.
+   *
+   * Runs AFTER the night overlay so the board stays legible in the dark. */
+  private renderPropLabels(ctx: CanvasRenderingContext2D): void {
+    const cottage = this.cottagePos();
+    const rows: { pip: string; text: string }[] = [
+      { pip: "#c49a6c", text: abbrev(Math.floor(this.save.wood)) },
+      { pip: "#ffd75e", text: abbrev(Math.round(this.save.amber)) },
+      {
+        pip: focusHeatColor(this.save.focus) ?? "#8fb7d6",
+        text: String(Math.round(this.save.focus)),
+      },
+    ];
+
+    // Hover-revealed, not permanent — see `boardReveal`. Bailing out early
+    // keeps the rest of this method (the lantern cone, the trestle's state
+    // label) unconditional: those are world lighting and a prop's own
+    // signage, not the readout, and hiding them with it would be wrong.
+    if (this.boardReveal > 0.01) {
+      const padX = 3;
+      const pipW = 2;
+      const rowH = 6;
+      const textW = Math.max(...rows.map((r) => textWidth(r.text)));
+      const boardW = padX * 2 + pipW + 2 + textW;
+      const boardH = 3 + rows.length * rowH;
+
+      // Hangs on the cottage's gable, clamped so it can never leave the canvas.
+      const frame = COTTAGE_PHASE_SPRITES[this.cottagePhase()];
+      let bx = Math.round(cottage.x - boardW / 2);
+      bx = Math.max(2, Math.min(this.w - boardW - 2, bx));
+      const by = Math.max(2, cottage.y - spriteSize(frame).h - boardH - 3);
+
+      // Board: dark plank with a light top bevel and a post to the roof, so it
+      // reads as a hung sign rather than a floating rectangle.
+      ctx.save();
+      ctx.globalAlpha = this.boardReveal;
+      ctx.fillStyle = "#2a1e12";
+      ctx.fillRect(bx - 1, by - 1, boardW + 2, boardH + 2);
+      ctx.fillStyle = "#5c452c";
+      ctx.fillRect(bx, by, boardW, boardH);
+      ctx.fillStyle = "#7a5f3e";
+      ctx.fillRect(bx, by, boardW, 1);
+
+      rows.forEach((r, i) => {
+        const ry = by + 2 + i * rowH;
+        ctx.fillStyle = r.pip;
+        ctx.fillRect(bx + padX, ry + 1, pipW, 3);
+        drawText(ctx, r.text, bx + padX + pipW + 2, ry, "#f2e6d0");
+      });
+      ctx.restore();
+    }
+
+    // Lantern light cone — kept here (not in the prop pass) so the night
+    // overlay can't wash it out.
+    const f = this.lanternFill();
+    if (f > 0) {
+      const lframe = this.lanternFramePos();
+      const cx = lframe.x + Math.floor(spriteSize(LANTERN_FRAME).w / 2);
+      const top = lframe.y + LANTERN_GLASS.y + LANTERN_GLASS.h;
+      const ground = this.lanternPos().y;
+      if (ground > top) {
+        const a = 0.1 + 0.26 * f * (0.35 + 0.65 * this.sky.darkness);
+        const rowsN = ground - top;
+        for (let i = 0; i < rowsN; i++) {
+          const spread = 1 + Math.round((i / rowsN) * 6);
+          ctx.fillStyle = `rgba(255, 215, 94, ${(a * (1 - i / rowsN)).toFixed(3)})`;
+          ctx.fillRect(cx - spread, top + i, spread * 2 + 1, 1);
+        }
+      }
+    }
+
+    // The raft still labels its own cost/gate — it's nowhere near the cottage
+    // and the number only means anything next to the boat it applies to.
+    // Bridge cost/gate label, next to the bridge itself.
+    const st = this.travelStatus();
+    if (st) {
+      // Hung over the TRESTLE, not the wright — it labels the crossing's
+      // state at a glance (locked / price / open) while his speech bubble
+      // carries the actual conversation.
+      const p = this.trestlePos();
+      const label = !st.gateMet
+        ? `${this.save.plotsClearedInWorld}/${st.gate}`
+        : this.bridgeRepaired()
+          ? "OPEN"
+          : abbrev(st.cost);
+      const tw = textWidth(label);
+      const lx = Math.round(
+        Math.max(3, Math.min(this.w - tw - 3, p.x - 8 - tw / 2)),
+      );
+      ctx.fillStyle = "#1d2b21";
+      ctx.fillRect(lx - 2, p.y - 22, tw + 4, 7);
+      drawText(
+        ctx,
+        label,
+        lx,
+        p.y - 21,
+        this.bridgeRepaired() ? "#8ef0a0" : "#f2b0a0",
+      );
+    }
+  }
+
+  private gradeSkillCheck(sc: SkillCheck, pos: number): SkillGrade {
+    if (pos >= sc.greatStart && pos <= sc.greatStart + sc.greatWidth)
+      return "great";
+    if (pos >= sc.zoneStart && pos <= sc.zoneStart + sc.zoneWidth)
+      return "good";
+    return "miss";
+  }
+
+  /** `tierOverride` lets Battle's Defend check scale with the Adventure
+   * world actually being fought (`adv.world`) instead of the wood-chopping
+   * ladder's `worldIndex` — the two can diverge, especially post-Prestige
+   * since `adventureWorldUnlocked` doesn't reset. POV's chop skill-check
+   * omits it and keeps using `worldIndex`, which is correct for it.
+   * `widenPct` is a skillCheckWindowPct item bonus (see
+   * skillCheckWidenForMember/Wc) — it widens zoneWidth, and greatWidth
+   * widens right along with it since it's already derived as a fraction of
+   * zoneWidth below. */
+  private rollSkillCheck(tierOverride?: number, widenPct = 0): SkillCheck {
+    const tier = tierOverride ?? this.save.worldIndex;
+    const baseZoneWidth =
+      Math.max(7, Math.min(22, 12 - tier * 1.5)) + Math.random() * 10;
+    const zoneWidth = baseZoneWidth * (1 + widenPct);
+    const zoneStart = 8 + Math.random() * (92 - zoneWidth);
+    const greatWidth = zoneWidth * 0.3;
+    const greatStart = zoneStart + (zoneWidth - greatWidth) / 2;
+    const speed =
+      SKILL_SPEED_BASE + Math.random() * SKILL_SPEED_RANGE + tier * SKILL_SPEED_PER_TIER;
+    return {
+      pos: 0,
+      dir: 1,
+      speed,
+      zoneStart,
+      zoneWidth,
+      greatStart,
+      greatWidth,
+    };
+  }
+
+  /** Bounces the needle back and forth between the track's 0..100 bounds
+   * forever — there is no auto-miss timeout. A skill check just waits for
+   * input indefinitely; walking away mid-check leaves that swing/turn
+   * stalled until the player returns and clicks, which is an accepted
+   * tradeoff (idle wood-chopping and everything else keeps running). */
+  private advanceSkillCheck(sc: SkillCheck, dt: number): void {
+    sc.pos += sc.speed * dt * sc.dir;
+    if (sc.pos >= 100) {
+      sc.pos = 200 - sc.pos;
+      sc.dir = -1;
+    } else if (sc.pos <= 0) {
+      sc.pos = -sc.pos;
+      sc.dir = 1;
+    }
+  }
+
+  private finishSkillCheck(grade: SkillGrade): void {
+    const wc = this.povTarget;
+    if (!wc) return;
+    // Pay on the sweep you actually faced, not just on the grade: a fast
+    // needle is a harder target and is worth more (see povYieldMult).
+    const sc = this.povSkillCheck;
+    const mult = sc
+      ? povYieldMult(grade, sc.speed, this.save.worldIndex)
+      : POV_GRADE_MULT[grade];
+    this.onSkillCheckResult?.(grade, wc);
+    wc.resolveSkillCheck(mult);
+    this.povSkillCheck = null;
+    // `wood` is filled in by resolveManualPovChop once the swing actually
+    // lands and the real payout is known — the bar reports the wood earned,
+    // not a multiplier the player then has to convert in their head.
+    this.povFlash = { grade, t: 0, wood: null };
+  }
+
   /** Canvas click at logical coords. Returns false if nothing was hit. */
   handleClick(lx: number, ly: number): boolean {
+    if (this.battleViewOpen) {
+      return this.handleBattleClick();
+    }
+    if (this.povTarget) {
+      this.handlePovInput();
+      return true; // POV consumes every click — never falls through to drag
+    }
     if (this.nextPlot) return false;
+
+    // An open conversation owns every click, exactly like POV and Build Mode
+    // above — picking a choice, or clicking away to dismiss. Returning `true`
+    // unconditionally is load-bearing: a `false` falls through to
+    // appWindow.startDragging() (see main.ts) and would drag the window out
+    // from under someone reaching for a reply.
+    if (this.dialogue) {
+      this.save.stats.clicks += 1;
+      const layout = layoutBubble(this.dialogue, this.w, this.h);
+      const idx = hitChoice(layout, lx, ly);
+      if (idx !== null) {
+        const choice = this.dialogue.choices[idx];
+        if (!choice.disabled) {
+          // Close BEFORE running the handler. onPick can start a world
+          // transition, and a bubble still holding a stale speaker position
+          // would hang over the slide; it also makes a double-click
+          // physically unable to pay twice.
+          this.dialogue = null;
+          this.dialogueHover = null;
+          playSfx("click");
+          choice.onPick();
+        }
+        return true;
+      }
+      // Clicking the bubble's own padding is not dismissal — only clicking
+      // genuinely away from it is.
+      if (!hitBubble(layout, lx, ly)) {
+        this.dialogue = null;
+        this.dialogueHover = null;
+      }
+      return true;
+    }
+
+    // Build Mode owns every click while armed — including empty ground. A
+    // `false` here would fall through to appWindow.startDragging() and drag the
+    // window out from under someone aiming at a cell.
+    if (this.buildModeActive()) {
+      this.save.stats.clicks += 1;
+      const cell = this.plot.forest.gridRef().cellAt(lx, ly);
+      this.hoverCell = cell;
+      const at = this.cottagePos();
+      switch (this.commitPlacement()) {
+        case "placed":
+          playSfx("chop");
+          break;
+        case "moved":
+          playSfx("click");
+          break;
+        case "unaffordable":
+          this.floats.push(
+            new FloatingText(at.x, at.y - 14, "NOT ENOUGH WOOD", "#d64545"),
+          );
+          break;
+        case "maxed":
+          this.floats.push(
+            new FloatingText(at.x, at.y - 14, "ALREADY BUILT", "#d64545"),
+          );
+          this.cancelBuildMode();
+          break;
+        case "invalid": {
+          // Clicking an occupied yard cell picks that item up instead of
+          // failing — the natural "no, move THAT one" gesture.
+          if (!this.pickUpAt(cell)) {
+            const p = this.plot.forest.gridRef().footing(cell);
+            this.floats.push(
+              new FloatingText(p.x, p.y - 8, "CAN'T BUILD HERE", "#d64545"),
+            );
+          }
+          break;
+        }
+        default:
+          break;
+      }
+      return true;
+    }
     const s = this.save;
 
-    if (this.spot && Math.abs(lx - this.spot.x) <= 3 && Math.abs(ly - this.spot.y) <= 3) {
+    if (this.hitAdventureIndicator(lx, ly)) {
+      // Anything resumable (live fight, pending boon pick, the no-battle
+      // "stage cleared" in-between-stages window, or an undismissed chest)
+      // jumps straight back into the battle view now — only a run that
+      // hasn't been embarked at all falls back to the Muster overlay.
+      if (this.save.adventure || this.chestReveal) {
+        this.openBattleView();
+      } else {
+        this.onWantAdventureOverlay?.();
+      }
+      return true;
+    }
+
+    const wc = this.hitWoodcutter(lx, ly);
+    if (wc) {
+      // Only cutters actually working a tree can be followed. An idle cutter
+      // (waiting session, so no tree claimed) used to open a close-up where
+      // clicking did nothing and nothing explained why.
+      if (wc.readyToChop) {
+        this.enterPov(wc);
+      } else {
+        this.floats.push(
+          new FloatingText(wc.x, wc.y - 14, "NOT CHOPPING", "#d64545"),
+        );
+      }
+      return true;
+    }
+
+    // Cottage → build the next stage. Like the raft, a refusal says why in the
+    // world rather than just doing nothing.
+    if (this.hitCottage(lx, ly)) {
+      s.stats.clicks += 1;
+      const p = this.cottagePos();
+      const cost = this.cottageNextCost();
+      if (cost === null) {
+        this.floats.push(new FloatingText(p.x, p.y - 14, "HOME", "#ffd75e"));
+      } else if (this.buildCottagePhase()) {
+        playSfx("fell");
+        this.effects.push(
+          new LeafBurst(
+            p.x,
+            p.y - 6,
+            ["#8a6440", "#c49a6c", "#6e4c30"],
+            12,
+            0.6,
+          ),
+        );
+        this.floats.push(
+          new FloatingText(
+            p.x,
+            p.y - 14,
+            COTTAGE_PHASE_NAME[this.cottagePhase() - 1],
+            "#ffd75e",
+          ),
+        );
+      } else {
+        this.floats.push(
+          new FloatingText(p.x, p.y - 14, "NOT ENOUGH WOOD", "#d64545"),
+        );
+      }
+      return true;
+    }
+
+    // Encampment → adventuring. Same destinations the old corner badge had,
+    // but now attached to a thing on the map that looks like what it does.
+    if (this.hitEncampment(lx, ly)) {
+      this.save.stats.clicks += 1;
+      if (this.save.adventure || this.chestReveal) {
+        this.openBattleView();
+      } else {
+        this.onWantAdventureOverlay?.();
+      }
+      return true;
+    }
+
+    if (this.hitBarn(lx, ly)) {
+      this.save.stats.clicks += 1;
+      const p = this.barnPos();
+      const cost = this.barnNextCost();
+      if (cost === null) {
+        this.floats.push(
+          new FloatingText(p.x, p.y - 14, "THE BARN", "#ffd75e"),
+        );
+      } else if (this.buildBarnPhase()) {
+        playSfx("fell");
+        this.effects.push(
+          new LeafBurst(
+            p.x,
+            p.y - 6,
+            ["#8a6440", "#c49a6c", "#6e4c30"],
+            12,
+            0.6,
+          ),
+        );
+        this.floats.push(
+          new FloatingText(
+            p.x,
+            p.y - 14,
+            BARN_PHASE_NAME[this.barnPhase() - 1],
+            "#ffd75e",
+          ),
+        );
+      } else {
+        this.floats.push(
+          new FloatingText(p.x, p.y - 14, "NOT ENOUGH WOOD", "#d64545"),
+        );
+      }
+      return true;
+    }
+
+    // Road (left) → back a world. Free: you already paid to pass it once.
+    // Halt (left) → the departures board. Both the handcar and the platform
+    // open it; see openDepartureBoard.
+    if (this.hitHandcar(lx, ly)) {
+      this.save.stats.clicks += 1;
+      playSfx("crank");
+      this.openDepartureBoard();
+      return true;
+    }
+
+    // Trestle (right) → talk to the foreman. He owns every onward-travel
+    // state — the gate, the price, and the all-clear — so the whole route
+    // forward has one voice instead of three different floating texts.
+    // Anyone you can talk to. The foreman is in this sweep like everyone
+    // else now — talkTo() routes him to his rate card when there is business
+    // and to his chatter when there isn't (see foremanHasBusiness).
+    for (const id of NPC_IDS) {
+      if (!this.hitNpc(id, lx, ly)) continue;
+      this.save.stats.clicks += 1;
+      playSfx("click");
+      this.talkTo(id);
+      return true;
+    }
+
+    // Crossroads Signpost → Settings. Checked before the sap press purely for
+    // reading order; their boxes don't overlap at any window size.
+    if (this.hitSignpost(lx, ly)) {
+      s.stats.clicks += 1;
+      this.signpostT = Game.SIGNPOST_ANIM_SECS;
+      playSfx("click");
+      this.onWantSettings?.();
+      return true;
+    }
+
+    const press = this.sapPressPos();
+    if (
+      this.sapPressOwned() &&
+      this.sapPressT <= 0 &&
+      Math.abs(lx - press.x) <= 6 &&
+      Math.abs(ly - press.y) <= 7
+    ) {
+      s.stats.clicks += 1;
+      if (this.pressSap()) {
+        this.sapPressT = Game.SAP_PRESS_ANIM_SECS;
+        playSfx("koiCatch"); // reuse the watery squish/plip tone — fits a wood-crush drip well enough to not need a 5th synthesized sound
+        this.effects.push(
+          new LeafBurst(press.x, press.y - 8, ["#e8b84b", "#ffe9a8"], 8, 0.5),
+        );
+        this.floats.push(
+          new FloatingText(
+            press.x,
+            press.y - 10,
+            `+${SAP_PRESS_AMBER_YIELD}`,
+            "#ffd75e",
+          ),
+        );
+      } else {
+        // Not enough wood — a small red denial shake, no reward. UPPERCASE
+        // is load-bearing: FONT (sprites.ts) has no lowercase glyphs, so a
+        // lowercase string draws nothing at all but still advances 4px per
+        // character — this message was silently invisible until now.
+        this.floats.push(
+          new FloatingText(press.x, press.y - 10, "NOT ENOUGH WOOD", "#d64545"),
+        );
+      }
+      return true;
+    }
+
+    if (
+      this.spot &&
+      Math.abs(lx - this.spot.x) <= 3 &&
+      Math.abs(ly - this.spot.y) <= 3
+    ) {
       const tree = this.spot.tree;
       this.spot = null;
       this.spotTimer = 6 + Math.random() * 4;
@@ -229,7 +3476,14 @@ export class Game {
       if (s.focus > 0 && tree.standing) {
         s.focus -= 1;
         this.effects.push(new Effect(lx, ly, [SLASH1, SLASH2], 0.25));
-        this.resolveChop(tree, { tokens: 0, hits: 3 }, lx, ly, true);
+        this.resolveChop(
+          tree,
+          { tokens: 0, hits: 3 },
+          lx,
+          ly,
+          this.chopModsForLead(),
+          true,
+        );
       } else {
         this.frenzyT = FRENZY_SECS;
         this.refreshModifiers();
@@ -244,13 +3498,41 @@ export class Game {
       Math.abs(lx - this.goldenLog.x) <= 6 &&
       Math.abs(ly - this.goldenLog.y) <= 5
     ) {
-      s.amber += GOLDEN_LOG_AMBER;
+      // amberIncome Utility gear / the Amber Vein Power-up boost this claim
+      // the same way they boost passive per-1k-token Amber (see applyChop).
+      const amount = Math.round(GOLDEN_LOG_AMBER * this.amberIncomeMult());
+      s.amber += amount;
+      playSfx("goldenLog");
       this.floats.push(
-        new FloatingText(this.goldenLog.x, this.goldenLog.y - 4, `+${GOLDEN_LOG_AMBER}`, "#ffd75e"),
+        new FloatingText(
+          this.goldenLog.x,
+          this.goldenLog.y - 4,
+          `+${amount}`,
+          "#ffd75e",
+        ),
       );
       this.goldenLog = null;
       scheduleSave(s, true);
       return true;
+    }
+
+    if (this.koi) {
+      const pos = this.plot.lake.koiPosition(this.koi.phase);
+      if (
+        Math.abs(lx - pos.x) <= Game.KOI_CLICK_RADIUS &&
+        Math.abs(ly - pos.y) <= Game.KOI_CLICK_RADIUS
+      ) {
+        const amount = koiReward(this.density);
+        s.amber += amount;
+        playSfx("koiCatch");
+        this.effects.push(new Effect(pos.x, pos.y, [RIPPLE1, RIPPLE2], 0.35));
+        this.floats.push(
+          new FloatingText(pos.x, pos.y - 4, `+${amount}`, "#7fd9c8"),
+        );
+        this.koi = null;
+        scheduleSave(s, true);
+        return true;
+      }
     }
 
     const tree = this.plot.forest.treeAt(lx, ly);
@@ -259,7 +3541,14 @@ export class Game {
     if (s.focus > 0) {
       s.focus -= 1;
       this.effects.push(new Effect(lx, ly, [SLASH1, SLASH2], 0.25));
-      this.resolveChop(tree, { tokens: 0, hits: 1 }, lx, ly, true);
+      this.resolveChop(
+        tree,
+        { tokens: 0, hits: 1 },
+        lx,
+        ly,
+        this.chopModsForLead(),
+        true,
+      );
     } else {
       // Out of Focus: spark, no damage — run another prompt to recharge.
       this.effects.push(new Effect(lx, ly, [SPARK], 0.2));
@@ -270,71 +3559,203 @@ export class Game {
 
   // --- economy ------------------------------------------------------------
 
+  /** Fell juice, shared by every fell site: crash SFX + a leaf burst in the
+   * felled tree's own canopy colors (world palette override, else the base
+   * greens). */
+  private fellJuice(tree: Tree): void {
+    playSfx("fell");
+    const palette = getWorld(this.plotWorld).palette;
+    const colors = [palette?.G ?? "#4a9e5c", palette?.g ?? "#86d194"];
+    this.effects.push(
+      new LeafBurst(tree.x + tree.width / 2, tree.y - 16, colors),
+    );
+  }
+
+  /** Pays a felled OTHER tree's full wood reward — shared by resolveChop's
+   * own fell branch (via the arithmetic below) and timberSplash's splash
+   * damage, which can incidentally finish off a neighbor. */
+  private paySplashFell(tree: Tree, prestigeMult: number): void {
+    const s = this.save;
+    const payout =
+      WOOD_YIELD[tree.kind] * getWorld(this.plotWorld).mult * prestigeMult;
+    s.wood += payout;
+    s.totalWoodEarned += payout;
+    s.stats.treesFelled += 1;
+    if (tree.kind === "elder") s.stats.eldersFelled += 1;
+    this.floats.push(
+      new FloatingText(
+        tree.x + tree.width / 2,
+        tree.y - 14,
+        `+${abbrev(payout)}`,
+        WOOD_COLOR,
+      ),
+    );
+    this.fellJuice(tree);
+    void reportFell(payout);
+  }
+
   /** A chop lands: damage the tree, pay chips + fell wood, persist. */
   private resolveChop(
     tree: Tree,
     chop: PendingChop,
     x: number,
     y: number,
+    mods: ChopMods,
     chipFloat = false,
-  ): void {
+  ): number {
     const s = this.save;
+    // POV skill-check grade (great/good/miss) — wood value only, never
+    // damage or stats. 1 for every non-POV chop (the vast majority).
+    const yieldMult = chop.yieldMult ?? 1;
     s.stats.chops += chop.hits;
     s.stats.tokensSeen += chop.tokens;
     if (chop.tokens > 0) {
-      this.floats.push(new FloatingText(x, y, `-${abbrev(chop.tokens)}`, TOKEN_COLOR));
+      this.floats.push(
+        new FloatingText(x, y, `-${abbrev(chop.tokens)}`, TOKEN_COLOR),
+      );
     }
     // Chips: every landed hit pays a little wood — token usage visibly
-    // fills the inventory even between fells.
-    const chips = chop.hits * WORLDS[this.plotWorld].mult;
+    // fills the inventory even between fells. Composed multiplier: POV
+    // grade × Prestige × the chopper's equipped Woodchopping yieldPct ×
+    // the Forest Blessing Power-up's flat +15% (its own blurb's exact
+    // number) — every wood-yield source lands in this one place instead of
+    // branching separately.
+    const prestigeMult = 1 + 0.1 * s.prestigeLevel;
+    const blessingMult = this.hasPowerup("forestBlessing") ? 1.15 : 1;
+    const totalYieldMult =
+      yieldMult * prestigeMult * mods.itemYieldMult * blessingMult;
+    const chips = chop.hits * getWorld(this.plotWorld).mult * totalYieldMult;
     s.wood += chips;
     s.totalWoodEarned += chips;
-    const felled = this.plot.forest.applyDamage(tree, chop.hits * this.axeDamage());
+    // Everything this swing paid, returned to the caller so the POV timing
+    // bar can report the real figure instead of a multiplier.
+    let awarded = chips;
+    const felled = this.plot.forest.applyDamage(tree, chop.hits * mods.atk);
+    playSfx("chop");
     if (chipFloat && !felled) {
-      this.floats.push(new FloatingText(x, y - 5, `+${abbrev(chips)}`, WOOD_COLOR));
+      this.floats.push(
+        new FloatingText(x, y - 5, `+${abbrev(chips)}`, WOOD_COLOR),
+      );
     }
     if (felled) {
-      const payout = WOOD_YIELD[tree.kind] * WORLDS[this.plotWorld].mult;
+      const payout =
+        WOOD_YIELD[tree.kind] * getWorld(this.plotWorld).mult * totalYieldMult;
       s.wood += payout;
       s.totalWoodEarned += payout;
+      awarded += payout;
       s.stats.treesFelled += 1;
       if (tree.kind === "elder") {
         s.stats.eldersFelled += 1;
       }
       this.floats.push(
-        new FloatingText(tree.x + tree.width / 2, tree.y - 14, `+${abbrev(payout)}`, WOOD_COLOR),
+        new FloatingText(
+          tree.x + tree.width / 2,
+          tree.y - 14,
+          `+${abbrev(payout)}`,
+          WOOD_COLOR,
+        ),
       );
+      this.fellJuice(tree);
       void reportFell(payout);
-      s.currentPlotHp = this.plot.forest.hpSnapshot();
-      scheduleSave(s, true);
-    } else {
-      s.currentPlotHp = this.plot.forest.hpSnapshot();
-      scheduleSave(s);
+    }
+
+    // timberSplash: chop damage also splashes to nearby standing trees.
+    // Kept out of the onSkillCheckResult hook (unlike chainsawExecution/
+    // frenzyBurst above) since it needs to fire on every landed hit, not
+    // just POV-driven ones, to matter at all during normal idle chopping.
+    // Splash lands at half the item's headline magnitude (so 25%/45% ->
+    // ~12%/22% of the hit's own damage) since it can hit up to 2 trees.
+    let splashFelled = false;
+    if (mods.effectId === "timberSplash" && mods.effectMagnitude) {
+      const splashDamage = Math.round(
+        chop.hits * mods.atk * mods.effectMagnitude * 0.5,
+      );
+      if (splashDamage > 0) {
+        for (const neighbor of this.plot.forest.neighborsOf(tree, 2)) {
+          if (this.plot.forest.applyDamage(neighbor, splashDamage)) {
+            this.paySplashFell(neighbor, prestigeMult);
+            splashFelled = true;
+          }
+        }
+      }
+    }
+
+    // Persist once, after any splash fells have also been applied, so the
+    // saved plot HP snapshot never lags behind what's on screen.
+    s.currentPlotHp = this.plot.forest.hpSnapshot();
+    scheduleSave(s, felled || splashFelled);
+    return awarded;
+  }
+  
+
+  /** Resolves a manual POV swing's impact (Woodcutter.beginSwing/
+   * takeManualChop).
+   *
+   * POV swings deliberately DO NOT cost Focus. Focus is a rate limiter for
+   * spam-clicking trees in the world view, where a click is instant and free;
+   * a POV swing is already limited by something better — you have to wind up
+   * and land a timing check for every single one, so the animation and the
+   * skill check are the throttle. Charging Focus on top meant the mode you
+   * enter specifically to chop by hand ran out of the ability to chop.
+   *
+   * The grade still matters: it scales the wood via chop.yieldMult, so timing
+   * swings well is the reward rather than being allowed to swing at all. */
+  private resolveManualPovChop(wc: Woodcutter, chop: ManualChop): void {
+    const tree = wc.currentTree;
+    if (!tree || !tree.standing) return;
+    this.effects.push(new Effect(chop.x, chop.y, [SLASH1, SLASH2], 0.25));
+    const awarded = this.resolveChop(
+      tree,
+      { tokens: 0, hits: chop.hits, yieldMult: chop.yieldMult },
+      chop.x,
+      chop.y,
+      this.chopModsForWc(wc),
+      true,
+    );
+    // Report the real payout on the timing bar, and restart the flash timer
+    // so the number gets its full read — the swing lands a beat after the
+    // click that graded it, so the grade alone would already be fading.
+    if (this.povFlash) {
+      this.povFlash.wood = awarded;
+      this.povFlash.t = 0;
     }
   }
 
   travelStatus(): TravelStatus | null {
     const next = this.save.worldIndex + 1;
-    if (next >= WORLDS.length) return null;
-    const spec = WORLDS[next];
+    // The ladder's reachable cap grows with prestige (Isaac-style — see
+    // unlocks.ts): worlds past maxWorldIndex simply aren't travelable yet.
+    if (next > maxWorldIndex(this.save.prestigeLevel)) return null;
+    const spec = getWorld(next);
+    // Travel Discount Power-up: -25% travel cost, exactly matching its own
+    // gacha blurb. travel() below reads this same `cost` back, so the
+    // discount is applied exactly once, in exactly one place.
+    const cost = Math.round(
+      spec.travelCost * (this.hasPowerup("travelDiscount") ? 0.75 : 1),
+    );
     return {
       nextName: spec.name,
-      cost: spec.travelCost,
+      cost,
       gate: spec.plotGate,
       gateMet: this.save.plotsClearedInWorld >= spec.plotGate,
-      affordable: this.save.wood >= spec.travelCost,
+      affordable: this.save.wood >= cost,
     };
   }
 
   /** User clicked Travel. Returns false if not currently allowed. */
-  travel(): boolean {
-    const status = this.travelStatus();
-    if (!status || !status.gateMet || !status.affordable || this.nextPlot) {
-      return false;
-    }
+  /** Sails back to a world you've already unlocked.
+   *
+   * Free and ungated on purpose: you already paid the travel cost and cleared
+   * the plot gate to get past it once, and charging again would just tax
+   * revisiting. `adventureWorldUnlocked` is the high-water mark of where you've
+   * been, so it — not the current index — is what bounds this. */
+  travelBackTo(world: number): boolean {
     const s = this.save;
-    s.wood -= status.cost;
-    s.worldIndex += 1;
+    if (this.nextPlot || this.battleViewOpen || this.povTarget) return false;
+    if (!Number.isInteger(world) || world < 0) return false;
+    if (world >= s.worldIndex) return false; // forward travel is travel()
+    if (world > s.adventureWorldUnlocked) return false;
+    s.worldIndex = world;
     s.plotIndex = 0;
     s.plotsClearedInWorld = 0;
     s.currentPlotHp = null;
@@ -343,13 +3764,78 @@ export class Game {
     return true;
   }
 
-  buyAxe(tier: number): boolean {
+  /** Worlds you can sail back to right now, nearest first. */
+  backTravelOptions(): { world: number; name: string }[] {
+    const out: { world: number; name: string }[] = [];
+    for (let w = this.save.worldIndex - 1; w >= 0; w--) {
+      if (w > this.save.adventureWorldUnlocked) continue;
+      out.push({ world: w, name: getWorld(w).name });
+    }
+    return out;
+  }
+
+  travel(): boolean {
+    const status = this.travelStatus();
+    if (!status || !status.gateMet || !status.affordable || this.nextPlot) {
+      return false;
+    }
     const s = this.save;
-    const spec = AXES[tier];
-    if (!spec || tier !== s.ownedAxe + 1 || s.wood < spec.cost) return false;
-    s.wood -= spec.cost;
-    s.ownedAxe = tier;
+    s.wood -= status.cost;
+    s.worldIndex += 1;
+    // Tracked separately from worldIndex (which Game.prestige() resets to 0)
+    // so Adventure-mode world access survives a prestige reset.
+    s.adventureWorldUnlocked = Math.max(s.adventureWorldUnlocked, s.worldIndex);
+    s.plotIndex = 0;
+    s.plotsClearedInWorld = 0;
+    s.currentPlotHp = null;
     scheduleSave(s, true);
+    this.startTransition(s.worldIndex, 0);
+    return true;
+  }
+
+  /** Read-only status for the Settings panel's Prestige button. */
+  prestigeStatus(): {
+    eligible: boolean;
+    level: number;
+    bonusPct: number;
+    nextBonusPct: number;
+  } {
+    const s = this.save;
+    return {
+      // "Beating the run" = reaching the current prestige level's ladder cap
+      // (world 5 at prestige 0, +1 world per level — see unlocks.ts), not
+      // the whole curated ladder: each prestige both resets the ladder AND
+      // widens it, so the next run has somewhere new to go.
+      eligible: s.worldIndex >= maxWorldIndex(s.prestigeLevel),
+      level: s.prestigeLevel,
+      bonusPct: 10 * s.prestigeLevel,
+      nextBonusPct: 10 * (s.prestigeLevel + 1),
+    };
+  }
+
+  /** Resets the wood-chopping world ladder in exchange for a permanent
+   * +10%/level bonus to wood yield and party ATK/HP. Team, items, amber,
+   * any in-progress adventure, and all lifetime stats are untouched — only
+   * wood/worldIndex/plotIndex/plotsClearedInWorld/currentPlotHp reset. */
+  prestige(): boolean {
+    const s = this.save;
+    if (s.worldIndex < maxWorldIndex(s.prestigeLevel)) return false;
+    s.wood = 0;
+    s.worldIndex = 0;
+    s.plotIndex = 0;
+    s.plotsClearedInWorld = 0;
+    s.currentPlotHp = null;
+    s.prestigeLevel += 1;
+    // The permanent +10%/level bonus is baked into every member's persisted
+    // maxHp/currentHp immediately, not just effectiveAtk (already computed
+    // live on every read) — otherwise HP bars, vampiricHeal's cap, and the
+    // party-wipe check would all under-count the new bonus until the player
+    // happened to level/re-equip that specific member.
+    for (const member of s.team) {
+      syncHp(member, s.inventory, s.prestigeLevel);
+    }
+    scheduleSave(s, true);
+    this.startTransition(0, 0);
     return true;
   }
 
@@ -365,13 +3851,45 @@ export class Game {
     return true;
   }
 
+  /** Sap Press: squeeze wood into a flat +10 amber (see economy.ts's
+   * SAP_PRESS constants and the sim's no-arbitrage gate). */
+  pressSap(): boolean {
+    const s = this.save;
+    const cost = sapPressCost(getWorld(s.worldIndex).mult);
+    if (s.wood < cost) return false;
+    s.wood -= cost;
+    s.amber += SAP_PRESS_AMBER_YIELD;
+    scheduleSave(s, true);
+    return true;
+  }
+
+  /** One-click greedy re-equip of the whole roster by priority order —
+   * see team.ts's optimizeEquipment. */
+  optimizeGear(): boolean {
+    const s = this.save;
+    optimizeEquipment(s.team, s.inventory, this.hasPowerup("extraUtility"));
+    for (const member of s.team) {
+      syncHp(member, s.inventory, s.prestigeLevel);
+    }
+    this.refreshModifiers();
+    scheduleSave(s, true);
+    return true;
+  }
+
   buyBoost(id: string): boolean {
     const s = this.save;
     const spec = BOOSTS.find((b) => b.id === id);
-    if (!spec || s.amber < spec.cost) return false;
+    if (!spec) return false;
     if (spec.id === "espresso" && !this.has("gnome1")) return false;
     if (spec.id === "focusPotion" && s.focus >= FOCUS_CAP) return false;
-    s.amber -= spec.cost;
+    // Amber Trade's cost scales with world tier to match its scaling wood
+    // payout (see amberTradeCost) — every other boost stays at its flat cost.
+    const cost =
+      spec.id === "amberWood"
+        ? amberTradeCost(getWorld(s.worldIndex).mult)
+        : spec.cost;
+    if (s.amber < cost) return false;
+    s.amber -= cost;
     switch (spec.id) {
       case "focusPotion":
         s.focus = FOCUS_CAP;
@@ -380,7 +3898,7 @@ export class Game {
         this.espressoT = ESPRESSO_DURATION;
         break;
       case "amberWood": {
-        const bundle = 25 * WORLDS[s.worldIndex].mult;
+        const bundle = 25 * getWorld(s.worldIndex).mult;
         s.wood += bundle;
         s.totalWoodEarned += bundle;
         break;
@@ -415,10 +3933,205 @@ export class Game {
     scheduleSave(s, true);
   }
 
+  /** Dye an owned cosmetic. `hex` must be one of the swatches that cosmetic
+   * has actually unlocked; null clears back to its shipped colors.
+   *
+   * The validation is deliberate rather than defensive theater: this value
+   * flows straight into withPalette() and is persisted, so accepting an
+   * arbitrary string from the DOM would let bad input reach the renderer and
+   * survive a reload. */
+  setCosmeticColor(id: string, hex: string | null): boolean {
+    const s = this.save;
+    const spec = COSMETICS.find((c) => c.id === id);
+    if (!spec || !(s.cosmetics as string[]).includes(id)) return false;
+    if (hex !== null && !unlockedSwatches(spec).some((sw) => sw.hex === hex))
+      return false;
+
+    const colors = { ...(s.cosmeticColors ?? {}) };
+    if (hex === null) {
+      delete colors[spec.id];
+    } else {
+      colors[spec.id] = hex;
+    }
+    s.cosmeticColors = colors;
+    scheduleSave(s, true);
+    return true;
+  }
+
+  /** The dye currently applied to a cosmetic, or null if it's undyed. */
+  cosmeticColor(id: string): string | null {
+    return this.save.cosmeticColors?.[id as CosmeticId] ?? null;
+  }
+
   private applyModifiers(wc: Woodcutter): void {
-    wc.walkMult = this.has("boots") ? 1.5 : 1;
+    wc.walkMult = this.hasPowerup("swiftBoots") ? 1.5 : 1;
     wc.chopDurFactor =
-      (this.has("keenEdge") ? 0.75 : 1) * (this.frenzyT > 0 ? 0.5 : 1);
+      (this.hasPowerup("keenEdge") ? 0.75 : 1) * (this.frenzyT > 0 ? 0.5 : 1);
+  }
+
+  // --- utility-slot perks (fastRest/amberIncome/rareMapSpawn) -------------
+  //
+  // Utility items aren't tied to "who's chopping" the way Woodchopping gear
+  // is (see chopModsForWc) — amberIncome/rareMapSpawn read as roster-wide
+  // passives, so every equipped Utility item on every member counts,
+  // stacking additively. fastRest is the one exception: it only matters for
+  // the specific member it's equipped on (see tickPassiveRest).
+
+  /** Every equipped Utility-slot item on this member — the base slot
+   * always, plus the second slot too but only once extraUtility is owned
+   * (equipItem already refuses to fill utility2 without it; this stays
+   * defensive since nothing else here re-derives that gate). */
+  private memberUtilityItems(member: TeamMemberSave): ItemDef[] {
+    const items: ItemDef[] = [];
+    const primary = equippedItem(member, "utility", this.save.inventory);
+    if (primary) items.push(primary);
+    if (this.hasPowerup("extraUtility")) {
+      const secondary = equippedItem(member, "utility2", this.save.inventory);
+      if (secondary) items.push(secondary);
+    }
+    return items;
+  }
+
+  private memberHasUtilityPerk(
+    member: TeamMemberSave,
+    perk: UtilityPerkId,
+  ): boolean {
+    return this.memberUtilityItems(member).some(
+      (d) => d.utility?.perk === perk,
+    );
+  }
+
+  /** Sum of `magnitude` across every equipped item on every roster member
+   * carrying this perk — additive stacking (not multiplicative), matching
+   * the same additive-sum pattern startBattle uses for passive reflectPct. */
+  private utilityPerkMagnitudeSum(perk: UtilityPerkId): number {
+    let sum = 0;
+    for (const member of this.save.team) {
+      for (const item of this.memberUtilityItems(member)) {
+        if (item.utility?.perk === perk) sum += item.utility.magnitude;
+      }
+    }
+    return sum;
+  }
+
+  /** Amber income multiplier: amberIncome Utility gear (summed across the
+   * roster) plus the Amber Vein Power-up's flat +20% (its own blurb's exact
+   * number), additively combined. Applied to passive per-1k-token Amber
+   * accrual and Golden Log claims — NOT to Adventure stage rewards, which
+   * have their own dedicated bonus (expeditionBonusPct, see
+   * finalizeBattleOutcome) so the two don't get conflated. */
+  private amberIncomeMult(): number {
+    const itemBonus = this.utilityPerkMagnitudeSum("amberIncome");
+    const powerupBonus = this.hasPowerup("amberVein") ? 0.2 : 0;
+    return 1 + itemBonus + powerupBonus;
+  }
+
+  /** Golden Log spawn-rate multiplier: rareMapSpawn Utility gear (summed)
+   * plus the Golden Sense Power-up's flat +50%, additively combined, then
+   * applied by DIVIDING the usual token threshold — a 1.5× spawn-rate
+   * multiplier means roughly 1.5× as many bursts clear the (now lower) bar. */
+  private goldenLogSpawnMult(): number {
+    const itemBonus = this.utilityPerkMagnitudeSum("rareMapSpawn");
+    const powerupBonus = this.hasPowerup("goldenSense") ? 0.5 : 0;
+    return 1 + itemBonus + powerupBonus;
+  }
+
+  /** focusEfficiencyPct of whichever roster member is currently assigned to
+   * this live session (see slotAssignment) — 0 if the source has no
+   * assigned member or that member has no such item equipped. */
+  private focusEfficiencyForSource(sourceId: string): number {
+    const memberId = this.slotAssignment.get(sourceId);
+    if (!memberId) return 0;
+    const member = this.memberById(memberId);
+    if (!member) return 0;
+    const item = equippedItem(member, "woodchopping", this.save.inventory);
+    return item?.woodchopping?.focusEfficiencyPct ?? 0;
+  }
+
+  /** skillCheckWindowPct of a member's equipped Woodchopping item — widens
+   * the good/great zones of a skill check for both the POV chop check
+   * (chopModsForWc's chopper) and the Battle Defend check (whoever's
+   * defending); see rollSkillCheck's widenPct param. */
+  private skillCheckWidenForMember(member: TeamMemberSave): number {
+    const item = equippedItem(member, "woodchopping", this.save.inventory);
+    return item?.woodchopping?.skillCheckWindowPct ?? 0;
+  }
+
+  private skillCheckWidenForWc(wc: Woodcutter): number {
+    if (!wc.memberId) return 0;
+    const member = this.memberById(wc.memberId);
+    return member ? this.skillCheckWidenForMember(member) : 0;
+  }
+
+  /** Baseline passive HP regen for "resting" party members — the only
+   * source of passive (non-Trail-Rations) healing in the game. 1%/min of
+   * max HP baseline, doubled to 2%/min for a member with a fastRest
+   * Utility item equipped. Driven by real elapsed time during normal
+   * wood-chopping (this is called from update(dt), which keeps running
+   * regardless of the battle/POV view) — never by adventure turns, keeping
+   * the turn-based battle engine's "nothing advances off a wall clock"
+   * invariant untouched. */
+  private static readonly REST_REGEN_PER_MIN = 0.01;
+  private static readonly FAST_REST_REGEN_PER_MIN = 0.02;
+
+  private tickPassiveRest(dt: number): void {
+    let changed = false;
+    for (const member of this.save.team) {
+      if (member.status !== "resting" || member.currentHp >= member.maxHp)
+        continue;
+      const fast = this.memberHasUtilityPerk(member, "fastRest");
+      const perMin = fast
+        ? Game.FAST_REST_REGEN_PER_MIN
+        : Game.REST_REGEN_PER_MIN;
+      member.currentHp = Math.min(
+        member.maxHp,
+        Math.round(member.currentHp + member.maxHp * perMin * (dt / 60)),
+      );
+      changed = true;
+      if (member.currentHp >= member.maxHp) {
+        member.currentHp = member.maxHp;
+        member.status = "available";
+      }
+    }
+    if (changed) scheduleSave(this.save);
+  }
+
+  /** chainsawExecution (chance to instantly fell the tree) and frenzyBurst
+   * (temporary faster swings) both trigger only on a Great POV skill-check
+   * result — wired here via the onSkillCheckResult hook set in the
+   * constructor. timberSplash is handled separately, inside resolveChop
+   * (see there for why). */
+  private applyWoodchoppingItemEffects(
+    grade: SkillGrade,
+    wc: Woodcutter,
+  ): void {
+    if (!wc.memberId || grade !== "great") return;
+    const member = this.memberById(wc.memberId);
+    const item = member
+      ? equippedItem(member, "woodchopping", this.save.inventory)
+      : null;
+    if (!item?.effectId || item.effectMagnitude === undefined) return;
+
+    if (item.effectId === "chainsawExecution") {
+      // effectMagnitude IS the execution chance (25% epic / 45% legendary,
+      // from UTILITY_RARITY_MAGNITUDE) — reuses resolveChop's own felling
+      // math for the payout by handing it lethal damage directly, so the
+      // reward/stat bookkeeping never has to be duplicated.
+      const tree = wc.currentTree;
+      if (tree?.standing && Math.random() < item.effectMagnitude) {
+        const mods: ChopMods = { ...this.chopModsForWc(wc), atk: tree.hp };
+        this.resolveChop(
+          tree,
+          { tokens: 0, hits: 1 },
+          wc.x,
+          wc.y - 10,
+          mods,
+          true,
+        );
+      }
+    } else if (item.effectId === "frenzyBurst") {
+      wc.grantBurst(FRENZY_BURST_SECS);
+    }
   }
 
   refreshModifiers(): void {
@@ -426,12 +4139,18 @@ export class Game {
       this.applyModifiers(wc);
     }
     // Gnomes exist iff owned.
-    const wantGnomes = (this.has("gnome1") ? 1 : 0) + (this.has("gnome2") ? 1 : 0);
+    const wantGnomes =
+      (this.has("gnome1") ? 1 : 0) + (this.has("gnome2") ? 1 : 0);
     for (let i = 1; i <= 2; i++) {
       const id = `gnome-${i}`;
       const exists = this.woodcutters.has(id);
       if (i <= wantGnomes && !exists) {
-        const gnome = new Woodcutter(id, false, this.skyH + 20 + i * 14, "gnome");
+        const gnome = new Woodcutter(
+          id,
+          false,
+          this.skyH + 20 + i * 14,
+          "gnome",
+        );
         this.applyModifiers(gnome);
         this.woodcutters.set(id, gnome);
       } else if (i > wantGnomes && exists) {
@@ -444,6 +4163,7 @@ export class Game {
   // --- plot / world transitions ------------------------------------------
 
   private startTransition(world: number, plotIndex: number): void {
+    this.closeDialogue();
     this.nextPlot = this.makePlot(world, plotIndex);
     this.nextPlotWorld = world;
     this.nextPlot.resize(this.w, this.groundTop(), this.groundBottom());
@@ -451,6 +4171,7 @@ export class Game {
     this.slide = 0;
     this.spot = null;
     this.goldenLog = null;
+    this.koi = null; // new plot's lake — the old swim position is meaningless
     for (const wc of this.woodcutters.values()) {
       wc.startTravel();
     }
@@ -475,6 +4196,7 @@ export class Game {
 
   update(dt: number): void {
     this.sky.update(dt);
+    this.tickPassiveRest(dt);
 
     // Flush coalesced chops.
     for (const [id, buf] of this.buffers) {
@@ -487,10 +4209,19 @@ export class Game {
         } else {
           // No visible woodcutter (over cap / despawned): damage directly so
           // tokens are never wasted. If no tree stands (mid-trek), retry.
-          const tree = this.plot.forest.nearestStanding(this.w - 24, this.h / 2);
+          const tree = this.plot.forest.nearestStanding(
+            this.w - 24,
+            this.h / 2,
+          );
           if (tree) {
             this.buffers.delete(id);
-            this.resolveChop(tree, { tokens: buf.tokens, hits: buf.hits }, tree.x, tree.y - 12);
+            this.resolveChop(
+              tree,
+              { tokens: buf.tokens, hits: buf.hits },
+              tree.x,
+              tree.y - 12,
+              this.chopModsForLead(),
+            );
           }
         }
       }
@@ -525,11 +4256,18 @@ export class Game {
         if (candidates.length === 0) {
           this.spotTimer = 1;
         } else {
-          const tree = candidates[Math.floor(Math.random() * candidates.length)];
+          const tree =
+            candidates[Math.floor(Math.random() * candidates.length)];
           this.spot = {
             tree,
-            x: tree.x + Math.round(tree.width / 2) + (Math.random() < 0.5 ? -1 : 1),
-            y: tree.y - 1 - Math.floor(Math.random() * Math.min(6, tree.height * 0.3)),
+            x:
+              tree.x +
+              Math.round(tree.width / 2) +
+              (Math.random() < 0.5 ? -1 : 1),
+            y:
+              tree.y -
+              1 -
+              Math.floor(Math.random() * Math.min(6, tree.height * 0.3)),
             ttl: 3 + Math.random() * 2,
           };
         }
@@ -542,6 +4280,64 @@ export class Game {
       if (this.goldenLog.ttl <= 0) {
         this.goldenLog = null;
       }
+    }
+    // Cache Koi: swim + decay independently of the golden-log slot (a
+    // separate mechanic, not competing for the same pickup).
+    if (this.koi) {
+      this.koi.ttl -= dt;
+      // Full lap in KOI_SWIM_SECS, plus a little wobble so the path isn't a
+      // perfectly flat ellipse orbit.
+      this.koi.phase += (dt * Math.PI * 2) / Game.KOI_SWIM_SECS;
+      if (this.koi.ttl <= 0) this.koi = null;
+    }
+    // Passive Focus trickle. Manual chopping spends Focus, and Focus used to
+    // come only from counted tokens — so with no session running the axe went
+    // dead and trees could never be felled by hand at all. Clicking is meant to
+    // be an alternative to token-driven chopping, not a way to spend it.
+    if (this.save.focus < FOCUS_CAP) {
+      const gained = accruePassiveFocus(this.passiveFocusCarry, dt);
+      this.passiveFocusCarry = gained.carry;
+      if (gained.focus > 0) {
+        this.save.focus = Math.min(FOCUS_CAP, this.save.focus + gained.focus);
+        scheduleSave(this.save);
+      }
+    } else {
+      this.passiveFocusCarry = 0;
+    }
+
+    if (this.sapPressT > 0) this.sapPressT = Math.max(0, this.sapPressT - dt);
+    if (this.signpostT > 0) this.signpostT = Math.max(0, this.signpostT - dt);
+
+    // Steam off the whetstone once Focus runs genuinely hot. Rate scales with
+    // the square of heat so it stays a rare wisp near the threshold and only
+    // becomes a real plume near the cap — the escalation IS the readout.
+    {
+      const t = this.save.focus / FOCUS_CAP;
+      if (t > Game.STEAM_FLOOR && !this.nextPlot) {
+        const heat = (t - Game.STEAM_FLOOR) / (1 - Game.STEAM_FLOOR);
+        this.steamT -= dt;
+        if (this.steamT <= 0) {
+          this.steamT = 0.5 - 0.34 * heat * heat;
+          const stone = this.whetstonePos();
+          this.effects.push(
+            new SteamWisp(stone.x, stone.y - spriteSize(WHETSTONE).h, 2),
+          );
+        }
+      } else {
+        this.steamT = 0;
+      }
+    }
+
+    // Focus-overflow logs queue behind the single golden-log slot.
+    if (!this.goldenLog && this.overflowLogsPending > 0 && !this.nextPlot) {
+      this.overflowLogsPending -= 1;
+      this.goldenLog = {
+        x: Math.round(12 + Math.random() * (this.w - 24)),
+        y: Math.round(
+          this.skyH + 14 + Math.random() * (this.h - this.skyH - 22),
+        ),
+        ttl: GOLDEN_LOG_TTL,
+      };
     }
 
     for (const e of this.effects) {
@@ -584,16 +4380,148 @@ export class Game {
     }
 
     this.plot.update(dt);
+    this.ambience.update(dt);
+
+    // The wright's rebuild beat. Hammer blows fire on a fixed cadence rather
+    // than off the sprite's animation phase — the sprite flips at 14rad/s,
+    // which would machine-gun the sound.
+    if (this.trestleBuildT > 0) {
+      this.trestleBuildT = Math.max(0, this.trestleBuildT - dt);
+      if (this.trestleBuildT <= this.trestleHammerNext) {
+        playSfx("chop");
+        this.trestleHammerNext = this.trestleBuildT - 0.25;
+      }
+    }
+    this.updateAmbient(dt);
+    if (this.handcarDepartT > 0)
+      this.handcarDepartT = Math.max(0, this.handcarDepartT - dt);
+
+    // Status-board fade. ~5/s, so it is visibly a reveal rather than a
+    // toggle, but is fully up well before you could have read it anyway.
+    const boardTarget = this.boardHovered ? 1 : 0;
+    if (this.boardReveal !== boardTarget) {
+      const step = dt * 5;
+      this.boardReveal =
+        boardTarget > this.boardReveal
+          ? Math.min(1, this.boardReveal + step)
+          : Math.max(0, this.boardReveal - step);
+    }
     this.nextPlot?.update(dt);
 
     for (const [id, wc] of this.woodcutters) {
-      wc.update(dt, this.plot.forest, (tree, chop, x, y) =>
-        this.resolveChop(tree, chop, x, y),
+      wc.update(dt, this.plot.forest, (tree, chop, x, y, srcWc) =>
+        this.resolveChop(tree, chop, x, y, this.chopModsForWc(srcWc)),
       );
+      // Manual POV swing impact (see Woodcutter.beginSwing) — null on the
+      // overwhelming majority of ticks. Only ever set on a cutter that has
+      // been the POV target, but polled for every cutter (not just the
+      // current povTarget) so a swing that was already underway when the
+      // player exited POV still resolves instead of leaking.
+      const manualChop = wc.takeManualChop();
+      if (manualChop) {
+        this.resolveManualPovChop(wc, manualChop);
+      }
       wc.x = Math.min(wc.x, this.w - 10);
       if (wc.gone) {
         wc.releaseTree();
         this.woodcutters.delete(id);
+        this.slotAssignment.delete(id);
+      }
+    }
+
+    // Battle mode never blocks the loop above either — wood-chopping keeps
+    // running in the background exactly like POV. Turn state itself only
+    // ever advances via explicit submitTurnAction calls; everything here is
+    // purely cosmetic sequencing of the events that call already produced.
+    if (this.battleViewOpen) {
+      if (!this.battleAnim && this.battleAnimQueue.length > 0) {
+        const event = this.battleAnimQueue.shift()!;
+        this.battleAnim = {
+          event,
+          t: 0,
+          dur: this.BATTLE_ANIM_DUR[event.kind] ?? 0.5,
+        };
+        this.onBattleEventStart(event);
+      }
+      if (this.battleAnim) {
+        this.battleAnim.t += dt;
+        if (this.battleAnim.t >= this.battleAnim.dur) this.battleAnim = null;
+      }
+      if (this.battleShakeT > 0)
+        this.battleShakeT = Math.max(0, this.battleShakeT - dt);
+      if (this.battleFlashT > 0)
+        this.battleFlashT = Math.max(0, this.battleFlashT - dt);
+      if (this.battleFlash) {
+        this.battleFlash.t += dt;
+        if (this.battleFlash.t > 0.6) this.battleFlash = null;
+      }
+      if (this.battleSkillCheck) {
+        if (this.battleSkillCheckGrace > 0) {
+          // The marker deliberately does NOT move during the lead-in. A grace
+          // window that swallowed clicks while the bar visibly swept looked
+          // broken — you aimed at the zone, clicked, and nothing happened. A
+          // frozen bar plus the "GET READY" label (see renderBattle) makes the
+          // wait legible, so no input is ever discarded silently.
+          this.battleSkillCheckGrace = Math.max(
+            0,
+            this.battleSkillCheckGrace - dt,
+          );
+        } else {
+          this.advanceSkillCheck(this.battleSkillCheck, dt);
+        }
+      }
+      this.updateDeaths(dt);
+      if (this.lastBattleSnapshot?.outcome) {
+        this.battleEndT += dt;
+        if (
+          this.battleEndT > 1.8 &&
+          this.battleAnimQueue.length === 0 &&
+          !this.battleAnim &&
+          // Auto-close is reserved for a genuinely run-ending outcome — a
+          // loss, or a win that just fully banked the run (stage-5 clear,
+          // once its chest is dismissed) — never merely because time has
+          // elapsed while the run is still ongoing. `save.adventure` is
+          // null exactly once bankAdventure has run (every loss, and a
+          // stage-5 win), which also covers every intermediate 1-4 stage
+          // clear staying open on its new "push on or retreat" prompt (see
+          // ui/battle.ts's showStageCleared/finishRewardFlow) without
+          // needing to special-case pendingBoonOffer here anymore.
+          !this.save.adventure &&
+          !this.chestReveal
+        ) {
+          this.closeBattleView();
+        }
+      }
+    }
+
+    // POV mode never blocks the loop above — every cutter, including the
+    // POV target, keeps chopping/felling in the background while watched.
+    if (this.povTarget) {
+      this.povWalkT += dt;
+      // Fell the last tree (or the cutter downed tools) — leave the close-up
+      // rather than stranding the player in a view with nothing to click.
+      if (
+        !this.povTarget.gone &&
+        !this.povTarget.readyToChop &&
+        this.povWalkT > Game.POV_WALK_SECS
+      ) {
+        this.exitPov();
+      } else if (this.povTarget.gone) {
+        this.exitPov();
+      } else {
+        if (this.povTarget.awaitingInput && !this.povSkillCheck) {
+          this.povSkillCheck = this.rollSkillCheck(
+            undefined,
+            this.skillCheckWidenForWc(this.povTarget),
+          );
+        }
+        if (this.povSkillCheck) {
+          this.advanceSkillCheck(this.povSkillCheck, dt);
+        }
+        if (this.povFlash) {
+          this.povFlash.t += dt;
+          if (this.povFlash.t > 0.6) this.povFlash = null;
+        }
       }
     }
 
@@ -606,18 +4534,53 @@ export class Game {
   // --- render -------------------------------------------------------------
 
   private treePalette(world: number): Record<string, string> | null {
-    const base = WORLDS[world].palette;
+    const base = getWorld(world).palette;
     const skin = COSMETICS.find((c) => c.id === this.save.equippedTreeSkin);
     if (!skin) return base;
-    return { ...base, ...skin.palette };
+    return {
+      ...base,
+      ...dyedPalette(skin, this.save.cosmeticColors?.[skin.id]),
+    };
   }
 
   private capPalette(): Record<string, string> | null {
     const cap = COSMETICS.find((c) => c.id === this.save.equippedCap);
-    return cap ? cap.palette : null;
+    return cap ? dyedPalette(cap, this.save.cosmeticColors?.[cap.id]) : null;
+  }
+
+  private workerPalette(world: number): Record<string, string> | null {
+    const base = getWorld(world).workerPalette;
+    const cap = this.capPalette();
+    if (!base && !cap) return null;
+    return { ...base, ...cap };
+  }
+
+  /** Sibling to workerPalette()/treePalette() above — per-world tint for
+   * held weapons (only ever touches the neutral `D`/`d` steel base, see
+   * WorldSpec.weaponPalette). No cosmetic-cap-style second override exists
+   * for weapons, so this is a direct passthrough. */
+  weaponPalette(world: number): Record<string, string> | null {
+    return getWorld(world).weaponPalette;
+  }
+
+  /** Public passthrough to the private workerPalette() above — lets DOM
+   * panels (Team roster portraits, ui/team.ts) compose the exact same
+   * world+cap tint the canvas world already renders workers with, instead
+   * of reimplementing that composition. */
+  getWorkerPalette(world: number): Record<string, string> | null {
+    return this.workerPalette(world);
   }
 
   render(ctx: CanvasRenderingContext2D): void {
+    if (this.battleViewOpen) {
+      this.renderBattle(ctx);
+      return;
+    }
+    if (this.povTarget) {
+      this.renderPov(ctx);
+      return;
+    }
+
     const { w, h, skyH } = { w: this.w, h: this.h, skyH: this.skyH };
 
     this.sky.render(ctx, w, skyH, new Date());
@@ -628,24 +4591,118 @@ export class Game {
 
     // Ground per world (both worlds visible during a travel slide).
     if (sliding) {
-      ctx.fillStyle = WORLDS[this.plotWorld].ground;
+      ctx.fillStyle = getWorld(this.plotWorld).ground;
       ctx.fillRect(dxOld, skyH, w, h - skyH);
-      ctx.fillStyle = WORLDS[this.nextPlotWorld].ground;
+      ctx.fillStyle = getWorld(this.nextPlotWorld).ground;
       ctx.fillRect(dxNew, skyH, w, h - skyH);
     } else {
-      ctx.fillStyle = WORLDS[this.plotWorld].ground;
+      ctx.fillStyle = getWorld(this.plotWorld).ground;
       ctx.fillRect(0, skyH, w, h - skyH);
     }
 
-    this.plot.renderGroundLayer(ctx, dxOld, WORLDS[this.plotWorld].tuft);
+    // Birds ride over the sky/treeline, before the ground goes down, so they
+    // read as distant. See scene/ambience.ts.
+    this.ambience.renderSky(ctx, dxOld, this.dayPhase());
+
+    // Distant treeline first — it's the farthest thing in the world, so
+    // everything on the ground draws over it.
+    const oldWorld = getWorld(this.plotWorld);
+    this.plot.renderTreeline(ctx, dxOld);
+    this.nextPlot?.renderTreeline(ctx, dxNew);
+
+    this.plot.renderGroundLayer(ctx, dxOld, oldWorld.tuft);
     if (this.nextPlot) {
-      this.nextPlot.renderGroundLayer(ctx, dxNew, WORLDS[this.nextPlotWorld].tuft);
+      this.nextPlot.renderGroundLayer(
+        ctx,
+        dxNew,
+        getWorld(this.nextPlotWorld).tuft,
+      );
     }
 
-    const capPalette = this.capPalette();
+    // Bushes / ferns / rocks / stumps: backdrop scenery, over the grass but
+    // under everything that moves.
+    this.plot.renderScenery(ctx, dxOld, oldWorld.tuft);
+    this.nextPlot?.renderScenery(ctx, dxNew, getWorld(this.nextPlotWorld).tuft);
+
+    // Butterflies / fireflies / falling leaves sit in the grass: after the
+    // ground cover, before the depth-sorted sprite pass, so a woodcutter
+    // always walks in FRONT of them rather than being speckled over.
+    this.ambience.renderGround(ctx, dxOld, this.dayPhase());
+
+    const workerPalette = this.workerPalette(this.plotWorld);
+    // Focus heat rides the axe blade (`D`) and its shade (`d`) — the same ramp
+    // the whetstone wheel uses, so the two read as one meter. Focus is global,
+    // so this is merged once rather than per-worker. Rarity accents (N/H/Y/y)
+    // are deliberately untouched: a legendary axe keeps its own glow.
+    const baseWeaponPalette = this.weaponPalette(this.plotWorld);
+    const axeHeat = focusHeatColor(this.save.focus);
+    const weaponPalette = axeHeat
+      ? {
+          ...baseWeaponPalette,
+          D: axeHeat,
+          d: mixHex(axeHeat, "#1d2b21", 0.35),
+        }
+      : baseWeaponPalette;
     if (!sliding) {
       type Drawable = { y: number; draw: () => void };
       const drawables: Drawable[] = [];
+      // Resource props sit on the ground line, so they depth-sort with trees
+      // and workers instead of being pasted on top like the sap press.
+      // Homestead: fence first (it's ground-level and everything else in the
+      // yard stands in front of or behind it via normal depth sorting), then
+      // the cottage and each placed buildable as its own depth-sorted entry.
+      this.pushYardDrawables(ctx, drawables);
+      // Sap Press. Now depth-sorted with everything else — it used to be drawn
+      // after the sort, so it floated on top of any tree or worker standing in
+      // front of it.
+      if (this.sapPressOwned())
+        drawables.push({
+          y: this.sapPressPos().y,
+          draw: () => {
+            const press = this.sapPressPos();
+            const frame = this.sapPressT > 0 ? SAP_PRESS_DOWN : SAP_PRESS_IDLE;
+            const size = spriteSize(frame);
+            drawSprite(
+              ctx,
+              frame,
+              press.x - Math.floor(size.w / 2),
+              press.y - size.h,
+            );
+          },
+        });
+      drawables.push({
+        y: this.logStackPos().y,
+        draw: () => this.drawLogStack(ctx),
+      });
+      drawables.push({
+        y: this.whetstonePos().y,
+        draw: () => this.drawWhetstone(ctx),
+      });
+      drawables.push({
+        y: this.lanternPos().y,
+        draw: () => this.drawLantern(ctx),
+      });
+      // The Timber Line. Drawn as one continuous run so both ends read as the
+      // same route: track all the way across, a halt at the left, a trestle at
+      // the right. All of it joins the depth-sorted pass at its own footing,
+      // so a woodcutter wandering to the back of the plot passes in front of
+      // the rails and behind nothing.
+      this.pushRailDrawables(ctx, drawables);
+      this.pushNpcDrawables(ctx, drawables);
+
+      drawables.push({
+        y: this.signpostPos().y,
+        draw: () => {
+          const p = this.signpostPos();
+          // Sways briefly after a click, and drifts on a slow idle cycle so it
+          // advertises itself as clickable rather than looking like scenery.
+          const swaying =
+            this.signpostT > 0 || Math.floor(this.animT * 0.7) % 4 === 0;
+          const frame = swaying ? SIGNPOST_SWAY : SIGNPOST_IDLE;
+          const size = spriteSize(frame);
+          drawSprite(ctx, frame, p.x - Math.floor(size.w / 2), p.y - size.h);
+        },
+      });
       for (const tree of this.plot.forest.trees) {
         drawables.push({
           y: tree.y,
@@ -656,14 +4713,18 @@ export class Game {
         });
       }
       for (const wc of this.woodcutters.values()) {
-        drawables.push({ y: wc.y + 0.5, draw: () => wc.render(ctx, capPalette) });
+        drawables.push({
+          y: wc.y + 0.5,
+          draw: () => wc.render(ctx, workerPalette, weaponPalette),
+        });
       }
       if (this.spot) {
         const spot = this.spot;
         drawables.push({
           y: spot.tree.y + 0.6,
           draw: () => {
-            const frame = Math.floor(this.animT * 3) % 2 === 0 ? GLOW_SM : GLOW_LG;
+            const frame =
+              Math.floor(this.animT * 3) % 2 === 0 ? GLOW_SM : GLOW_LG;
             const half = frame === GLOW_SM ? 1 : 2;
             drawSprite(ctx, frame, spot.x - half, spot.y - half);
           },
@@ -683,21 +4744,43 @@ export class Game {
           });
         }
       }
+      // Cache Koi — drawn over the lake, same final-2s blink cue as the
+      // golden log; faces its actual swim direction (derivative of
+      // Lake.koiPosition's cos(phase) x term).
+      if (this.koi) {
+        const pos = this.plot.lake.koiPosition(this.koi.phase);
+        const blink = this.koi.ttl < 2 && Math.floor(this.animT * 4) % 2 === 0;
+        if (!blink) {
+          const facingLeft = Math.sin(this.koi.phase) > 0;
+          const size = spriteSize(CACHE_KOI);
+          drawSprite(
+            ctx,
+            CACHE_KOI,
+            pos.x - Math.floor(size.w / 2),
+            pos.y - Math.floor(size.h / 2),
+            facingLeft,
+          );
+        }
+      }
     } else {
       withPalette(this.treePalette(this.plotWorld), () => {
-        for (const tree of [...this.plot.forest.trees].sort((a, b) => a.y - b.y)) {
+        for (const tree of [...this.plot.forest.trees].sort(
+          (a, b) => a.y - b.y,
+        )) {
           this.plot.forest.renderTree(ctx, tree, dxOld);
         }
       });
       if (this.nextPlot) {
         withPalette(this.treePalette(this.nextPlotWorld), () => {
-          for (const tree of [...this.nextPlot!.forest.trees].sort((a, b) => a.y - b.y)) {
+          for (const tree of [...this.nextPlot!.forest.trees].sort(
+            (a, b) => a.y - b.y,
+          )) {
             this.nextPlot!.forest.renderTree(ctx, tree, dxNew);
           }
         });
       }
       for (const wc of this.woodcutters.values()) {
-        wc.render(ctx, capPalette);
+        wc.render(ctx, workerPalette, weaponPalette);
       }
     }
 
@@ -714,23 +4797,67 @@ export class Game {
       ctx.fillRect(0, skyH, w, h - skyH);
     }
 
-    // HUD top-left: wood, amber, focus bar.
-    drawSprite(ctx, LOG, 2, 2);
-    const woodLabel = abbrev(this.save.wood);
-    drawText(ctx, woodLabel, 13, 3, "#1d2b21");
-    drawText(ctx, woodLabel, 12, 2, WOOD_COLOR);
+    // Build Mode overlay: the ONLY time the grid is ever visible. Drawn after
+    // the night overlay so tiles and the ghost stay readable in the dark, and
+    // after the world so nothing occludes what you're aiming at.
+    if (!sliding && this.buildModeActive()) {
+      this.renderBuildOverlay(ctx);
+    }
 
-    drawSprite(ctx, AMBER_GEM, 3, 9);
-    const amberLabel = abbrev(this.save.amber);
-    drawText(ctx, amberLabel, 13, 10, "#1d2b21");
-    drawText(ctx, amberLabel, 12, 9, "#ffd75e");
+    // Resource readouts. The prop BODIES are drawn back in the depth-sorted
+    // pass (so trees and workers occlude them properly); only the etched
+    // numbers and the lantern's light cone happen here, after the night
+    // overlay, so the counts stay legible in the dark and the cone reads as
+    // light rather than being dimmed along with everything else.
+    if (!sliding) {
+      this.renderPropLabels(ctx);
+    }
 
-    ctx.fillStyle = "#1d2b21";
-    ctx.fillRect(2, 16, 28, 5);
-    ctx.fillStyle = "#12324a";
-    ctx.fillRect(3, 17, 26, 3);
-    ctx.fillStyle = this.save.focus > 0 ? "#6fb7ff" : "#3a5a74";
-    ctx.fillRect(3, 17, Math.round((26 * this.save.focus) / FOCUS_CAP), 3);
+    // Hover label, drawn LAST of everything. It used to run before
+    // renderPropLabels, so the cottage's resource sign board painted straight
+    // over the label whenever you hovered the cottage — the one moment the
+    // label matters most. Nothing may occlude it.
+    // Suppressed while a conversation is open. handleHover already stops
+    // RESOLVING a hover target then, but the last one resolved before the
+    // click survives until the pointer next moves — so the prop's label sat
+    // on screen underneath its own speech bubble. Gating at the draw makes
+    // that impossible to reintroduce from a new dialogue opener.
+    if (!sliding && this.hoverTarget && !this.dialogue) {
+      const t = this.hoverTarget;
+      const tw = textWidth(t.label);
+      const bx = Math.round(
+        Math.max(2, Math.min(this.w - tw - 6, t.x - tw / 2 - 2)),
+      );
+      // Clamped at BOTH edges. Labels used to only ever be requested above
+      // their prop, so a top-only clamp was enough; the encampment's now sits
+      // below its tent, and a prop near the bottom of the plot would push its
+      // label off the canvas entirely.
+      const by = Math.max(2, Math.min(this.h - 9, Math.round(t.y - 8)));
+      ctx.fillStyle = "rgba(20, 14, 8, 0.85)";
+      ctx.fillRect(bx, by, tw + 4, 8);
+      ctx.fillStyle = t.enabled ? "#8ef0a0" : "#e8a06a";
+      ctx.fillRect(bx, by, 1, 8);
+      drawText(ctx, t.label, bx + 2, by + 2, t.enabled ? "#f2e6d0" : "#c8b49a");
+    }
+
+    // Conversations draw above everything, including the hover label — the
+    // bubble IS the interaction while it's open, and it already suppresses
+    // the hover label in handleHover, so nothing may occlude it.
+    // Unprompted chatter sits BELOW a real conversation in z-order and is
+    // suppressed entirely while one is open (updateAmbient won't start one,
+    // and this won't draw a leftover), so the two can never stack.
+    if (!sliding && this.ambient && !this.dialogue) {
+      drawAmbient(ctx, this.ambient, layoutAmbient(this.ambient, this.w, this.h));
+    }
+
+    if (!sliding && this.dialogue) {
+      drawBubble(
+        ctx,
+        this.dialogue,
+        layoutBubble(this.dialogue, this.w, this.h),
+        this.dialogueHover,
+      );
+    }
 
     if (this.extraCount > 0) {
       const label = `+${this.extraCount}`;
@@ -744,5 +4871,330 @@ export class Game {
       drawText(ctx, msg, Math.round(w / 2 - textWidth(msg) / 2), 12, "#ffffff");
     }
   }
-}
 
+  /** Builds the view the POV renderer needs (see scene/pov-render.ts). */
+  private renderPov(ctx: CanvasRenderingContext2D): void {
+    renderPovScene(ctx, {
+      w: this.w,
+      h: this.h,
+      plotWorld: this.plotWorld,
+      povTarget: this.povTarget,
+      povWalkT: this.povWalkT,
+      povWalkSecs: Game.POV_WALK_SECS,
+      renderSkillCheck: (c, w, h) => this.renderSkillCheck(c, w, h),
+      treePalette: (world) => this.treePalette(world),
+      workerPalette: (world) => this.workerPalette(world),
+      weaponPalette: (world) => this.weaponPalette(world),
+    });
+  }
+
+  private renderSkillCheck(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+  ): void {
+    const trackX = 6;
+    const trackW = w - 12;
+    const trackY = h - 16;
+    const trackH = 6;
+    renderSkillCheckTrack(
+      ctx,
+      trackX,
+      trackY,
+      trackW,
+      trackH,
+      this.povSkillCheck,
+    );
+    if (this.povFlash) {
+      const grade = this.povFlash.grade;
+      const color =
+        grade === "great"
+          ? "#ffd75e"
+          : grade === "good"
+            ? "#6fb7ff"
+            : "#d64545";
+      // The wood, not the multiplier. A bare "x1.5" restated the grade and
+      // left you to work out what it was worth; the payout is the thing you
+      // came here for, so it is what the bar says. The grade still shows,
+      // smaller, above it — it is the feedback on your timing.
+      const wood = this.povFlash.wood;
+      const gradeLabel =
+        grade === "great" ? "GREAT!" : grade === "good" ? "GOOD" : "MISS";
+      drawText(
+        ctx,
+        gradeLabel,
+        Math.round(w / 2 - textWidth(gradeLabel) / 2),
+        trackY - 17,
+        color,
+      );
+      if (wood !== null) {
+        const woodLabel = `+${abbrev(Math.round(wood))} WOOD`;
+        drawText(
+          ctx,
+          woodLabel,
+          Math.round(w / 2 - textWidth(woodLabel) / 2),
+          trackY - 9,
+          WOOD_COLOR,
+        );
+      }
+    }
+  }
+
+
+
+  // --- battle render ------------------------------------------------------
+
+  private readonly BATTLE_ANIM_DUR: Record<TurnEvent["kind"], number> = {
+    attack: 0.65,
+    crit: 0.65,
+    miss: 0.4,
+    defend: 0.4,
+    ability: 0.6,
+    heal: 0.5,
+    enemyMove: 0.65,
+    battleEnd: 0.3,
+  };
+
+  /** Formation offsets for the 3 party slots, indexed the same way
+   * `partyIds` is built (see adventure.ts's EMBARK_ORDER: front, backLeft,
+   * backRight) — front sits nearest the enemy's own 0.5h engagement line
+   * (conventional JRPG framing: the front line engages closest, back-liners
+   * hang back toward the bottom/viewer edge), centered and offset to either
+   * side for the two back slots. Front and the enemy sit on opposite
+   * horizontal thirds of the screen (party x ~= 0.24w, enemy x ~= 0.74w —
+   * see battlePartySlot/battleEnemySlot), so sharing a near-identical
+   * dyFrac doesn't risk any sprite overlap despite front being the biggest
+   * party sprite (BATTLE_ZOOM) next to the single biggest sprite in the
+   * scene (enemyZoom = 4 in renderBattle). Ratios chosen to echo Muster's
+   * `.adv-formation` back/front size split (back boxes are ~0.72x the
+   * front box, back portraits ~0.65x). */
+  /** `battleEnemySlot`, looked up by a specific enemy unit's own id rather
+   * than its array index — null if `id` isn't a currently-living-or-dead
+   * unit in this battle at all (a party memberId, or the literal "enemy"
+   * used by battle-level, not-unit-sourced events). Used by
+   * battleEventTargetPos to place a visual at the exact enemy that was
+   * actually targeted, not just "the" enemy slot. */
+  private enemySlotForId(
+    battle: BattleSnapshot | null,
+    id: string,
+  ): { x: number; y: number } | null {
+    if (!battle) return null;
+    const idx = battle.enemies.findIndex((u) => u.id === id);
+    return idx === -1 ? null : battleEnemySlot(idx, battle.enemies.length, this);
+  }
+
+  private battleMemberIndex(memberId: string): number {
+    const ids = this.save.adventure?.partyIds ?? this.lastBattlePartyIds;
+    return ids.indexOf(memberId);
+  }
+
+  private battleMemberSlot(memberId: string): { x: number; y: number } | null {
+    const idx = this.battleMemberIndex(memberId);
+    return idx === -1 ? null : battlePartySlot(idx, this);
+  }
+
+  private battleEventTargetPos(event: TurnEvent): { x: number; y: number } {
+    const battle = this.battleSnapshot();
+    // actorId is either the literal "enemy" (battle-level events not
+    // sourced from one particular unit — the lastStand/roped save "heal",
+    // battleEnd — see battle.ts's TurnEvent doc comment) or a specific
+    // EnemyUnit.id (e.g. "enemy-1") for a per-unit attack/enemyMove. Either
+    // way, the event was enemy-sourced, so its visual belongs on the party
+    // side.
+    const isEnemyActor =
+      event.actorId === "enemy" ||
+      !!battle?.enemies.some((u) => u.id === event.actorId);
+    if (isEnemyActor) {
+      if (event.targetId && event.targetId !== "party") {
+        return this.battleMemberSlot(event.targetId) ?? battlePartySlot(0, this);
+      }
+      return battlePartySlot(0, this);
+    }
+    const fallbackEnemySlot = battleEnemySlot(0, battle?.enemies.length ?? 1, this);
+    if (event.targetId) {
+      return (
+        this.enemySlotForId(battle, event.targetId) ??
+        this.battleMemberSlot(event.targetId) ??
+        fallbackEnemySlot
+      );
+    }
+    return this.battleMemberSlot(event.actorId) ?? fallbackEnemySlot;
+  }
+
+  /** Fires the moment a queued TurnEvent starts animating (see update()) —
+   * spawns the floating number / hit-flash / shake that make the turn
+   * actually read as having happened, not just a silent state change. */
+  private onBattleEventStart(event: TurnEvent): void {
+    const pos = this.battleEventTargetPos(event);
+    if (
+      event.kind === "attack" ||
+      event.kind === "crit" ||
+      event.kind === "enemyMove"
+    ) {
+      if (typeof event.amount === "number") {
+        const color = event.kind === "crit" ? "#ffd75e" : "#ffffff";
+        this.floats.push(
+          new FloatingText(
+            pos.x,
+            pos.y - 12,
+            `-${abbrev(event.amount)}`,
+            color,
+          ),
+        );
+      }
+      // A slash sweeps across whoever just got hit — the same SLASH1/SLASH2
+      // asset manual chop swings already use, so every landed hit (either
+      // direction) reads as a real impact rather than just a number
+      // changing. Crits get a wider, brighter flourish.
+      this.effects.push(
+        new Effect(
+          pos.x,
+          pos.y,
+          [SLASH1, SLASH2],
+          event.kind === "crit" ? 0.3 : 0.22,
+        ),
+      );
+      this.battleFlashId = event.targetId ?? null;
+      this.battleFlashT = 0.25;
+      playSfx(event.kind === "crit" ? "crit" : "hit");
+      if (event.kind === "crit" || event.kind === "enemyMove") {
+        this.battleShakeT = 0.2;
+        // Shake scales with how hard the hit landed RELATIVE to its
+        // target's max HP (scale-free — raw damage grows 10^world), from a
+        // subtle 2px rattle to a 6px slam on a near-lethal hit.
+        const targetMax = this.battleTargetMaxHp(event);
+        const frac = targetMax > 0 ? (event.amount ?? 0) / targetMax : 0;
+        this.battleShakeMag = Math.max(2, Math.min(6, 2 + 10 * frac));
+      }
+    } else if (event.kind === "heal") {
+      playSfx("heal");
+      if (typeof event.amount === "number") {
+        this.floats.push(
+          new FloatingText(
+            pos.x,
+            pos.y - 12,
+            `+${abbrev(event.amount)}`,
+            "#6fb7ff",
+          ),
+        );
+      }
+    } else if (event.kind === "defend") {
+      playSfx("defend");
+    }
+  }
+
+  /** Max HP of whatever a damage event just hit — a party member's maxHp or
+   * an enemy unit's spec.hp — for scale-free screenshake magnitude. */
+  private battleTargetMaxHp(event: TurnEvent): number {
+    if (!event.targetId) return 0;
+    const member = this.memberById(event.targetId);
+    if (member) return member.maxHp;
+    const unit = this.save.adventure?.battle?.enemies.find(
+      (u) => u.id === event.targetId,
+    );
+    return unit?.spec.hp ?? 0;
+  }
+
+  /** Which pose a battle unit should show right now, given the in-flight
+   * animation (if this unit is the actor or the target of it). */
+  /** Battle-unit pose resolution. Returns both the PixelMap to draw (as
+   * before) AND the resolved pose NAME, so the party-member loop can look
+   * up an equipped Adventuring item's weapon art by the same key without
+   * re-deriving the animation-state logic below. Every existing special
+   * case is preserved exactly (in particular the scientist's glitchPulse
+   * `special` frame override) — `special` still substitutes a different
+   * PixelMap for the windup frame, but the pose is still conceptually
+   * "attackWindup" (the ability replaces the sprite content, not the slot),
+   * which is also why enemies — the only unit kind with a `special` frame —
+   * are never weapon-composited (see the party-member loop; out of scope
+   * for Part D regardless). */
+  private battleUnitPose(
+    id: string,
+    hp: number,
+    frames: EnemyFrameSet,
+  ): {
+    frame: PixelMap;
+    name: "idle" | "attackWindup" | "attackStrike" | "hurt" | "defeated";
+  } {
+    if (hp <= 0) return { frame: frames.defeated, name: "defeated" };
+    const anim = this.battleAnim;
+    if (anim) {
+      const p = anim.dur > 0 ? Math.min(1, anim.t / anim.dur) : 1;
+      if (anim.event.actorId === id) {
+        const attacking =
+          anim.event.kind === "attack" ||
+          anim.event.kind === "crit" ||
+          anim.event.kind === "enemyMove";
+        if (attacking) {
+          const special = anim.event.moveId === "glitchPulse" && frames.special;
+          if (p < 0.5)
+            return {
+              frame: special || frames.attackWindup,
+              name: "attackWindup",
+            };
+          return { frame: frames.attackStrike, name: "attackStrike" };
+        }
+      }
+      if (
+        anim.event.targetId === id &&
+        (anim.event.kind === "attack" ||
+          anim.event.kind === "crit" ||
+          anim.event.kind === "enemyMove")
+      ) {
+        return { frame: frames.hurt, name: "hurt" };
+      }
+    }
+    return { frame: frames.idle, name: "idle" };
+  }
+
+  /** How far along its lunge an attacking unit currently is, 0 (idle) to 1
+   * (full extension) and back to 0 — a cheap sine-shaped in/out. */
+  private battleLungeT(id: string): number {
+    const anim = this.battleAnim;
+    if (!anim || anim.event.actorId !== id) return 0;
+    const attacking =
+      anim.event.kind === "attack" ||
+      anim.event.kind === "crit" ||
+      anim.event.kind === "enemyMove";
+    if (!attacking || anim.dur <= 0) return 0;
+    const p = Math.min(1, anim.t / anim.dur);
+    return Math.sin(p * Math.PI);
+  }
+
+  /** Full-window turn-based battle scene. The party's HP/actions live in
+   * the DOM overlay (#battle, arbitrary text) — this canvas layer only owns
+   * the animated sprites, motion, and floating numbers/flashes. */
+  /** Builds the view the battle renderer needs (see scene/battle-render.ts)
+   * and hands off. Methods are wrapped rather than passed by reference so
+   * they stay bound to this Game. */
+  private renderBattle(ctx: CanvasRenderingContext2D): void {
+    renderBattleScene(ctx, {
+      w: this.w,
+      h: this.h,
+      animT: this.animT,
+      save: this.save,
+      floats: this.floats,
+      lastBattlePartyIds: this.lastBattlePartyIds,
+      lastBattleWorld: this.lastBattleWorld,
+      battleAnim: this.battleAnim,
+      battleEndT: this.battleEndT,
+      battleFlash: this.battleFlash,
+      battleFlashId: this.battleFlashId,
+      battleFlashT: this.battleFlashT,
+      battleShakeMag: this.battleShakeMag,
+      battleShakeT: this.battleShakeT,
+      battleSkillCheck: this.battleSkillCheck,
+      battleSkillCheckGrace: this.battleSkillCheckGrace,
+      battleSnapshot: () => this.battleSnapshot(),
+      currentBattleActorId: () => this.currentBattleActorId(),
+      battlePendingActionKind: () => this.battlePendingActionKind(),
+      battleMemberSlot: (id) => this.battleMemberSlot(id),
+      battleLungeT: (id) => this.battleLungeT(id),
+      battleUnitPose: (id, hp, frames) => this.battleUnitPose(id, hp, frames),
+      deathSquash: (id) => this.deathSquash(id),
+      partyFor: (ids) => this.partyFor(ids),
+      workerPalette: (world) => this.workerPalette(world),
+      weaponPalette: (world) => this.weaponPalette(world),
+    });
+  }
+}

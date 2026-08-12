@@ -1,0 +1,763 @@
+// Adventure overlay: Muster (party select + embark) and In-the-Field
+// (push on / resume / retreat) screens. Lives in its own #adventure
+// div/button — a distinct mode from the shop, not a shop tab — but mirrors
+// shop.ts's plain-DOM row/overlay conventions. All mutation routes through
+// Game methods, which own the save. The actual turn-based fight (Attack/
+// Defend/Ability) happens in the separate full-window battle view (see
+// ui/battle.ts, Game.beginStageBattle/openBattleView) — this overlay only
+// gets the player as far as "start" or "resume" a stage's fight.
+//
+// Every DOM node here is built ONCE at init; the periodic refresh only ever
+// mutates text/classes/disabled state afterward (or rebuilds a small
+// sub-list when its underlying identity actually changes, e.g. the roster
+// gaining a member) — nothing is torn down and rebuilt wholesale on a
+// timer, which is what used to let clicks get silently eaten (a button
+// removed mid-click never receives its click event). Same fix already
+// applied to ui/battle.ts; this brings this overlay in line with it.
+
+import { buildEnemy } from "../adventure";
+import { CURATED_WORLD_THEMES, getWorld, PROVISIONS, WORKER_DEFS_BY_ID, type ProvisionId } from "../economy";
+import { abbrev, hpBarClass } from "../scene/floating-text";
+import type { Game } from "../scene/game";
+import type { WorkerRarity } from "../scene/sprites";
+import { effectiveAtk, equippedItem, type Rarity, type TeamMemberSave } from "../team";
+import { closeOtherOverlays, registerOverlay } from "./overlay-coordinator";
+import { pixelIconComposite } from "./pixel-icon";
+import { PORTRAIT_H, PORTRAIT_W, requestSelectMember, workerPortraitDraw } from "./team";
+
+const MAX_CARRIED = 2;
+
+/** The 3 formation slots, in the FIXED order that becomes battle turn order
+ * on embark (see EMBARK_ORDER below) — front acts first, then the two back
+ * slots. This is deliberate now: the old checkbox-list muster derived
+ * `partyIds` purely from click order (a Set's insertion order), which
+ * silently decided turn order/battle-canvas stacking as a side effect no
+ * player could see or control (see battlePartySlot/renderBattle in
+ * scene/game.ts, unchanged by this file). The formation UI below makes that
+ * choice explicit and visual instead. */
+type SlotKey = "front" | "backLeft" | "backRight";
+const EMBARK_ORDER: SlotKey[] = ["front", "backLeft", "backRight"];
+const SLOT_LABEL: Record<SlotKey, string> = { front: "Front", backLeft: "Back Left", backRight: "Back Right" };
+
+/** Same composited body+weapon portrait art the Team roster/detail panels
+ * use (team.ts's memberPortrait) — reuses the exact exported drawing
+ * primitive (workerPortraitDraw) and the shared cached-<img> pipeline
+ * (pixelIconComposite) rather than re-deriving sprite compositing here.
+ * team.ts's own memberPortrait wrapper isn't exported (it's a private
+ * caching convenience local to that file), so this is that same one-line
+ * wrapper, not a divergent copy of the compositing logic itself. */
+function formationPortrait(
+  rarity: WorkerRarity,
+  workerPalette: Record<string, string> | null,
+  weaponRarity: Rarity,
+  weaponPalette: Record<string, string> | null,
+  scale: number,
+  className: string,
+): HTMLImageElement {
+  const { key, draw } = workerPortraitDraw(rarity, workerPalette, weaponRarity, weaponPalette);
+  return pixelIconComposite(key, PORTRAIT_W, PORTRAIT_H, draw, { scale, className });
+}
+
+/** Brief "that worked" confirmation — this overlay's DOM is built once and
+ * only ever mutated in place (see file header), so unlike team.ts/shop.ts
+ * there's no re-render to lose the flash target between click and paint. */
+function flash(el: HTMLElement): void {
+  el.classList.remove("flash-pulse");
+  void el.offsetWidth; // restart the animation from scratch
+  el.classList.add("flash-pulse");
+}
+
+export function initAdventure(game: Game): void {
+  const overlay = document.getElementById("adventure")!;
+  const openBtn = document.getElementById("adventure-btn")!;
+  const closeBtn = document.getElementById("adventure-close")!;
+  const bodyEl = document.getElementById("adventure-body")!;
+  bodyEl.replaceChildren();
+
+  let selectedWorld = game.save.worldIndex;
+  // Formation state — replaces the old `selectedParty: Set<string>` (whose
+  // insertion order silently became battle turn order). Null = empty slot.
+  const formation: Record<SlotKey, string | null> = { front: null, backLeft: null, backRight: null };
+  // Which slot the NEXT click in the bottom roster tray (see trayWrap below)
+  // will assign into — at most one at a time. Formerly `openPicker`, which
+  // tracked which slot's inline dropdown was open; that per-slot dropdown
+  // is gone (superseded by the persistent tray), so this now just marks a
+  // "targeted" slot for highlighting/assignment instead of an open/closed
+  // UI element.
+  let targetSlot: SlotKey | null = null;
+  const selectedCarry = new Set<ProvisionId>();
+  let refreshTimer: number | null = null;
+
+  /** `partyIds` in embark order (front, then back-left, then back-right) —
+   * the single source of truth for both the win/cost preview and the
+   * embark call itself, so they can never disagree about who's mustered. */
+  function currentPartyIds(): string[] {
+    return EMBARK_ORDER.map((k) => formation[k]).filter((id): id is string => id !== null);
+  }
+
+  // --- Muster screen: persistent DOM, built once --------------------------
+  const musterEl = document.createElement("div");
+  musterEl.className = "adv-muster";
+
+  const worldRow = document.createElement("div");
+  worldRow.className = "adv-world-row";
+  const worldBtns = new Map<number, HTMLButtonElement>();
+  CURATED_WORLD_THEMES.forEach((w, i) => {
+    const btn = document.createElement("button");
+    const mult = getWorld(i).mult;
+    btn.textContent = mult > 1 ? `${w.name} (×${abbrev(mult)})` : w.name;
+    btn.addEventListener("click", () => {
+      selectedWorld = i;
+      renderMuster();
+    });
+    worldBtns.set(i, btn);
+    worldRow.append(btn);
+  });
+  musterEl.append(worldRow);
+
+  const rosterEmpty = document.createElement("div");
+  rosterEmpty.className = "shop-sub";
+  rosterEmpty.textContent = "no team members yet — pull the Worker Gacha first";
+  musterEl.append(rosterEmpty);
+
+  // --- Formation: a campsite clearing at night, 3 workers seated on logs
+  // around a fire — built once and mutated in place (see file header). This
+  // IS the party picker, not just a display: drag a roster member from the
+  // tray onto a log to seat them, drag a seated worker onto another log to
+  // swap seats (see assignToSlot below), or fall back to the older
+  // click-to-target/click-tray-card flow (still fully wired, just no longer
+  // the primary affordance). A small always-visible "×" clears a seat
+  // directly and a "🎒" opens that worker's backpack (equip gear) — see
+  // openBackpack — no targeting required for either.
+  const formationWrap = document.createElement("div");
+  formationWrap.className = "adv-formation";
+  // Purely decorative — logs + a flickering flame, CSS-only (no image
+  // assets, matching the rest of the app's synthesized-not-drawn ethos for
+  // ambient effects). A REAL flex sibling between the back and front rows
+  // (not an absolutely-positioned guess at "the empty space") — it was
+  // originally guessed-positioned and ended up hidden entirely behind the
+  // front seat's own log (headless-verified: the glow peeked out at the
+  // edges, the flame itself never did). Sitting in the actual layout gap
+  // between the two rows guarantees it's never occluded by either seat,
+  // regardless of window size.
+  const campfire = document.createElement("div");
+  campfire.className = "adv-campfire";
+  const campfireGlow = document.createElement("div");
+  campfireGlow.className = "adv-campfire-glow";
+  const campfireLogs = document.createElement("div");
+  campfireLogs.className = "adv-campfire-logs";
+  const flame1 = document.createElement("div");
+  flame1.className = "adv-campfire-flame adv-campfire-flame-1";
+  const flame2 = document.createElement("div");
+  flame2.className = "adv-campfire-flame adv-campfire-flame-2";
+  campfire.append(campfireGlow, campfireLogs, flame1, flame2);
+  const backRow = document.createElement("div");
+  backRow.className = "adv-formation-back";
+  const frontRow = document.createElement("div");
+  frontRow.className = "adv-formation-front";
+  formationWrap.append(backRow, campfire, frontRow);
+  musterEl.append(formationWrap);
+
+  // Drag payload key for both directions of drag (tray -> slot, slot ->
+  // slot) — a plain memberId string is all either side needs; the drop
+  // handler below figures out "is this member already seated somewhere
+  // else" itself by scanning `formation`; it doesn't need to know the drag
+  // ORIGIN. Custom MIME type (not "text/plain") so a drag originating
+  // outside this app can never accidentally look like a valid drop.
+  const DRAG_MIME = "application/x-tf-member";
+
+  /** Opens the roster member's equipment in the Team panel — the
+   * "backpack" resting beside them at the campfire. Reuses the existing,
+   * fully-built Team panel wholesale (requestSelectMember, team.ts) rather
+   * than duplicating an equip picker inline here; closes this overlay and
+   * simulates the same two clicks a player would make by hand (Shop button,
+   * then the Team tab, in case a different tab was last open). */
+  function openBackpack(memberId: string): void {
+    requestSelectMember(memberId);
+    close();
+    document.getElementById("shop-btn")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>('#shop-tabs button[data-tab="team"]')?.click();
+  }
+
+  /** Moves `memberId` into `target`, swapping with whoever's already there
+   * if the member being displaced came from another slot (a genuine
+   * campfire-seat swap), or simply bumping them back to the bench if the
+   * member arrived from the roster tray instead (nothing to swap them
+   * INTO). Shared by both the drag-drop handler below and the existing
+   * click-to-target/click-tray-card flow, which now calls this too instead
+   * of duplicating the "clear the member's old slot first" guard. */
+  function assignToSlot(memberId: string, target: SlotKey): void {
+    let fromSlot: SlotKey | null = null;
+    for (const k of EMBARK_ORDER) {
+      if (formation[k] === memberId) fromSlot = k;
+    }
+    const displaced = formation[target];
+    formation[target] = memberId;
+    // A slot-to-slot drag swaps: whoever WAS at `target` takes the dragged
+    // member's old spot, a real seat exchange. A drag from the roster tray
+    // (fromSlot null) instead just bumps `displaced` back to the bench —
+    // there's no "old spot" of the dragged member's to send them to.
+    if (fromSlot && fromSlot !== target) formation[fromSlot] = displaced;
+  }
+
+  interface SlotDom {
+    root: HTMLElement;
+    face: HTMLElement;
+    portraitWrap: HTMLElement;
+    nameEl: HTMLElement;
+    portraitKey: string | null;
+  }
+  const slotDom = new Map<SlotKey, SlotDom>();
+  for (const key of (["backLeft", "backRight", "front"] as SlotKey[])) {
+    const root = document.createElement("div");
+    root.className = `adv-slot adv-slot-${key}`;
+
+    const face = document.createElement("div");
+    face.className = "adv-slot-face";
+    const portraitWrap = document.createElement("div");
+    portraitWrap.className = "adv-slot-portrait";
+    face.append(portraitWrap);
+    const nameEl = document.createElement("div");
+    nameEl.className = "adv-slot-name";
+    nameEl.textContent = SLOT_LABEL[key];
+    face.append(nameEl);
+
+    // Always-visible remove badge — CSS-gated to only show once the slot is
+    // filled (.adv-slot.filled .adv-slot-remove, see styles.css), so
+    // clearing a slot never requires targeting/opening anything first. This
+    // is the exact same clear logic the old dropdown's buried "Clear slot"
+    // row used, just given a real, un-buried affordance.
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "adv-slot-remove";
+    removeBtn.textContent = "×";
+    removeBtn.title = "Remove from formation";
+    removeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      formation[key] = null;
+      renderMuster();
+    });
+    face.append(removeBtn);
+
+    // Backpack shortcut — CSS-gated to only show once filled, same as the
+    // remove badge above, opposite corner. "Click a worker to open their
+    // backpack" (see openBackpack).
+    const backpackBtn = document.createElement("button");
+    backpackBtn.className = "adv-slot-backpack";
+    backpackBtn.textContent = "🎒";
+    backpackBtn.title = "Open backpack (equip gear)";
+    backpackBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const memberId = formation[key];
+      if (memberId) openBackpack(memberId);
+    });
+    face.append(backpackBtn);
+
+    face.addEventListener("click", () => {
+      targetSlot = targetSlot === key ? null : key;
+      renderMuster();
+    });
+
+    // Drag a seated worker to another log to swap seats. Only filled slots
+    // are draggable (see renderSlot's `face.draggable` toggle below) — an
+    // empty seat has nothing to pick up.
+    face.addEventListener("dragstart", (e) => {
+      const memberId = formation[key];
+      if (!memberId || !e.dataTransfer) return;
+      e.dataTransfer.setData(DRAG_MIME, memberId);
+      e.dataTransfer.effectAllowed = "move";
+      root.classList.add("dragging");
+    });
+    face.addEventListener("dragend", () => root.classList.remove("dragging"));
+    face.addEventListener("dragover", (e) => {
+      if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
+      e.preventDefault();
+      face.classList.add("drag-over");
+    });
+    face.addEventListener("dragleave", () => face.classList.remove("drag-over"));
+    face.addEventListener("drop", (e) => {
+      e.preventDefault();
+      face.classList.remove("drag-over");
+      const memberId = e.dataTransfer?.getData(DRAG_MIME);
+      if (!memberId) return;
+      assignToSlot(memberId, key);
+      targetSlot = null;
+      renderMuster();
+    });
+
+    root.append(face);
+
+    (key === "front" ? frontRow : backRow).append(root);
+    slotDom.set(key, { root, face, portraitWrap, nameEl, portraitKey: null });
+  }
+
+  // Inline Trail Rations shortcut — this screen is arguably the more
+  // natural place a player discovers they're short a party member (roster
+  // rows go greyed-out/unselectable while resting) than Shop → Provisions.
+  const healBtn = document.createElement("button");
+  healBtn.classList.add("btn-primary");
+  healBtn.addEventListener("click", () => {
+    game.useTrailRations();
+    renderMuster();
+    flash(healBtn);
+  });
+  musterEl.append(healBtn);
+
+  const carryWrap = document.createElement("div");
+  carryWrap.className = "adv-carry";
+  const carryBtns = new Map<ProvisionId, HTMLButtonElement>();
+  for (const prov of PROVISIONS) {
+    if (prov.instant) continue;
+    const btn = document.createElement("button");
+    btn.addEventListener("click", () => {
+      if (selectedCarry.has(prov.id)) selectedCarry.delete(prov.id);
+      else selectedCarry.add(prov.id);
+      renderMuster();
+    });
+    carryBtns.set(prov.id, btn);
+    carryWrap.append(btn);
+  }
+  musterEl.append(carryWrap);
+
+  const previewEl = document.createElement("div");
+  previewEl.className = "shop-sub";
+  musterEl.append(previewEl);
+
+  const embarkBtn = document.createElement("button");
+  embarkBtn.className = "btn-primary";
+  embarkBtn.textContent = "Embark";
+  embarkBtn.addEventListener("click", () => {
+    if (game.startAdventure(selectedWorld, currentPartyIds(), [...selectedCarry])) {
+      formation.front = null;
+      formation.backLeft = null;
+      formation.backRight = null;
+      targetSlot = null;
+      selectedCarry.clear();
+      // startAdventure already opened the battle view for stage 1 — get
+      // this overlay out of the way so the fight is actually visible.
+      close();
+    }
+  });
+  musterEl.append(embarkBtn);
+
+  // --- Bottom roster tray: replaces the old per-slot .adv-slot-picker
+  // dropdown entirely. A persistent horizontal row of larger member cards
+  // (portrait + name/level/rarity/status + HP bar + atk/hp line, same
+  // pattern as team.ts's renderDetail) for every roster member currently
+  // eligible to be assigned. Clicking a formation slot above "targets" it
+  // (see targetSlot); clicking a card here assigns that member into the
+  // targeted slot (or, if none is targeted, the first empty slot — see
+  // trayCard's click handler below).
+  const trayWrap = document.createElement("div");
+  trayWrap.className = "adv-tray";
+  const trayEmpty = document.createElement("div");
+  trayEmpty.className = "shop-sub adv-tray-empty";
+  trayEmpty.textContent = "No other available members to assign.";
+  trayWrap.append(trayEmpty);
+  // Inserted directly AFTER the formation (before Heal/carry/Embark), not
+  // appended last: the tray IS the party picker, and at the small default
+  // window heights an end-of-column tray sat entirely below the scroll
+  // fold — the muster showed empty slots with no visible way to fill them
+  // (headless-verified). Assignment flow now reads top-to-bottom:
+  // world → slots → pick members → provisions → Embark.
+  musterEl.insertBefore(trayWrap, healBtn);
+
+  interface TrayCardDom {
+    root: HTMLElement;
+    portraitWrap: HTMLElement;
+    portraitKey: string | null;
+    rarityDot: HTMLElement;
+    nameEl: HTMLElement;
+    statusDot: HTMLElement;
+    hpFill: HTMLElement;
+    statEl: HTMLElement;
+  }
+  const trayCardDom = new Map<string, TrayCardDom>();
+  let trayRowIds: string[] = [];
+
+  /** Builds one tray card's DOM once (mirrors team.ts's renderDetail header/
+   * portrait/hp-bar/stat-line layout at a glance-friendly compact width) and
+   * registers it in trayCardDom for renderTray's in-place updates. The click
+   * handler only ever reads `member.id` (stable across re-renders), so it's
+   * safe even though `member` itself is a snapshot from whichever render
+   * built this card. */
+  function buildTrayCard(member: TeamMemberSave): HTMLElement {
+    const root = document.createElement("div");
+    root.className = "adv-tray-card";
+    root.dataset.memberId = member.id;
+
+    const head = document.createElement("div");
+    head.className = "adv-tray-card-head";
+    const rarityDot = document.createElement("span");
+    rarityDot.className = "rarity-dot";
+    const nameEl = document.createElement("span");
+    const statusDot = document.createElement("span");
+    statusDot.className = "status-dot";
+    head.append(rarityDot, nameEl, statusDot);
+    root.append(head);
+
+    const portraitWrap = document.createElement("div");
+    portraitWrap.className = "adv-tray-card-portrait";
+    root.append(portraitWrap);
+
+    const hpBar = document.createElement("div");
+    hpBar.className = "hp-bar";
+    const hpFill = document.createElement("div");
+    hpFill.className = "hp-bar-fill";
+    hpBar.append(hpFill);
+    root.append(hpBar);
+
+    const statEl = document.createElement("div");
+    statEl.className = "shop-sub";
+    root.append(statEl);
+
+    root.addEventListener("click", () => {
+      const target = targetSlot ?? EMBARK_ORDER.find((k) => formation[k] === null) ?? null;
+      if (!target) return; // no slot targeted and formation already full
+      assignToSlot(member.id, target);
+      targetSlot = null;
+      renderMuster();
+    });
+
+    // Drag straight from the bench onto a log — the primary way to seat
+    // someone new now, alongside the target-then-click fallback above.
+    root.draggable = true;
+    root.addEventListener("dragstart", (e) => {
+      if (!e.dataTransfer) return;
+      e.dataTransfer.setData(DRAG_MIME, member.id);
+      e.dataTransfer.effectAllowed = "move";
+      root.classList.add("dragging");
+    });
+    root.addEventListener("dragend", () => root.classList.remove("dragging"));
+
+    trayCardDom.set(member.id, { root, portraitWrap, portraitKey: null, rarityDot, nameEl, statusDot, hpFill, statEl });
+    return root;
+  }
+
+  /** Refreshes one already-built tray card's visuals in place — same
+   * portraitKey-diffing discipline as renderSlot, so the 1s refresh timer
+   * doesn't rebuild a portrait `<img>` (or the whole card) unless something
+   * about the member actually changed. */
+  function updateTrayCard(member: TeamMemberSave, s: typeof game.save): void {
+    const dom = trayCardDom.get(member.id);
+    if (!dom) return;
+    const def = WORKER_DEFS_BY_ID[member.defId];
+    const rarity: WorkerRarity = (def?.rarity as WorkerRarity | undefined) ?? "common";
+
+    dom.rarityDot.className = `rarity-dot rarity-${rarity}`;
+    dom.nameEl.className = `rarity-${rarity}`;
+    dom.nameEl.textContent = `${def?.name ?? member.defId} · Lv${member.level}`;
+    dom.statusDot.className = `status-dot ${member.status}`;
+    dom.statusDot.title = member.status;
+
+    const weaponDef = equippedItem(member, "woodchopping", s.inventory);
+    const weaponRarity: Rarity = weaponDef?.rarity ?? "common";
+    const worldPalette = game.getWorkerPalette(s.worldIndex);
+    const accent = def?.accent;
+    const portraitPalette = accent ? { ...(worldPalette ?? {}), ...accent } : worldPalette;
+    const weaponPalette = game.weaponPalette(s.worldIndex);
+    const portraitKey = `${member.id}:${rarity}:${weaponRarity}:${JSON.stringify(portraitPalette)}:${JSON.stringify(weaponPalette)}`;
+    if (dom.portraitKey !== portraitKey) {
+      dom.portraitKey = portraitKey;
+      dom.portraitWrap.replaceChildren(
+        formationPortrait(rarity, portraitPalette, weaponRarity, weaponPalette, 5, "adv-tray-card-portrait-img"),
+      );
+    }
+
+    const pct = member.maxHp > 0 ? Math.round((100 * member.currentHp) / member.maxHp) : 0;
+    dom.hpFill.style.width = `${pct}%`;
+    const hpState = hpBarClass(pct);
+    dom.hpFill.classList.toggle("low", hpState === "low");
+    dom.hpFill.classList.toggle("critical", hpState === "critical");
+
+    dom.statEl.textContent = `atk ${abbrev(Math.round(effectiveAtk(member, s.inventory, s.prestigeLevel)))} · hp ${abbrev(member.currentHp)}/${abbrev(member.maxHp)}`;
+  }
+
+  /** Which roster members currently show in the tray: available, and not
+   * already occupying one of the OTHER formation slots — same filter the
+   * old per-slot picker applied, just relative to `targetSlot` instead of a
+   * fixed "this slot". With no slot targeted there's no "other two" to
+   * compare against, so every filled slot counts as taken — the tray then
+   * shows only fully-unassigned members, until a slot is targeted (at which
+   * point that slot's own current occupant reappears too, so they can be
+   * swapped for someone else). */
+  function renderTray(s: typeof game.save): void {
+    const takenElsewhere = new Set(
+      EMBARK_ORDER.filter((k) => k !== targetSlot)
+        .map((k) => formation[k])
+        .filter((id): id is string => id !== null),
+    );
+    const eligible = s.team.filter((m) => m.status === "available" && !takenElsewhere.has(m.id));
+    const rowIds = eligible.map((m) => m.id);
+    const changed = rowIds.length !== trayRowIds.length || rowIds.some((id, i) => id !== trayRowIds[i]);
+    if (changed) {
+      trayRowIds = rowIds;
+      trayCardDom.clear();
+      trayWrap.replaceChildren(trayEmpty, ...eligible.map((m) => buildTrayCard(m)));
+    }
+    trayEmpty.classList.toggle("hidden", eligible.length > 0);
+    for (const m of eligible) updateTrayCard(m, s);
+  }
+
+  // --- Field screen: persistent DOM, built once ----------------------------
+  const fieldEl = document.createElement("div");
+  fieldEl.className = "adv-field";
+
+  const tallyEl = document.createElement("div");
+  tallyEl.className = "shop-sub";
+  fieldEl.append(tallyEl);
+
+  const partyWrap = document.createElement("div");
+  partyWrap.className = "adv-roster";
+  let partyRowIds: string[] = [];
+  const partyRows = new Map<string, { name: HTMLElement; fill: HTMLElement }>();
+  fieldEl.append(partyWrap);
+
+  const logEl = document.createElement("div");
+  logEl.className = "shop-sub";
+  fieldEl.append(logEl);
+
+  // Preview of the next stage's enemy — Push On used to be a total blind
+  // commit with no idea who (or what kind of fight) is coming.
+  const nextEnemyEl = document.createElement("div");
+  nextEnemyEl.className = "shop-sub";
+  fieldEl.append(nextEnemyEl);
+
+  const resumeBtn = document.createElement("button");
+  resumeBtn.textContent = "Resume Battle";
+  resumeBtn.addEventListener("click", () => {
+    game.openBattleView();
+    close();
+  });
+  fieldEl.append(resumeBtn);
+
+  const pushBtn = document.createElement("button");
+  pushBtn.addEventListener("click", () => {
+    // beginStageBattle already opens the battle view — get out of the way.
+    if (game.beginStageBattle()) close();
+  });
+  fieldEl.append(pushBtn);
+
+  const retreatBtn = document.createElement("button");
+  retreatBtn.textContent = "Retreat & Bank";
+  retreatBtn.addEventListener("click", () => {
+    game.retreatAdventure();
+    flash(tallyEl);
+  });
+  fieldEl.append(retreatBtn);
+
+  bodyEl.append(musterEl, fieldEl);
+
+  // --- sync helpers ---------------------------------------------------------
+
+  /** Renders one formation slot: its portrait/placeholder + name, its
+   * rarity-tinted border, and whether it's the currently-targeted slot for
+   * the bottom tray's next click. Diffs before touching the DOM the same
+   * way the old syncRoster did — the portrait `<img>` is only rebuilt when
+   * the occupant/gear/palette actually changed — so a click landing mid-1s-
+   * refresh never lands on a node that just got torn out from under it (see
+   * file header). Assignment/removal itself is handled by the always-
+   * visible remove badge and the bottom tray (built once, see above), not
+   * by anything rebuilt here. */
+  function renderSlot(key: SlotKey, s: typeof game.save): void {
+    const dom = slotDom.get(key)!;
+    const memberId = formation[key];
+    const member = memberId ? s.team.find((m) => m.id === memberId) ?? null : null;
+    const def = member ? WORKER_DEFS_BY_ID[member.defId] : null;
+    const rarity: WorkerRarity = (def?.rarity as WorkerRarity | undefined) ?? "common";
+
+    const weaponDef = member ? equippedItem(member, "woodchopping", s.inventory) : null;
+    const weaponRarity: Rarity = weaponDef?.rarity ?? "common";
+    const worldPalette = game.getWorkerPalette(s.worldIndex);
+    const accent = def?.accent;
+    const portraitPalette = accent ? { ...(worldPalette ?? {}), ...accent } : worldPalette;
+    const weaponPalette = game.weaponPalette(s.worldIndex);
+    const portraitKey = member
+      ? `${member.id}:${rarity}:${weaponRarity}:${JSON.stringify(portraitPalette)}:${JSON.stringify(weaponPalette)}`
+      : null;
+    if (dom.portraitKey !== portraitKey) {
+      dom.portraitKey = portraitKey;
+      dom.portraitWrap.replaceChildren();
+      if (member) {
+        dom.portraitWrap.append(
+          formationPortrait(
+            rarity,
+            portraitPalette,
+            weaponRarity,
+            weaponPalette,
+            key === "front" ? 4 : 2,
+            key === "front" ? "adv-slot-portrait-img adv-slot-portrait-img-front" : "adv-slot-portrait-img",
+          ),
+        );
+      } else {
+        const placeholder = document.createElement("div");
+        placeholder.className = "adv-slot-placeholder";
+        placeholder.textContent = "+";
+        dom.portraitWrap.append(placeholder);
+      }
+    }
+
+    dom.root.classList.toggle("filled", !!member);
+    dom.root.classList.toggle("empty", !member);
+    dom.root.classList.toggle("targeted", targetSlot === key);
+    // Only a seated worker can be picked up and dragged to another log —
+    // an empty seat has nothing to drag.
+    dom.face.draggable = !!member;
+    dom.root.classList.remove("rarity-common", "rarity-rare", "rarity-epic", "rarity-legendary");
+    if (member) dom.root.classList.add(`rarity-${rarity}`);
+
+    dom.nameEl.className = member ? `adv-slot-name rarity-${rarity}` : "adv-slot-name adv-slot-name-empty";
+    dom.nameEl.textContent = member ? `${def?.name ?? member.defId} · Lv${member.level}` : SLOT_LABEL[key];
+  }
+
+  function renderMuster(): void {
+    const s = game.save;
+    // Gated on the higher of worldIndex (resettable by Prestige) and
+    // adventureWorldUnlocked (never reset) — adventure access survives a
+    // prestige reset even though the wood-chopping ladder drops back to 0.
+    const adventureWorldCeiling = Math.max(s.worldIndex, s.adventureWorldUnlocked);
+    for (const [i, btn] of worldBtns) {
+      const visible = i <= adventureWorldCeiling;
+      btn.classList.toggle("hidden", !visible);
+      if (visible) btn.classList.toggle("active", i === selectedWorld);
+    }
+
+    rosterEmpty.classList.toggle("hidden", s.team.length > 0);
+    formationWrap.classList.toggle("hidden", s.team.length === 0);
+    for (const key of EMBARK_ORDER) renderSlot(key, s);
+    trayWrap.classList.toggle("hidden", s.team.length === 0);
+    if (s.team.length > 0) renderTray(s);
+
+    for (const prov of PROVISIONS) {
+      if (prov.instant) continue;
+      const btn = carryBtns.get(prov.id)!;
+      const owned = s.provisions[prov.id] ?? 0;
+      btn.textContent = `${prov.name} (${owned})`;
+      btn.classList.toggle("active", selectedCarry.has(prov.id));
+      btn.disabled = owned === 0 || (!selectedCarry.has(prov.id) && selectedCarry.size >= MAX_CARRIED);
+    }
+
+    const rationsSpec = PROVISIONS.find((pr) => pr.id === "trailRations")!;
+    const availableCount = s.team.filter((m) => m.status === "available").length;
+    const needsHeal = s.team.some((m) => m.currentHp < m.maxHp || m.status === "resting");
+    const canAffordHeal = s.wood >= rationsSpec.cost;
+    healBtn.textContent = `Heal All (${abbrev(rationsSpec.cost)} wood)`;
+    healBtn.disabled = !needsHeal || !canAffordHeal;
+    healBtn.title = !needsHeal
+      ? "Everyone's already at full HP"
+      : !canAffordHeal
+        ? `Need ${abbrev(rationsSpec.cost - s.wood)} more wood`
+        : `Heal your whole roster to full HP for ${abbrev(rationsSpec.cost)} wood`;
+    healBtn.classList.toggle("cta", availableCount === 0 && s.team.length > 0);
+
+    const partyIds = currentPartyIds();
+    const p = partyIds.length > 0 ? game.previewAdventure(selectedWorld, partyIds) : null;
+    if (availableCount === 0 && s.team.length > 0) {
+      previewEl.textContent = "No team members available to muster — heal your roster above to continue.";
+    } else {
+      previewEl.textContent = p
+        ? `Embark: ${abbrev(p.cost)} wood · est. ${p.winPct}% win (stage 1, Attack-only estimate) · ~${abbrev(p.avgWoodOnWin)} wood on win`
+        : "Assign up to 3 available team members to the formation slots below.";
+    }
+    embarkBtn.disabled = !p || s.wood < p.cost;
+  }
+
+  function syncParty(partyIds: string[]): void {
+    const changed = partyIds.length !== partyRowIds.length || partyIds.some((id, i) => id !== partyRowIds[i]);
+    if (!changed) return;
+    partyWrap.replaceChildren();
+    partyRows.clear();
+    partyRowIds = [...partyIds];
+    for (const id of partyIds) {
+      const member = game.save.team.find((m) => m.id === id);
+      if (!member) continue;
+      const row = document.createElement("div");
+      row.className = "adv-roster-row";
+      const nameEl = document.createElement("span");
+      const hpBar = document.createElement("div");
+      hpBar.className = "hp-bar";
+      const fill = document.createElement("div");
+      fill.className = "hp-bar-fill";
+      hpBar.append(fill);
+      row.append(nameEl, hpBar);
+      partyWrap.append(row);
+      partyRows.set(id, { name: nameEl, fill });
+    }
+  }
+
+  function renderField(adv: NonNullable<ReturnType<Game["adventureStatus"]>>): void {
+    const s = game.save;
+    tallyEl.textContent = `${getWorld(adv.world).name} · stage ${adv.stage}/5 · pending ${abbrev(adv.pendingWood)} wood, ${abbrev(adv.pendingAmber)} amber`;
+
+    syncParty(adv.partyIds);
+    for (const id of adv.partyIds) {
+      const member = s.team.find((m) => m.id === id);
+      const entry = partyRows.get(id);
+      if (!member || !entry) continue;
+      const def = WORKER_DEFS_BY_ID[member.defId];
+      entry.name.className = `rarity-${def?.rarity ?? "common"}`;
+      entry.name.textContent = `${def?.name ?? member.defId}`;
+      const pct = member.maxHp > 0 ? Math.round((100 * member.currentHp) / member.maxHp) : 0;
+      entry.fill.style.width = `${pct}%`;
+      const hpState = hpBarClass(pct);
+      entry.fill.classList.toggle("low", hpState === "low");
+      entry.fill.classList.toggle("critical", hpState === "critical");
+    }
+
+    const lastLog = s.adventure ? s.adventure.log[s.adventure.log.length - 1] : undefined;
+    logEl.textContent = lastLog
+      ? `${lastLog.enemyName}: ${lastLog.outcome === "win" ? "defeated" : "lost"}${lastLog.narrowEscape ? " · narrow escape" : ""} · +${abbrev(lastLog.woodGained)} wood${lastLog.amberGained ? ` · +${abbrev(lastLog.amberGained)} amber` : ""}`
+      : "No encounters yet.";
+
+    resumeBtn.classList.toggle("hidden", !adv.battleInProgress);
+    pushBtn.classList.toggle("hidden", adv.battleInProgress);
+    nextEnemyEl.style.display = adv.battleInProgress ? "none" : "";
+    if (!adv.battleInProgress) {
+      const fee = game.nextStageFee();
+      const nextStage = (adv.stage + 1) as 1 | 2 | 3 | 4 | 5;
+      const nextEnemies = buildEnemy(adv.world, nextStage);
+      const nextLabel =
+        nextEnemies.length > 1
+          ? `${nextEnemies[0].name} +${nextEnemies.length - 1} more`
+          : nextEnemies[0].name;
+      nextEnemyEl.textContent = `Next up: ${nextLabel} (Stage ${nextStage}/5)`;
+      pushBtn.textContent = `Push On · ${abbrev(fee)} wood`;
+      pushBtn.disabled = s.wood < fee;
+    }
+  }
+
+  function render(): void {
+    const adv = game.adventureStatus();
+    musterEl.classList.toggle("hidden", !!adv);
+    fieldEl.classList.toggle("hidden", !adv);
+    if (adv) renderField(adv);
+    else renderMuster();
+  }
+
+  function open(): void {
+    if (game.isBattleViewOpen() || game.isPovActive()) return; // that view owns the screen
+    closeOtherOverlays("adventure");
+    overlay.classList.remove("hidden");
+    render();
+    refreshTimer = window.setInterval(render, 1000);
+  }
+
+  function close(): void {
+    overlay.classList.add("hidden");
+    if (refreshTimer !== null) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+  }
+
+  registerOverlay("adventure", close);
+  // Lets the on-canvas "resume adventure" HUD icon open this overlay
+  // directly when there's a run in progress but no live battle to jump
+  // straight into (see Game.hitAdventureIndicator).
+  game.onWantAdventureOverlay = open;
+
+  openBtn.addEventListener("click", () => {
+    if (overlay.classList.contains("hidden")) open();
+    else close();
+  });
+  closeBtn.addEventListener("click", close);
+}

@@ -1,0 +1,158 @@
+{
+  "seed": 1337,
+  "battles": [
+    {
+      "name": "w0-stage1-solo-fresh",
+      "world": 0,
+      "stage": 1,
+      "trials": 300,
+      "policy": "attack",
+      "party": [{ "defId": "rook", "level": 1 }],
+      "expect": { "winPct": [100, 100] }
+    },
+    {
+      "name": "w0-stage2-solo-fresh",
+      "world": 0,
+      "stage": 2,
+      "trials": 300,
+      "policy": "attack",
+      "party": [{ "defId": "rook", "level": 1 }],
+      "expect": { "winPct": [0, 1] }
+    },
+    {
+      "name": "w0-stage1-trio-fresh",
+      "world": 0,
+      "stage": 1,
+      "trials": 300,
+      "policy": "attack",
+      "party": [
+        { "defId": "rook", "level": 1 },
+        { "defId": "finch", "level": 1 },
+        { "defId": "marl", "level": 1 }
+      ],
+      "expect": { "winPct": [100, 100] }
+    },
+    {
+      "name": "w0-stage2-trio-fresh",
+      "world": 0,
+      "stage": 2,
+      "trials": 300,
+      "policy": "attack",
+      "party": [
+        { "defId": "rook", "level": 1 },
+        { "defId": "finch", "level": 1 },
+        { "defId": "marl", "level": 1 }
+      ],
+      "expect": { "winPct": [95, 100] }
+    },
+    {
+      "name": "w0-stage3-trio-rare-geared",
+      "world": 0,
+      "stage": 3,
+      "trials": 300,
+      "policy": "attack",
+      "party": [
+        { "defId": "rook", "level": 3, "items": { "adventuring": "w0-adventuring-rare" } },
+        { "defId": "finch", "level": 3, "items": { "adventuring": "w0-adventuring-rare" } },
+        { "defId": "birch", "level": 3, "items": { "adventuring": "w0-adventuring-common" } }
+      ],
+      "expect": { "winPct": [55, 90] }
+    },
+    {
+      "name": "w0-stage3-trio-rare-geared-guarding",
+      "world": 0,
+      "stage": 3,
+      "trials": 300,
+      "policy": "guard-low",
+      "party": [
+        { "defId": "rook", "level": 3, "items": { "adventuring": "w0-adventuring-rare" } },
+        { "defId": "finch", "level": 3, "items": { "adventuring": "w0-adventuring-rare" } },
+        { "defId": "birch", "level": 3, "items": { "adventuring": "w0-adventuring-common" } }
+      ],
+      "expect": { "winPct": [55, 98] }
+    },
+    {
+      "name": "w0-stage5-trio-epic-geared",
+      "world": 0,
+      "stage": 5,
+      "trials": 300,
+      "policy": "attack",
+      "party": [
+        { "defId": "birch", "level": 6, "items": { "adventuring": "w0-adventuring-epic" } },
+        { "defId": "hazel", "level": 6, "items": { "adventuring": "w0-adventuring-epic" } },
+        { "defId": "thorne", "level": 6, "items": { "adventuring": "w0-adventuring-rare" } }
+      ],
+      "expect": { "winPct": [60, 95] }
+    },
+    {
+      "name": "parity-w1-stage3-trio-rare-geared",
+      "world": 1,
+      "stage": 3,
+      "trials": 300,
+      "policy": "attack",
+      "party": [
+        { "defId": "rook", "level": 3, "items": { "adventuring": "w1-adventuring-rare" } },
+        { "defId": "finch", "level": 3, "items": { "adventuring": "w1-adventuring-rare" } },
+        { "defId": "birch", "level": 3, "items": { "adventuring": "w1-adventuring-common" } }
+      ],
+      "expect": { "winPct": [55, 95] }
+    },
+    {
+      "name": "parity-w3-stage3-trio-rare-geared",
+      "world": 3,
+      "stage": 3,
+      "trials": 300,
+      "policy": "attack",
+      "party": [
+        { "defId": "rook", "level": 3, "items": { "adventuring": "w3-adventuring-rare" } },
+        { "defId": "finch", "level": 3, "items": { "adventuring": "w3-adventuring-rare" } },
+        { "defId": "birch", "level": 3, "items": { "adventuring": "w3-adventuring-common" } }
+      ],
+      "expect": { "winPct": [55, 95] }
+    }
+  ],
+  "parityGroups": [
+    {
+      "name": "stage3-rare-geared-across-worlds",
+      "members": [
+        "w0-stage3-trio-rare-geared",
+        "parity-w1-stage3-trio-rare-geared",
+        "parity-w3-stage3-trio-rare-geared"
+      ],
+      "maxSpreadPct": 15
+    }
+  ],
+  "runs": [
+    {
+      "name": "w0-full-run-fresh-trio",
+      "world": 0,
+      "trials": 200,
+      "policy": "attack",
+      "boonPolicy": "first",
+      "party": [
+        { "defId": "rook", "level": 1 },
+        { "defId": "finch", "level": 1 },
+        { "defId": "marl", "level": 1 }
+      ],
+      "expect": { "clearPct": [0, 20], "avgNetWood": [-60, 120] }
+    },
+    {
+      "name": "w0-full-run-geared-trio",
+      "world": 0,
+      "trials": 200,
+      "policy": "smart",
+      "boonPolicy": "first",
+      "party": [
+        { "defId": "birch", "level": 5, "items": { "adventuring": "w0-adventuring-epic" } },
+        { "defId": "hazel", "level": 5, "items": { "adventuring": "w0-adventuring-rare" } },
+        { "defId": "thorne", "level": 5, "items": { "adventuring": "w0-adventuring-rare" } }
+      ],
+      "expect": { "clearPct": [55, 95], "avgNetWood": [400, 1200] }
+    }
+  ],
+  "gacha": {
+    "workerPulls": 3000,
+    "itemPulls": 3000,
+    "powerupPulls": 3000
+  }
+}

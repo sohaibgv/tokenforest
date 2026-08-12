@@ -13,15 +13,19 @@ interface Key {
   dark: number; // ground-darkening overlay strength
 }
 
+// Part A.2 warm color-grade: every ramp nudged toward softer, warmer tones
+// (less harsh cool-blue at night, gentler oranges at dawn/dusk, a touch of
+// warmth added to the midday blue) — same day/night structure and timing,
+// just filtered cozier.
 const KEYS: Key[] = [
-  { h: 0, top: [11, 16, 38], bottom: [26, 35, 64], dark: 0.4 },
-  { h: 5, top: [11, 16, 38], bottom: [26, 35, 64], dark: 0.4 },
-  { h: 6.5, top: [74, 90, 138], bottom: [232, 160, 106], dark: 0.18 },
-  { h: 8.5, top: [142, 202, 230], bottom: [166, 216, 239], dark: 0 },
-  { h: 17, top: [142, 202, 230], bottom: [166, 216, 239], dark: 0 },
-  { h: 19, top: [106, 74, 122], bottom: [232, 138, 90], dark: 0.18 },
-  { h: 21, top: [11, 16, 38], bottom: [26, 35, 64], dark: 0.4 },
-  { h: 24, top: [11, 16, 38], bottom: [26, 35, 64], dark: 0.4 },
+  { h: 0, top: [22, 20, 42], bottom: [44, 38, 64], dark: 0.4 },
+  { h: 5, top: [22, 20, 42], bottom: [44, 38, 64], dark: 0.4 },
+  { h: 6.5, top: [84, 86, 128], bottom: [236, 168, 114], dark: 0.18 },
+  { h: 8.5, top: [150, 206, 222], bottom: [176, 222, 228], dark: 0 },
+  { h: 17, top: [150, 206, 222], bottom: [176, 222, 228], dark: 0 },
+  { h: 19, top: [116, 84, 124], bottom: [236, 150, 98], dark: 0.18 },
+  { h: 21, top: [22, 20, 42], bottom: [44, 38, 64], dark: 0.4 },
+  { h: 24, top: [22, 20, 42], bottom: [44, 38, 64], dark: 0.4 },
 ];
 
 function lerp(a: number, b: number, t: number): number {
@@ -77,7 +81,7 @@ export class Sky {
 
     // Stars fade in with darkness.
     if (this.darkness > 0.2) {
-      ctx.fillStyle = "#e8ecff";
+      ctx.fillStyle = "#ece8e0"; // was #e8ecff — warmer, softer starlight
       const twinkle = Math.floor(this.t * 1.5);
       for (let i = 0; i < this.starSeeds.length; i++) {
         const s = this.starSeeds[i];
@@ -97,7 +101,19 @@ export class Sky {
     const bodyX = Math.round(8 + f * (w - 22));
     const bodyY = Math.round(3 + (skyH - 14) * (1 - Math.sin(Math.PI * f)));
     const map = isDay ? SUN : MOON;
-    const color = isDay ? "#ffe9a8" : "#d8dcee";
+    const color = isDay ? "#ffe9a8" : "#e2dce6"; // moon: was #d8dcee — softer, less cold-blue
+
+    // Set behind the horizon rather than parking on it. At the very start and
+    // end of the arc sin(pi*f) is ~0, which put the body at skyH-11 — inside
+    // the haze band above the ground, where a crescent moon reads as a small
+    // stray icon lying in the sand rather than as the moon. Fade out over the
+    // last few pixels of approach so it rises and sets instead.
+    const horizonY = skyH - bandH;
+    const bodyBottom = bodyY + map.length;
+    if (bodyBottom > horizonY) return;
+    const fade = Math.min(1, (horizonY - bodyBottom) / 6);
+    if (fade <= 0) return;
+    ctx.globalAlpha = fade;
     ctx.fillStyle = color;
     for (let row = 0; row < map.length; row++) {
       for (let col = 0; col < map[row].length; col++) {
@@ -106,5 +122,6 @@ export class Sky {
         }
       }
     }
+    ctx.globalAlpha = 1;
   }
 }

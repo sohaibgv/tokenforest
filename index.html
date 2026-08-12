@@ -9,35 +9,71 @@
   </head>
   <body>
     <main id="panel">
-      <button id="close" title="Hide panel (Esc)">✕</button>
+      <button id="close" title="Hide panel (Esc)"></button>
+      <button id="pov-exit" class="hidden" title="Back to chopping (Esc)">Back to Chopping</button>
+      <button id="battle-exit" class="hidden" title="Pause battle (Esc)">Pause Battle</button>
       <canvas id="scene" width="180" height="130"></canvas>
       <button id="travel" class="hidden"></button>
       <button id="update" class="hidden"></button>
       <div id="strip" data-tauri-drag-region>
         <div id="bar"><div id="bar-fill"></div></div>
         <span id="stats">waiting for data…</span>
-        <button id="shop-btn" title="Shop">🪓</button>
-        <button id="gear" title="Set token budget">⚙</button>
+        <button id="shop-btn" title="Shop"></button>
+        <button id="adventure-btn" title="Go on an Adventure"></button>
+        <button id="gear" title="Set token budget"></button>
+      </div>
+      <!-- Build Mode bar: what you're placing, what else you own, and a way
+           out. Esc alone was undiscoverable — there was no visible exit. -->
+      <div id="build-bar" class="hidden">
+        <span id="build-label"></span>
+        <div id="build-slots"></div>
+        <button id="build-exit" type="button">Done</button>
       </div>
       <div id="settings" class="hidden">
-        <label for="budget-input">Budget / 5h block</label>
-        <input id="budget-input" type="number" min="1" step="100000" />
-        <button id="budget-save">Set</button>
+        <div class="sign-plank-label">Budget / 5h block</div>
+        <div id="budget-board">
+          <button id="budget-down" type="button" aria-label="Lower budget">&#9664;</button>
+          <span id="budget-plank" aria-live="polite">—</span>
+          <button id="budget-up" type="button" aria-label="Raise budget">&#9654;</button>
+        </div>
+        <button id="budget-save">Carve it in</button>
+        <button id="budget-exact" type="button" aria-expanded="false">Exact number…</button>
+        <div id="budget-exact-row" class="hidden">
+          <input id="budget-input" type="number" min="1" step="100000" aria-label="Exact token budget" />
+        </div>
         <label id="autohide-row" title="Off: behaves like a normal window (recommended on Linux)">
           <input type="checkbox" id="autohide-box" /> Hide on click-away
         </label>
         <label id="realusage-row" title="Reads your local Claude Code login to show the same numbers as /usage. Off: manual budget estimate.">
           <input type="checkbox" id="realusage-box" /> Real account usage
         </label>
+        <label id="sfx-row" title="Synthesized sound effects (chops, battles, gacha reveals)">
+          <input type="checkbox" id="sfx-box" /> Sound effects
+        </label>
+        <!-- Volume lives on the gramophone in the clearing now. This slider
+             stays as the keyboard/assistive path to the same setting (the
+             canvas crank is unreachable without a pointer), and as the way to
+             change volume during POV/battle takeovers when the prop is off
+             screen entirely. -->
+        <label id="sfx-volume-row" title="SFX master volume — or turn the gramophone crank in the clearing">
+          Volume <input type="range" id="sfx-volume" min="0" max="100" step="12.5" />
+        </label>
+        <button id="slot-switch" title="Change which of the 3 save slots is active">Visit the birdhouses</button>
+        <button id="unlocks-btn" title="Everything prestige has unlocked, and what's still locked">Unlocks</button>
+        <button id="stats-btn" title="Lifetime totals: trees felled, adventures cleared, tokens seen">Stats</button>
         <button id="check-updates">Check for updates</button>
+        <button id="prestige-btn" class="hidden" title="Reset the wood-chopping world ladder for a permanent bonus. Team, items, amber, and adventure progress are untouched."></button>
       </div>
       <div id="shop" class="hidden">
         <div id="shop-head">
           <span>SHOP</span>
           <div id="shop-tabs">
-            <button data-tab="axes" class="active">Axes</button>
-            <button data-tab="helpers">Helpers</button>
+            <button data-tab="team" class="active">Team</button>
+            <button data-tab="gacha">Gacha</button>
+            <button data-tab="helpers">Gnomes</button>
             <button data-tab="boosts">Boosts</button>
+            <button data-tab="provisions">Provisions</button>
+            <button data-tab="build">Build</button>
             <button data-tab="style">Style</button>
           </div>
         </div>
@@ -46,6 +82,16 @@
           <span id="shop-wood"></span>
           <button id="shop-close">Close</button>
         </div>
+      </div>
+      <div id="adventure" class="hidden">
+        <div id="adventure-head">
+          <span>ADVENTURE</span>
+          <button id="adventure-close">Close</button>
+        </div>
+        <div id="adventure-body"></div>
+      </div>
+      <div id="battle" class="hidden">
+        <div id="battle-body"></div>
       </div>
     </main>
   </body>

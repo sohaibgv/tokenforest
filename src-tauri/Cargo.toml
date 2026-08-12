@@ -1,6 +1,6 @@
 [package]
 name = "tokenforest"
-version = "0.2.2"
+version = "0.3.0"
 description = "Your Claude Code token allowance as a forest, chopped down as you use it"
 authors = ["sohaib"]
 edition = "2021"
