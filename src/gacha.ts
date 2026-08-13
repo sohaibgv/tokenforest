@@ -15,6 +15,7 @@ import {
   type Rarity,
   type WorkerDef,
 } from "./economy";
+import { MAX_COPIES_PER_WORKER } from "./fusion";
 import type { GameSave } from "./game-state";
 import { createMember, type ItemInstance } from "./team";
 import { isUnlocked } from "./unlocks";
@@ -56,6 +57,10 @@ export interface WorkerPullResult {
   isNew: boolean;
   memberId?: string;
   shardsGained?: number;
+  /** Copies of this character on the roster after the pull. Lets the reveal
+   * say "2nd copy — fusion fodder" instead of the old "duplicate" wording,
+   * which now describes the rarer case rather than the common one. */
+  copiesHeld?: number;
 }
 
 export function pullWorker(save: GameSave, rng: () => number = Math.random): WorkerPullResult {
@@ -70,15 +75,30 @@ export function pullWorker(save: GameSave, rng: () => number = Math.random): Wor
     (w) => w.rarity === rarity && isUnlocked("worker", w.id, save.prestigeLevel),
   );
   const def = pool[Math.floor(rng() * pool.length)] ?? pool[0];
-  const owned = save.team.some((m) => m.defId === def.id);
-  if (owned) {
+
+  // A repeat pull KEEPS THE WORKER now, rather than melting them for shards on
+  // the spot. That reversal is what makes the Fusion Altar possible at all:
+  // there are only four Common characters in the game, so "five of a tier"
+  // could never be assembled while every duplicate was destroyed at the door.
+  //
+  // The shards are not lost, only deferred — applyFusion pays SHARD_VALUE back
+  // for each worker actually sacrificed, so a player who pulls and merges ends
+  // up with exactly the shard total the old rule would have given them. The
+  // difference is that the copies are yours to spend in between.
+  //
+  // Past MAX_COPIES_PER_WORKER the old behaviour resumes. Nothing in this
+  // codebase caps roster size, and a fifth Rook is already a whole merge's
+  // worth; beyond that the copies would be dead weight in the roster list and
+  // a slow leak in every save file.
+  const copies = save.team.filter((m) => m.defId === def.id).length;
+  if (copies >= MAX_COPIES_PER_WORKER) {
     const shards = SHARD_VALUE[rarity];
     save.shards[rarity] += shards;
-    return { def, isNew: false, shardsGained: shards };
+    return { def, isNew: false, shardsGained: shards, copiesHeld: copies };
   }
   const member = createMember(def.id, save.nextMemberSeq++, save.prestigeLevel);
   save.team.push(member);
-  return { def, isNew: true, memberId: member.id };
+  return { def, isNew: true, memberId: member.id, copiesHeld: copies + 1 };
 }
 
 export interface ItemPullResult {

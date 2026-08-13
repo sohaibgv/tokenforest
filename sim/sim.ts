@@ -82,6 +82,7 @@ import {
   SAP_PRESS_AMBER_YIELD,
   sapPressCost,
   SHARD_VALUE,
+  WORKER_DEFS,
   TOKENS_PER_CHARGE,
   swingWeight,
   streakMult,
@@ -108,6 +109,17 @@ import {
   itemDefsForWorld,
 } from "../src/economy";
 import { pullItem, pullPowerup, pullWorker } from "../src/gacha";
+import {
+  applyFusion,
+  autoFillFodder,
+  canFuse,
+  canSacrifice,
+  fodderAvailable,
+  FUSION_FODDER_COUNT,
+  MAX_COPIES_PER_WORKER,
+  planFusion,
+  type FusionSave,
+} from "../src/fusion";
 import type { GameSave } from "../src/game-state";
 import { hashString, mulberry32 } from "../src/rng";
 import { migrateSave } from "../src/save-migrations";
@@ -161,8 +173,11 @@ import { isUnlocked, UNLOCKS } from "../src/unlocks";
 import {
   bestUpgradeFor,
   createMember,
+  effectiveRarity,
   equippedInstanceIds,
   itemScore,
+  starCount,
+  starMult,
   memberPower,
   sortRosterByPower,
   type ItemSlot,
@@ -892,6 +907,272 @@ function buildDominanceChecks(): void {
 // DISAGREEING — a badge promising an upgrade that the optimiser then declines
 // to make is worse than no badge, because it sends the player looking for
 // something that is not there.
+
+function fusionChecks(): void {
+  console.log("\nFusion altar:");
+
+  const roster = (spec: [string, number][]): TeamMemberSave[] =>
+    spec.map(([defId, starRank], i) => {
+      const m = createMember(defId, i + 1);
+      if (starRank) m.starRank = starRank;
+      syncHp(m, [], 0);
+      m.currentHp = m.maxHp;
+      return m;
+    });
+
+  const saveWith = (team: TeamMemberSave[]): FusionSave => ({
+    team,
+    inventory: [],
+    shards: { common: 0, rare: 0, epic: 0, legendary: 0 },
+    prestigeLevel: 0,
+  });
+
+  // Four commons plus a common target — the minimum legal altar.
+  const commons = (): TeamMemberSave[] =>
+    roster([["rook", 0], ["finch", 0], ["marl", 0], ["sable", 0], ["rook", 0]]);
+
+  // THE LADDER. A merge must move the target exactly one tier, and the top of
+  // the ladder must be a wall rather than a silent no-op that eats four
+  // workers for nothing.
+  {
+    const save = saveWith(commons());
+    const plan = planFusion("m-1", ["m-2", "m-3", "m-4", "m-5"], save);
+    check("a common merge plans to rare", plan?.toRarity === "rare", plan?.toRarity ?? "no plan");
+
+    const legend = roster([["ironbark", 0], ["duskveil", 0], ["ironbark", 0], ["ironbark", 0], ["ironbark", 0]]);
+    check(
+      "a legendary can never be a target",
+      canFuse(legend[0]).reason === "maxed",
+      canFuse(legend[0]).reason ?? "allowed",
+    );
+  }
+
+  // ARITY. Exactly four sacrifices — not three, not five, and never the target
+  // itself or the same worker in two sockets.
+  {
+    const save = saveWith(commons());
+    check("three sacrifices is not a merge", planFusion("m-1", ["m-2", "m-3", "m-4"], save) === null, "");
+    check(
+      "five sacrifices is not a merge",
+      planFusion("m-1", ["m-2", "m-3", "m-4", "m-5", "m-1"], save) === null,
+      "",
+    );
+    check(
+      "a worker cannot sacrifice itself",
+      planFusion("m-1", ["m-1", "m-2", "m-3", "m-4"], save) === null,
+      "",
+    );
+    check(
+      "one worker cannot fill two sockets",
+      planFusion("m-1", ["m-2", "m-2", "m-3", "m-4"], save) === null,
+      "",
+    );
+  }
+
+  // TIER MATCH. Fodder is paid in rank, so a rare cannot be spent on a common
+  // merge — and, more subtly, a common merged UP to rare must count as rare
+  // fodder from then on.
+  {
+    const mixed = roster([["rook", 0], ["finch", 0], ["marl", 0], ["sable", 0], ["birch", 0]]);
+    check(
+      "a rare cannot pay for a common merge",
+      planFusion("m-1", ["m-2", "m-3", "m-4", "m-5"], saveWith(mixed)) === null,
+      "",
+    );
+    const promoted = roster([["rook", 1], ["finch", 0], ["marl", 0], ["sable", 0], ["rook", 0]]);
+    check(
+      "a merged common counts as its new tier",
+      effectiveRarity(promoted[0]) === "rare" &&
+        planFusion("m-1", ["m-2", "m-3", "m-4", "m-5"], saveWith(promoted)) === null,
+      effectiveRarity(promoted[0]),
+    );
+  }
+
+  // TRANSITIVITY. Merge twice and the worker must be reading the epic row of
+  // WORKER_RARITY_MULT, not carrying a starRank nobody looks at.
+  {
+    const twice = roster([["rook", 2]])[0];
+    check("two merges reach epic", effectiveRarity(twice) === "epic", effectiveRarity(twice));
+    check("stars encode the tier", starCount(twice) === 3, `${starCount(twice)} stars`);
+    const capped = roster([["ironbark", 9]])[0];
+    check("starRank cannot overflow the ladder", effectiveRarity(capped) === "legendary", effectiveRarity(capped));
+  }
+
+  // MONOTONICITY, and the identity that makes the whole stat change safe: at
+  // rank 0 the star multiplier must be exactly 1, not merely close to it.
+  {
+    const base = roster([["rook", 0]])[0];
+    check("rank 0 is exactly neutral", starMult(base) === 1, `${starMult(base)}`);
+    let rising = true;
+    let prevAtk = 0;
+    let prevHp = 0;
+    for (let rank = 0; rank <= 3; rank++) {
+      const m = roster([["rook", rank]])[0];
+      const atk = effectiveAtk(m, [], 0);
+      const hp = effectiveMaxHp(m, [], 0);
+      if (rank > 0 && (atk <= prevAtk || hp <= prevHp)) rising = false;
+      prevAtk = atk;
+      prevHp = hp;
+    }
+    check("every merge is a strict stat gain", rising, `rook rank 0..3 -> ${prevAtk.toFixed(0)} atk`);
+  }
+
+  // DELETION SAFETY. Nothing in this codebase had ever removed a team member
+  // before the altar, so every id-holder is a hazard. A worker on a run, a
+  // worker resting, and a worker backing a live woodcutter sprite must all be
+  // untouchable — the last one has no other guard anywhere: slotAssignment is
+  // never re-validated, so deleting its member leaves a permanent ghost.
+  {
+    const team = commons();
+    team[1].status = "adventuring";
+    team[2].status = "resting";
+    const save = saveWith(team);
+    const pinned = new Set([team[3].id]);
+    check("a worker on a run cannot be spent", canSacrifice(team[1], pinned).reason === "adventuring", "");
+    check("a resting worker cannot be spent", canSacrifice(team[2], pinned).reason === "resting", "");
+    check("a working worker cannot be spent", canSacrifice(team[3], pinned).reason === "working", "");
+    check(
+      "a merge naming any of them is refused",
+      planFusion("m-1", ["m-2", "m-3", "m-4", "m-5"], save, pinned) === null,
+      "",
+    );
+  }
+
+  // CONSERVATION. The sacrifices' gear goes back in the bag. Losing four
+  // workers is the price; losing their equipment with them is a bug.
+  {
+    const defs = itemDefsForWorld(0);
+    const inventory: ItemInstance[] = defs.map((d, i) => ({ id: `i-${i}`, defId: d.defId }));
+    const team = commons();
+    team[1].equipped.woodchopping = inventory[0].id;
+    team[2].equipped.adventuring = inventory[1].id;
+    const save: FusionSave = { team, inventory, shards: { common: 0, rare: 0, epic: 0, legendary: 0 }, prestigeLevel: 0 };
+    const before = save.inventory.length;
+    const plan = planFusion("m-1", ["m-2", "m-3", "m-4", "m-5"], save)!;
+    const ok = applyFusion(save, plan);
+    const stillWorn = equippedInstanceIds(save.team);
+    check("the merge commits", ok && save.team.length === 1, `${save.team.length} left`);
+    check("no item is destroyed by a merge", save.inventory.length === before, `${save.inventory.length}/${before}`);
+    check(
+      "a sacrifice's gear returns to the bag",
+      !stillWorn.has(inventory[0].id) && !stillWorn.has(inventory[1].id),
+      `${stillWorn.size} still worn`,
+    );
+    check("the target keeps its id", save.team[0]?.id === "m-1", save.team[0]?.id ?? "gone");
+    check("the target gained a rank", save.team[0]?.starRank === 1, `${save.team[0]?.starRank}`);
+  }
+
+  // A stale plan must not delete the wrong four. The altar can sit open across
+  // an autosave, a chest reward, or a member being sent on a run elsewhere.
+  {
+    const save = saveWith(commons());
+    const plan = planFusion("m-1", ["m-2", "m-3", "m-4", "m-5"], save)!;
+    save.team[2].status = "adventuring"; // someone embarked while the panel sat open
+    check("a stale plan is refused, not committed", applyFusion(save, plan) === false, `${save.team.length} intact`);
+    check("nothing was consumed by the refusal", save.team.length === 5, `${save.team.length}`);
+  }
+
+  // AUTO-FILL must never reach for the worker you invested in, and must be
+  // deterministic so a second press cannot quietly pick differently.
+  {
+    // Six commons, so auto-fill has one more candidate than it needs and the
+    // choice it makes is a real one. With exactly four candidates it has no
+    // choice at all, which would make this check pass for the wrong reason.
+    const team = roster([
+      ["rook", 0], ["finch", 0], ["marl", 0], ["sable", 0], ["rook", 0], ["finch", 0],
+    ]);
+    team[1].level = 12; // the one you spent shards on
+    const save = saveWith(team);
+    const first = autoFillFodder("m-1", save);
+    const second = autoFillFodder("m-1", save);
+    check("auto-fill is deterministic", first.join() === second.join(), first.join());
+    check("auto-fill leaves the levelled worker alone", !first.includes("m-2"), first.join());
+    check("auto-fill fills every socket", first.length === FUSION_FODDER_COUNT, `${first.length}`);
+
+    // Short of a full altar it seats what it can rather than refusing — the
+    // player can see three sockets filled and one empty and go find one more,
+    // where an empty pedestal would just look broken.
+    const thin = saveWith(roster([["rook", 0], ["finch", 0], ["marl", 0]]));
+    check("auto-fill part-fills when short", autoFillFodder("m-1", thin).length === 2, "");
+    check("the shortfall is reportable", fodderAvailable("m-1", thin) === 2, `${fodderAvailable("m-1", thin)}`);
+  }
+
+  // THE SHARD BARGAIN. A sacrifice must refund exactly what the old duplicate
+  // rule paid at the pull, or moving the payout has quietly changed the
+  // economy rather than just its timing.
+  {
+    let mismatches = 0;
+    for (const [defId, tier] of [["rook", "common"], ["birch", "rare"], ["thorne", "epic"]] as const) {
+      const team = roster([[defId, 0], [defId, 0], [defId, 0], [defId, 0], [defId, 0]]);
+      const save = saveWith(team);
+      const plan = planFusion("m-1", ["m-2", "m-3", "m-4", "m-5"], save)!;
+      if (plan.shardRefund.amount !== FUSION_FODDER_COUNT * SHARD_VALUE[tier]) mismatches++;
+      if (plan.shardRefund.rarity !== tier) mismatches++;
+      applyFusion(save, plan);
+      if (save.shards[tier] !== FUSION_FODDER_COUNT * SHARD_VALUE[tier]) mismatches++;
+    }
+    check("a sacrifice refunds the old duplicate payout", mismatches === 0, `${mismatches} mismatches`);
+  }
+
+  // No shard value is destroyed by the new pull rule. Duplicates now arrive as
+  // workers instead of shards, so the shards a player USED to be handed must
+  // still be reachable — either already banked, or sitting on the roster as a
+  // copy waiting for an altar.
+  {
+    const save = makeSave();
+    const rng = scenarioRng("fusion-economy");
+    const owned = new Set<string>();
+    let oldRuleShards = 0;
+    let copiesMade = 0;
+    for (let i = 0; i < 400; i++) {
+      const result = pullWorker(save, rng);
+      // The def sequence is independent of the roster (the pool filters on
+      // rarity and prestige only), so the same draw would have produced the
+      // same character under the old rule — which makes this a fair
+      // comparison rather than two unrelated runs.
+      if (owned.has(result.def.id)) oldRuleShards += SHARD_VALUE[result.def.rarity];
+      owned.add(result.def.id);
+      if (result.isNew && (result.copiesHeld ?? 1) > 1) copiesMade++;
+    }
+    const banked = RARITY_ORDER.reduce((sum, r) => sum + save.shards[r], 0);
+    const onTheRoster = save.team.reduce((sum, m, _i, arr) => {
+      const first = arr.findIndex((x) => x.defId === m.defId) === arr.indexOf(m);
+      return first ? sum : sum + SHARD_VALUE[effectiveRarity(m)];
+    }, 0);
+    check(
+      "duplicates now arrive as workers, not shards",
+      copiesMade > 0,
+      `${copiesMade} extra copies over 400 pulls`,
+    );
+    check(
+      "no shard value is destroyed by the new pull rule",
+      banked + onTheRoster >= oldRuleShards,
+      `${banked} banked + ${onTheRoster} on the roster vs ${oldRuleShards} under the old rule`,
+    );
+    const overCap = WORKER_DEFS.filter(
+      (d) => save.team.filter((m) => m.defId === d.id).length > MAX_COPIES_PER_WORKER,
+    );
+    check("no character exceeds the copy cap", overCap.length === 0, `${overCap.length} over ${MAX_COPIES_PER_WORKER}`);
+  }
+
+  // starRank is additive-optional, so a save written before the altar existed
+  // must read as rank 0 and survive a double migration unchanged.
+  {
+    const raw: Record<string, unknown> = {
+      version: 6,
+      team: [{ id: "m-1", defId: "rook", level: 3, currentHp: 10, maxHp: 10, status: "available", equipped: { woodchopping: null, adventuring: null, utility: null } }],
+    };
+    const once = migrateSave(JSON.parse(JSON.stringify(raw)), makeSave(), 6);
+    const twice = migrateSave(JSON.parse(JSON.stringify(once)), makeSave(), 6);
+    check("a pre-fusion member reads as rank 0", (once.team[0]?.starRank ?? 0) === 0, `${once.team[0]?.starRank}`);
+    check(
+      "a pre-fusion member keeps its own rarity",
+      effectiveRarity(once.team[0]) === "common",
+      effectiveRarity(once.team[0]),
+    );
+    check("migrating twice changes nothing", JSON.stringify(once) === JSON.stringify(twice), "");
+  }
+}
 
 function gearHelperChecks(): void {
   console.log("\nTeam gear helpers:");
@@ -4184,6 +4465,7 @@ function main(): void {
 
   buildDominanceChecks();
   economyChecks();
+  fusionChecks();
   gearHelperChecks();
   wiringChecks();
   boonValueSweep();

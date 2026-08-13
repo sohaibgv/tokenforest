@@ -1020,6 +1020,22 @@ export function initAdventure(game: Game): void {
   // directly when there's a run in progress but no live battle to jump
   // straight into (see Game.hitAdventureIndicator).
   game.onWantAdventureOverlay = open;
+  // The formation is closure state keyed by member id, and until the Fusion
+  // Altar existed no member could ever leave the roster — so a seat could
+  // safely hold an id forever. Now it can go stale: seat three workers, merge
+  // one of them away from the Team screen, and this screen would still draw
+  // them on their log and then quietly refuse to embark, because
+  // `partyFor(ids).length !== partyIds.length` fails the guard with nothing on
+  // screen explaining why. Empty the seat instead.
+  game.onRosterMembersRemoved = (removedIds) => {
+    const gone = new Set(removedIds);
+    for (const key of EMBARK_ORDER) {
+      const seated = formation[key];
+      if (seated && gone.has(seated)) formation[key] = null;
+    }
+    if (targetSlot && formation[targetSlot] === null) targetSlot = null;
+    if (!overlay.classList.contains("hidden")) render();
+  };
 
   openBtn.addEventListener("click", () => {
     if (overlay.classList.contains("hidden")) open();

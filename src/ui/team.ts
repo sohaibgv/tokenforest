@@ -203,6 +203,15 @@ export function createTeamPanel(game: Game): TeamPanel {
     const s = game.save;
     return [
       selectedMemberId,
+      // The open gear slot MUST be in the key. It is panel state, not save
+      // state, which is exactly why it was missed — and the symptom was that
+      // clicking a gear slot did nothing at all: the handler flipped
+      // `openSlot`, called render(), and render() saw an unchanged key and
+      // returned without building the picker. It only appeared when something
+      // else moved the key, in practice the wood counter ticking a second
+      // later while chopping. Anything the panel DISPLAYS belongs here,
+      // whether or not it is persisted.
+      selectedMemberId ? (openSlot.get(selectedMemberId) ?? "") : "",
       s.wood,
       s.inventory.length,
       s.prestigeLevel,

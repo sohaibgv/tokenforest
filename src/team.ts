@@ -4,6 +4,7 @@
 import {
   itemDefById,
   multForWorld,
+  RARITY_ORDER,
   WORKER_DEFS_BY_ID,
   WORKER_RARITY_MULT,
   type ItemDef,
@@ -42,15 +43,66 @@ export interface TeamMemberSave {
      * in game-state.ts). */
     utility2?: string | null;
   };
+  /** Merges applied at the Fusion Altar. 0 (or absent) = as pulled.
+   *
+   * Optional so every save written before fusion existed reads as 0 with no
+   * migration step — the same additive pattern `xp` above uses.
+   *
+   * This is a SEPARATE AXIS from `level`. Level is what a member earns by
+   * fighting; stars are what you spend other members to buy. Conflating them
+   * was considered and rejected: a merge that also reset or raised the level
+   * cap would make the two currencies interchangeable, and then only one of
+   * them would matter. */
+  starRank?: number;
 }
 
 export const DEFAULT_WORKER_ATK = 1;
 export const DEFAULT_WORKER_HP = 10;
 export const MAX_LEVEL = 20;
 export const LEVEL_STAT_STEP = 0.05; // +5%/level, multiplicative
+/** Base atk/hp gain per merge, ON TOP of the tier jump the merge also grants.
+ * The tier jump is the big number (common->rare is x3 atk); this is the small
+ * one that makes a merged Rare worth slightly more than a pulled Rare, so
+ * investment is never strictly worse than luck. */
+export const STAR_STAT_BONUS = 0.2;
 
 export function levelMult(level: number): number {
   return 1 + (level - 1) * LEVEL_STAT_STEP;
+}
+
+/** A member's rarity AFTER merges — the single source of truth for anything
+ * that asks "how good is this worker".
+ *
+ * Nothing outside this file should read `WORKER_DEFS_BY_ID[defId].rarity` for
+ * a LIVE member again; that field is now only the starting point. The def's
+ * rarity still governs anything about the character rather than the instance
+ * (gacha pool membership, sprite tier, prestige unlocks).
+ *
+ * This lives here rather than in fusion.ts on purpose: `baseStats` below needs
+ * it, and fusion.ts needs `TeamMemberSave` from here. Putting it there would
+ * make team.ts <-> fusion.ts a value cycle — the same trap that moved
+ * PLAYER_CRIT_CHANCE out of battle.ts. Dependencies run one way: fusion.ts
+ * imports team.ts, never the reverse. */
+export function effectiveRarity(member: TeamMemberSave): Rarity {
+  const def = WORKER_DEFS_BY_ID[member.defId];
+  const base = RARITY_ORDER.indexOf(def?.rarity ?? "common");
+  const idx = Math.min(base + (member.starRank ?? 0), RARITY_ORDER.length - 1);
+  return RARITY_ORDER[idx];
+}
+
+/** Stars to draw, 1-based. Stars encode the TIER, not the history: a pulled
+ * Legendary and a Common merged three times both show four stars, because
+ * they are the same thing and a badge that claimed otherwise would be lying
+ * about power the member does not have. */
+export function starCount(member: TeamMemberSave): number {
+  return RARITY_ORDER.indexOf(effectiveRarity(member)) + 1;
+}
+
+/** Exactly 1 at rank 0 — which is bit-exact in IEEE 754, so folding this into
+ * baseStats cannot perturb a single existing save's arithmetic. That is what
+ * makes the SIM_IDENTITY baseline a real proof rather than a formality. */
+export function starMult(member: TeamMemberSave): number {
+  return 1 + STAR_STAT_BONUS * (member.starRank ?? 0);
 }
 
 export function levelUpCost(member: TeamMemberSave): number {
@@ -135,10 +187,21 @@ export function createMember(defId: string, seq: number, prestigeLevel = 0): Tea
  * combat version of the axe/tree invariant in economy.ts's header — while a
  * gearless member still can't punch above World 0. */
 function baseStats(member: TeamMemberSave, inventory: ItemInstance[]): { atk: number; hp: number } {
-  const def = WORKER_DEFS_BY_ID[member.defId];
-  const mult = def ? WORKER_RARITY_MULT[def.rarity] : WORKER_RARITY_MULT.common;
+  // Reads the member's EFFECTIVE rarity, so a merge moves them along the same
+  // WORKER_RARITY_MULT ladder a luckier pull would have put them on. This one
+  // lookup is the whole stat integration — effectiveAtk, effectiveMaxHp,
+  // syncHp, the battle engine, the adventure preview and the sim all inherit
+  // it without a line of their own.
+  const mult = WORKER_RARITY_MULT[effectiveRarity(member)];
   const carry = multForWorld(equippedItem(member, "adventuring", inventory)?.world ?? 0);
-  return { atk: DEFAULT_WORKER_ATK * mult.atk * carry, hp: DEFAULT_WORKER_HP * mult.hp * carry };
+  // `stars` is appended rather than woven into the existing product: at rank 0
+  // it is exactly 1.0, and multiplying by 1.0 is exact, so the factor order
+  // this file's callers depend on is untouched for every pre-fusion save.
+  const stars = starMult(member);
+  return {
+    atk: DEFAULT_WORKER_ATK * mult.atk * carry * stars,
+    hp: DEFAULT_WORKER_HP * mult.hp * carry * stars,
+  };
 }
 
 export function equippedItem(

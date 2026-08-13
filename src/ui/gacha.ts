@@ -26,6 +26,7 @@ import {
   type PowerupSpec,
   type WorkerDef,
 } from "../economy";
+import type { WorkerPullResult } from "../gacha";
 import { abbrev } from "../scene/floating-text";
 import { drawMachine, MACHINE_H, MACHINE_W, type MachineKind } from "../scene/gacha-machine";
 import type { Game } from "../scene/game";
@@ -93,6 +94,21 @@ function workerCard(def: WorkerDef, game: Game): CaseCard {
   const { key, draw } = workerPortraitDraw(def.rarity, mergedPalette, "common", game.weaponPalette(game.save.worldIndex));
   const iconUrl = pixelIconCompositeUrl(key, PORTRAIT_W, PORTRAIT_H, draw);
   return { label: def.name, sub: `${def.rarity} · ${workerStatLine(def)}`, rarity: def.rarity, iconUrl };
+}
+
+/** The worker reveal's second line.
+ *
+ * A repeat pull is no longer a consolation prize, so it must not read like
+ * one: the copy joins the roster and is a quarter of a merge. The old
+ * "dupe → N shards" wording now only applies past MAX_COPIES_PER_WORKER,
+ * where the pull genuinely does melt down again. Powerups keep the original
+ * wording throughout — they still have no use for a second copy. */
+function workerSub(base: CaseCard, r: WorkerPullResult): string {
+  if (r.isNew) {
+    const copies = r.copiesHeld ?? 1;
+    return copies > 1 ? `${base.sub} · copy ${copies} — altar fodder` : base.sub;
+  }
+  return `${base.sub} · roster full → ${r.shardsGained ?? 0} shards`;
 }
 
 /** Item reel card art: WEAPON_APPEARANCE's dedicated `.icon` (Utility
@@ -377,10 +393,7 @@ export function createGachaPanel(game: Game): GachaPanel {
           () => {
             const [r] = game.pullWorkerGacha(1);
             const base = workerCard(r.def, game);
-            const card: CaseCard = {
-              ...base,
-              sub: r.isNew ? base.sub : `${base.sub} · dupe → ${r.shardsGained ?? 0} shards`,
-            };
+            const card: CaseCard = { ...base, sub: workerSub(base, r) };
             revealSingle(listEl, pool, card);
           },
         ),
@@ -394,7 +407,7 @@ export function createGachaPanel(game: Game): GachaPanel {
             const results = game.pullWorkerGacha(10);
             const cards: CaseCard[] = results.map((r) => {
               const base = workerCard(r.def, game);
-              return { ...base, sub: r.isNew ? base.sub : `${base.sub} · dupe → ${r.shardsGained ?? 0} shards` };
+              return { ...base, sub: workerSub(base, r) };
             });
             revealTen(listEl, pool, cards);
           },

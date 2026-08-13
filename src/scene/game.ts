@@ -186,6 +186,7 @@ import { scheduleSave } from "../game-state";
 import {
   DEFAULT_WORKER_ATK,
   effectiveAtk,
+  effectiveRarity,
   equippedItem,
   grantXp,
   levelUpCost,
@@ -196,6 +197,15 @@ import {
   syncHp,
   type TeamMemberSave,
 } from "../team";
+import {
+  applyFusion,
+  autoFillFodder,
+  canFuse,
+  fodderAvailable,
+  planFusion,
+  type FusionCheck,
+  type FusionPlan,
+} from "../fusion";
 import { playSfx } from "../sfx";
 import { Effect, LeafBurst, SteamWisp, type SceneEffect } from "./effects";
 import { CELL, Grid, type Cell } from "./grid";
@@ -523,6 +533,13 @@ export class Game {
    * open the Adventure overlay directly when there's a run in progress but
    * no live battle to jump straight into (see hitAdventureIndicator). */
   onWantAdventureOverlay: (() => void) | null = null;
+  /** Set by ui/adventure.ts — fired when members leave the roster, which
+   * before the Fusion Altar could never happen. That screen keeps its
+   * formation in closure state keyed by member id, so without this it would
+   * happily seat a worker who no longer exists and then refuse to embark with
+   * no visible reason. Same hook style as onWantAdventureOverlay above: Game
+   * announces, ui/* decides what to do about it. */
+  onRosterMembersRemoved: ((removedIds: string[]) => void) | null = null;
   /** Set by main.ts — the Crossroads Signpost standing in the clearing is the
    * in-world way into Settings. Routed through a hook because scene/* must
    * never import ui/*; main.ts points it at the same toggle the #gear button
@@ -950,13 +967,75 @@ export class Game {
   levelUpMember(memberId: string): boolean {
     const member = this.memberById(memberId);
     if (!member || member.level >= MAX_LEVEL) return false;
-    const def = WORKER_DEFS_BY_ID[member.defId];
-    const rarity = def?.rarity ?? "common";
+    // Effective rarity, not the def's — a merged worker levels on its NEW
+    // tier's shards. That is the price of the merge showing up on the
+    // instalment plan: a Common raised to Rare gets rare stats and then wants
+    // rare shards to keep climbing, which is what stops fusing being free.
+    const rarity = effectiveRarity(member);
     const cost = levelUpCost(member);
     if (this.save.shards[rarity] < cost) return false;
     this.save.shards[rarity] -= cost;
     member.level += 1;
     syncHp(member, this.save.inventory, this.save.prestigeLevel);
+    scheduleSave(this.save, true);
+    return true;
+  }
+
+  // --- fusion altar -----------------------------------------------------
+  //
+  // Game's job here is only to supply the one piece of state fusion.ts cannot
+  // see — which members are currently backing a live woodcutter sprite — and
+  // to announce the deletion afterwards. All the rules live in ../fusion.ts so
+  // the sim can test them without a canvas.
+
+  /** Members pinned by something transient that would break if they vanished.
+   *
+   * Today that is slotAssignment, which is never re-validated once a live
+   * chopping session picks a worker: delete the member it points at and the
+   * sprite keeps chopping forever as a common/1-atk ghost, because the slot is
+   * only ever released when the whole session ends. There is no existing guard
+   * for this anywhere, so the Altar has to be the one that refuses. */
+  private pinnedMemberIds(): Set<string> {
+    const pinned = new Set<string>();
+    for (const memberId of this.slotAssignment.values()) {
+      if (memberId) pinned.add(memberId);
+    }
+    return pinned;
+  }
+
+  /** Whether a member can sit on the Altar's target socket, and if not, why. */
+  fusionCheck(memberId: string): FusionCheck {
+    const member = this.memberById(memberId);
+    if (!member) return { ok: false, reason: "missing" };
+    return canFuse(member, this.pinnedMemberIds());
+  }
+
+  /** What a merge would do, or null if the selection isn't legal yet. Called
+   * on every socket change to drive the preview and the Merge button. */
+  fusionPlan(targetId: string, fodderIds: string[]): FusionPlan | null {
+    return planFusion(targetId, fodderIds, this.save, this.pinnedMemberIds());
+  }
+
+  fusionAutoFill(targetId: string): string[] {
+    return autoFillFodder(targetId, this.save, this.pinnedMemberIds());
+  }
+
+  fusionFodderAvailable(targetId: string): number {
+    return fodderAvailable(targetId, this.save, this.pinnedMemberIds());
+  }
+
+  /** Commits a merge. Re-validates inside applyFusion, so a plan that went
+   * stale while the panel sat open is refused rather than deleting the wrong
+   * four workers. */
+  fuseMembers(plan: FusionPlan): boolean {
+    if (!applyFusion(this.save, plan, this.pinnedMemberIds())) return false;
+    const target = this.memberById(plan.targetId);
+    if (target) syncHp(target, this.save.inventory, this.save.prestigeLevel);
+    // The roster just got shorter for the first time in this game's history.
+    // Tell anyone holding member ids before the next render finds out the
+    // hard way.
+    this.onRosterMembersRemoved?.([...plan.fodderIds]);
+    this.refreshModifiers();
     scheduleSave(this.save, true);
     return true;
   }
