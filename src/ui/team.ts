@@ -296,8 +296,13 @@ export function createTeamPanel(game: Game): TeamPanel {
     if (key === lastKey && listEl.querySelector(".team-layout")) return;
     lastKey = key;
 
+    // Both axes. The roster is a vertical column in normal mode and a
+    // HORIZONTAL strip in altar mode, and only scrollTop was carried across a
+    // rebuild — so every click in the altar's reserve snapped it back to the
+    // first card, which is a lot of the "it jumps to the start" feeling.
     const prevRoster = listEl.querySelector(".team-roster");
     const prevScroll = prevRoster ? prevRoster.scrollTop : 0;
+    const prevScrollX = prevRoster ? prevRoster.scrollLeft : 0;
 
     listEl.replaceChildren();
     const s = game.save;
@@ -346,6 +351,7 @@ export function createTeamPanel(game: Game): TeamPanel {
     listEl.append(layout);
     const roster = layout.querySelector<HTMLElement>(".team-roster");
     if (roster && prevScroll > 0) roster.scrollTop = prevScroll;
+    if (roster && prevScrollX > 0) roster.scrollLeft = prevScrollX;
   }
 
   function flashPane(): void {
@@ -481,7 +487,15 @@ export function createTeamPanel(game: Game): TeamPanel {
         lastTier = stack.rarity;
         const head = document.createElement("div");
         head.className = `team-group rarity-${stack.rarity}`;
-        head.append(starBadge(stack.members[0]), document.createTextNode(stack.rarity));
+        head.title = stack.rarity;
+        // The name is wrapped so the altar's sideways strip can drop it: set
+        // vertically, "**** legendary" needs 92px of a 74px strip and cropped
+        // the bottom off every card behind it. The stars carry the tier on
+        // their own — that is what they are for — and the colour agrees.
+        const label = document.createElement("span");
+        label.className = "team-group-label";
+        label.textContent = stack.rarity;
+        head.append(starBadge(stack.members[0]), label);
         roster.append(head);
       }
       const isOpen = expanded.has(stack.key);
@@ -491,7 +505,12 @@ export function createTeamPanel(game: Game): TeamPanel {
       if (stack.members.length === 1 || isOpen) {
         for (const m of stack.members) roster.append(rosterRow(m, stack, altarWants, stack.members.length > 1));
       } else {
-        roster.append(rosterRow(stack.members[0], stack, altarWants, false));
+        // A collapsed row STANDS FOR THE WHOLE STACK, not for copy #1. Seating
+        // it used to seat that one member and then go inert: the row showed as
+        // ineligible (its representative was now spoken for) and clicking
+        // again just took them back off, so the other four Rooks behind it
+        // were unreachable without expanding first.
+        roster.append(rosterRow(stack.members[0], stack, altarWants, false, true));
       }
     }
 
@@ -509,10 +528,19 @@ export function createTeamPanel(game: Game): TeamPanel {
     stack: RosterStack,
     altarWants: Set<string> | null,
     inExpandedStack: boolean,
+    /** This row speaks for every copy in the stack, not just `member`. */
+    representsStack = false,
   ): HTMLElement {
     const s = game.save;
     const def = WORKER_DEFS_BY_ID[member.defId];
     const count = stack.members.length;
+    // In altar mode a stack row is a pile you draw from: the copies it can
+    // still give, and the ones already standing on the pedestal.
+    const pool = representsStack ? stack.members : [member];
+    const free = altarWants ? pool.filter((m) => altarWants.has(m.id)) : [];
+    const seated = altarWants
+      ? pool.filter((m) => m.id === altarTarget || altarFodder.includes(m.id))
+      : [];
 
     const row = document.createElement("div");
     row.className = `team-row rarity-border-${effectiveRarity(member)}`;
@@ -520,8 +548,10 @@ export function createTeamPanel(game: Game): TeamPanel {
     row.classList.toggle("selected", member.id === selectedMemberId && mode !== "altar");
     row.classList.toggle("nested", inExpandedStack);
     if (altarWants) {
-      row.classList.toggle("altar-eligible", altarWants.has(member.id));
-      row.classList.toggle("altar-seated", altarTarget === member.id || altarFodder.includes(member.id));
+      row.classList.toggle("altar-eligible", free.length > 0);
+      // Dimmed only when the pile is spent — a Rook x5 with one on the altar
+      // still has four to give and must not look finished.
+      row.classList.toggle("altar-seated", free.length === 0 && seated.length > 0);
     }
 
     row.append(portraitFor(member, 2, "team-row-portrait-img"));
@@ -556,8 +586,11 @@ export function createTeamPanel(game: Game): TeamPanel {
     if (count > 1 && !inExpandedStack) {
       const badge = document.createElement("button");
       badge.className = "team-row-count";
-      badge.textContent = `×${count}`;
-      badge.title = `${count} copies — open to pick between them`;
+      badge.textContent = altarWants && seated.length > 0 ? `${seated.length}/${count}` : `×${count}`;
+      badge.title =
+        altarWants && seated.length > 0
+          ? `${seated.length} of ${count} on the altar`
+          : `${count} copies — open to pick between them`;
       badge.addEventListener("click", (e) => {
         e.stopPropagation();
         if (expanded.has(stack.key)) expanded.delete(stack.key);
@@ -580,7 +613,10 @@ export function createTeamPanel(game: Game): TeamPanel {
 
     row.addEventListener("click", () => {
       if (mode === "altar") {
-        seatAtAltar(member.id);
+        // Draw the next copy off the pile; when it is empty, put the last one
+        // back, so the row stays a toggle rather than becoming a dead end.
+        if (free.length > 0) seatAtAltar(free[0].id);
+        else if (seated.length > 0) seatAtAltar(seated[seated.length - 1].id);
         return;
       }
       selectedMemberId = member.id;

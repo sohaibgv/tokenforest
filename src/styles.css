@@ -1814,9 +1814,14 @@ body.shop-takeover #shop {
   position: static;
   flex: 0 0 auto;
   writing-mode: vertical-rl;
+  align-items: center;
   padding: 2px 1px;
   font-size: 8px;
   background: none;
+}
+
+.team-layout.altar-mode .team-group-label {
+  display: none;
 }
 
 .team-layout.altar-mode .team-row {
@@ -1833,6 +1838,26 @@ body.shop-takeover #shop {
 
 .team-layout.altar-mode .team-row-stat {
   font-size: 8px;
+}
+
+/* Out of the flow. The strip lays its rows out as columns, so a badge that is
+   a flex ITEM stacks under the text instead of sitting beside it — that alone
+   made the rows 92px tall inside a 74px strip, and overflow-y: hidden cropped
+   the bottom off every card. */
+.team-layout.altar-mode .team-row-count {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  align-self: auto;
+  min-width: 0;
+  padding: 0 3px;
+  line-height: 1.3;
+}
+
+/* The upgrade caret has the same problem and the same answer — and in the
+   altar the question is never "is there better gear", so it just goes. */
+.team-layout.altar-mode .team-row-upgrade {
+  display: none;
 }
 
 .team-layout.altar-mode .fusion-altar {

@@ -1155,6 +1155,25 @@ function fusionChecks(): void {
     check("no character exceeds the copy cap", overCap.length === 0, `${overCap.length} over ${MAX_COPIES_PER_WORKER}`);
   }
 
+  // FIVE OF ONE CHARACTER. The roster groups identical workers into a single
+  // stacked row, and the altar has to be able to draw every copy out of that
+  // one pile — the first version seated the stack's first member and then went
+  // inert, leaving the other four unreachable. The engine side of that is
+  // this: five copies of one defId are a legal, complete altar.
+  {
+    const five = roster([["rook", 0], ["rook", 0], ["rook", 0], ["rook", 0], ["rook", 0]]);
+    const save = saveWith(five);
+    const fodder = autoFillFodder("m-1", save);
+    check("one character can fill a whole altar", fodder.length === FUSION_FODDER_COUNT, fodder.join());
+    const plan = planFusion("m-1", fodder, save);
+    check("and that altar is a legal merge", plan?.toRarity === "rare", plan?.toRarity ?? "no plan");
+    check(
+      "every socket is a different copy",
+      new Set(fodder).size === fodder.length && !fodder.includes("m-1"),
+      fodder.join(),
+    );
+  }
+
   // POWER CEILING. Merging is a new route to Legendary that bypasses the 1%
   // pull rate, so the top of that route has to be a number someone chose
   // rather than one that fell out. A Common merged three times is Legendary
