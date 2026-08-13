@@ -23,7 +23,13 @@ export type CutterVariant = "cutter" | "gnome";
 
 export interface PendingChop {
   tokens: number; // 0 for gnome chops (suppresses the "-N" float)
-  hits: number; // damage multiplier — folded bursts keep their hits
+  hits: number; // how many times the axe swings — stats + animation only
+  /** How HARD this swing lands: summed swingWeight of the token usage behind
+   * it (see economy.ts). Damage and wood scale off this, not off `hits`, so
+   * a heavy turn is a heavy chop. Absent on player-driven swings (manual
+   * clicks, POV, gnomes), which fall back to `hits` — a click is a click
+   * regardless of what the model was doing. */
+  weight?: number;
   /** Wood-yield multiplier from a POV skill-check grade (great/good/miss).
    * Never affects damage/stats — only the wood value resolveChop pays out. */
   yieldMult?: number;
@@ -171,6 +177,7 @@ export class Woodcutter {
       const last = this.pending[this.pending.length - 1];
       last.tokens += chop.tokens;
       last.hits += chop.hits;
+      last.weight = (last.weight ?? last.hits) + (chop.weight ?? chop.hits);
     } else {
       this.pending.push(chop);
     }

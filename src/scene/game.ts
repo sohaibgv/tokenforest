@@ -114,6 +114,7 @@ import {
   sapPressBuildCost,
   sapPressCost,
   TOKENS_PER_CHARGE,
+  swingWeight,
   unlockedSwatches,
   WOOD_YIELD,
   WORKER_DEFS_BY_ID,
@@ -324,6 +325,11 @@ const FRENZY_BURST_SECS = 6;
 interface ChopBuffer {
   tokens: number;
   hits: number;
+  /** Summed swingWeight of every coalesced event — the damage/yield this
+   * buffer is worth. Tracked alongside `hits` rather than replacing it
+   * because `hits` still drives the stats counter and the swing animation
+   * count, which are about how many times the axe moved, not how hard. */
+  weight: number;
   age: number;
 }
 
@@ -2553,11 +2559,13 @@ export class Game {
 
   applyChop(e: ChopEvent): void {
     const buf = this.buffers.get(e.sourceId);
+    const weight = swingWeight(e.counted);
     if (buf) {
       buf.tokens += e.counted;
       buf.hits += 1;
+      buf.weight += weight;
     } else {
-      this.buffers.set(e.sourceId, { tokens: e.counted, hits: 1, age: 0 });
+      this.buffers.set(e.sourceId, { tokens: e.counted, hits: 1, weight, age: 0 });
     }
 
     // Amber accrual: every 1k counted tokens charges +1 Amber, boosted by an
@@ -5094,7 +5102,6 @@ export class Game {
           lx,
           ly,
           this.chopModsForLead(),
-          true,
         );
       } else {
         this.frenzyT = FRENZY_SECS;
@@ -5159,7 +5166,6 @@ export class Game {
         lx,
         ly,
         this.chopModsForLead(),
-        true,
       );
     } else {
       // Out of Focus: spark, no damage — run another prompt to recharge.
@@ -5213,7 +5219,6 @@ export class Game {
     x: number,
     y: number,
     mods: ChopMods,
-    chipFloat = false,
   ): number {
     const s = this.save;
     // POV skill-check grade (great/good/miss) — wood value only, never
@@ -5236,15 +5241,29 @@ export class Game {
     const blessingMult = this.hasPowerup("forestBlessing") ? 1.15 : 1;
     const totalYieldMult =
       yieldMult * prestigeMult * mods.itemYieldMult * blessingMult;
-    const chips = chop.hits * getWorld(this.plotWorld).mult * totalYieldMult;
+    // How hard this swing lands. Token-driven chops carry a `weight` derived
+    // from the volume behind them (see swingWeight); player-driven swings
+    // have none and fall back to `hits`, which is what they always used —
+    // a click is a click regardless of what the model happened to be doing.
+    const force = chop.weight ?? chop.hits;
+    const chips = force * getWorld(this.plotWorld).mult * totalYieldMult;
     s.wood += chips;
     s.totalWoodEarned += chips;
     // Everything this swing paid, returned to the caller so the POV timing
     // bar can report the real figure instead of a multiplier.
     let awarded = chips;
-    const felled = this.plot.forest.applyDamage(tree, chop.hits * mods.atk);
+    const felled = this.plot.forest.applyDamage(tree, force * mods.atk);
     playSfx("chop");
-    if (chipFloat && !felled) {
+    // Always show what a swing paid.
+    //
+    // This float used to be opt-in via `chipFloat`, and every caller that
+    // opted in was a PLAYER action (manual click, golden spot, POV swing)
+    // while both token-driven callers left it off. The wood was paid either
+    // way — it was only ever invisible. The result read as "my woodcutters
+    // chop for free and only clicking earns anything", which is the exact
+    // opposite of what the game does, and it hid the one number that makes
+    // token usage feel like it is worth something.
+    if (!felled && chips > 0) {
       this.floats.push(
         new FloatingText(x, y - 5, `+${abbrev(chips)}`, WOOD_COLOR),
       );
@@ -5322,7 +5341,6 @@ export class Game {
       chop.x,
       chop.y,
       this.chopModsForWc(wc),
-      true,
     );
     // Report the real payout on the timing bar, and restart the flash timer
     // so the number gets its full read — the swing lands a beat after the
@@ -5761,7 +5779,6 @@ export class Game {
           wc.x,
           wc.y - 10,
           mods,
-          true,
         );
       }
     } else if (item.effectId === "frenzyBurst") {
@@ -5839,7 +5856,7 @@ export class Game {
         const wc = this.woodcutters.get(id);
         if (wc && !wc.gone) {
           this.buffers.delete(id);
-          wc.enqueue({ tokens: buf.tokens, hits: buf.hits });
+          wc.enqueue({ tokens: buf.tokens, hits: buf.hits, weight: buf.weight });
         } else {
           // No visible woodcutter (over cap / despawned): damage directly so
           // tokens are never wasted. If no tree stands (mid-trek), retry.
@@ -5851,7 +5868,7 @@ export class Game {
             this.buffers.delete(id);
             this.resolveChop(
               tree,
-              { tokens: buf.tokens, hits: buf.hits },
+              { tokens: buf.tokens, hits: buf.hits, weight: buf.weight },
               tree.x,
               tree.y - 12,
               this.chopModsForLead(),

@@ -83,6 +83,10 @@ import {
   sapPressCost,
   SHARD_VALUE,
   TOKENS_PER_CHARGE,
+  swingWeight,
+  SWING_CAP,
+  SWING_FLOOR,
+  TOKEN_REF,
   plotGateForWorld,
   travelAmberCost,
   travelSweatWoodCost,
@@ -3931,6 +3935,100 @@ function readinessChecks(): void {
   );
 }
 
+/** Gates on the token-volume -> swing-weight curve (economy.ts's swingWeight).
+ *
+ * This curve decides how much of the forest one API turn knocks down, so it
+ * is the single easiest place to accidentally multiply or gut the whole wood
+ * economy — and the failure is silent, because nothing throws when trees
+ * simply start falling twice as fast.
+ *
+ * TURN_SIZE_QUANTILES is the measured shape of real usage: 50 midpoint
+ * quantiles of counted tokens across ~7,900 real assistant turns. Baked in
+ * rather than sampled live so the gate is reproducible on any machine and in
+ * CI, where no transcripts exist. Median ~1.35k, mean ~4k, long tail — the
+ * top decile carries about two thirds of all tokens, which is exactly why
+ * the curve is a square root and not a line.
+ *
+ * Resolution is load-bearing, and a coarser table was tried first and thrown
+ * out. At every-5th-percentile (20 points) the tail is truncated so hard
+ * that a LINEAR curve scores 0.99x on it and sails through check 1 — the
+ * non-vacuity check below is what caught that, since a distribution on which
+ * linear and sqrt are indistinguishable cannot be testing the choice between
+ * them. At 50 points E[sqrt] tracks the true distribution to within ~5%,
+ * which is inside the band this gate allows.
+ */
+const TURN_SIZE_QUANTILES = [
+  137, 242, 321, 376, 425, 465, 505, 540, 581, 622,
+  669, 714, 753, 793, 832, 876, 918, 960, 1001, 1048,
+  1097, 1151, 1205, 1262, 1327, 1385, 1444, 1507, 1575, 1654,
+  1740, 1825, 1914, 2017, 2125, 2237, 2365, 2488, 2637, 2787,
+  2951, 3173, 3463, 3768, 4180, 4672, 5303, 6388, 8414, 16698,
+];
+
+function swingWeightChecks(): void {
+  console.log("\nSwing weight (token volume -> chop force):");
+
+  // 1. The headline invariant: this is a REDISTRIBUTION, not a raise. Mean
+  //    weight over real usage must stay ~1.0, because the old behaviour paid
+  //    exactly 1 per turn. Outside +/-5% the same session silently earns a
+  //    different amount of wood than it used to.
+  const weights = TURN_SIZE_QUANTILES.map(swingWeight);
+  const mean = weights.reduce((a, b) => a + b, 0) / weights.length;
+  check(
+    "swing weight: economy multiplier stays ~1x",
+    mean > 0.95 && mean < 1.05,
+    `mean weight ${mean.toFixed(3)} over real turn-size distribution`,
+  );
+
+  // 2. Monotone: a bigger turn is never worth less. Sounds trivial, but a
+  //    mis-signed exponent or a floor above the cap breaks it silently.
+  let monotone = true;
+  for (let i = 1; i < TURN_SIZE_QUANTILES.length; i++) {
+    if (swingWeight(TURN_SIZE_QUANTILES[i]) < swingWeight(TURN_SIZE_QUANTILES[i - 1])) monotone = false;
+  }
+  check("swing weight: monotone in tokens", monotone, `${TURN_SIZE_QUANTILES.length} quantiles`);
+
+  // 3. Volume actually MATTERS — the whole point of the change. A p99 turn
+  //    must out-chop a p50 turn by a real margin, or we have reimplemented
+  //    the flat 1-per-turn behaviour with extra steps.
+  const p50 = swingWeight(1355);
+  const p99 = swingWeight(16698);
+  check(
+    "swing weight: a heavy turn clearly outweighs a median one",
+    p99 / p50 > 2.5,
+    `p99 ${p99.toFixed(2)} vs p50 ${p50.toFixed(2)} = ${(p99 / p50).toFixed(1)}x`,
+  );
+
+  // 4. The tail is bounded. An elder is 30 HP; one turn must never erase a
+  //    plot, however enormous. Checked against the largest turn actually
+  //    observed (971k) plus an absurd one.
+  const huge = Math.max(swingWeight(971_072), swingWeight(50_000_000));
+  check(
+    "swing weight: outliers stay capped below an elder",
+    huge <= SWING_CAP && huge < 30,
+    `largest weight ${huge.toFixed(1)} (cap ${SWING_CAP}, elder 30 HP)`,
+  );
+
+  // 5. Every real turn still moves the tree. A turn that rounds to zero
+  //    damage would read as the app being broken/disconnected.
+  const smallest = swingWeight(1);
+  check(
+    "swing weight: even a tiny turn lands",
+    smallest >= SWING_FLOOR && smallest > 0,
+    `1 token -> ${smallest.toFixed(2)} (floor ${SWING_FLOOR})`,
+  );
+
+  // 6. Non-vacuity for check 1: prove the band can actually fail, so a green
+  //    result means the calibration was measured rather than merely asserted.
+  const wrong = TURN_SIZE_QUANTILES.map((t) => Math.min(SWING_CAP, Math.max(SWING_FLOOR, t / TOKEN_REF)));
+  const wrongMean = wrong.reduce((a, b) => a + b, 0) / wrong.length;
+  check(
+    "swing weight: the 1x band is non-vacuous",
+    !(wrongMean > 0.95 && wrongMean < 1.05),
+    `a linear curve would score ${wrongMean.toFixed(3)}x and fail the gate`,
+  );
+}
+
 // --- Drivers ---------------------------------------------------------------
 
 function main(): void {
@@ -4008,6 +4106,7 @@ function main(): void {
   featureChecks();
   npcChecks();
   readinessChecks();
+  swingWeightChecks();
   contrastChecks();
   reportIdentity();
 

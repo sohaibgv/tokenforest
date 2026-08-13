@@ -369,6 +369,42 @@ export const GNOME_HASTE_SECS = 15;
 
 /** Counted tokens per +1 Focus and +1 Amber. */
 export const TOKENS_PER_CHARGE = 1_000;
+
+// --- Swing weight: how hard one API turn hits ------------------------------
+//
+// A chop used to be worth exactly 1 damage and 1 wood chip no matter what
+// produced it, because the frontend counted EVENTS (`buf.hits += 1`) and the
+// backend emits exactly one `tf:chop` per usage record. A 400-token turn and
+// a 50,000-token turn felled a tree at the same speed and paid the same wood.
+// Token volume — the one number this whole app is about, and the number shown
+// on every "-1k" float — was economically inert.
+//
+// Now volume sets the weight of the swing. The shape is deliberate:
+//
+// SQUARE ROOT, not linear. Real turn sizes are heavily skewed — measured over
+// ~7,900 real assistant turns, the median is ~1.35k while the mean is ~4k and
+// the top 10% of turns carry 67% of all tokens. Paying linearly would put
+// two thirds of all wood into one turn in ten and make a single outlier
+// (the largest observed was 971k) worth ~700 median turns. sqrt compresses
+// that tail into something a forest can absorb while still making a big turn
+// feel unmistakably bigger.
+//
+// TOKEN_REF is CALIBRATED, not chosen for looks: it is set so the mean weight
+// over that real distribution is 1.0, which means the same total usage pays
+// the same total wood as before. This is a redistribution, not a raise — big
+// turns gain exactly what small turns give up. See the swing-weight gate in
+// sim/sim.ts, which asserts that multiplier stays inside ±5%.
+export const TOKEN_REF = 1_800;
+/** Below this a turn would round to nothing; every turn should move the tree. */
+export const SWING_FLOOR = 0.25;
+/** Caps the outlier tail. At 8, a ~115k-token turn is already maxed — enough
+ * to stagger an elder (30 HP) but never to erase a plot in one event. */
+export const SWING_CAP = 8;
+
+export function swingWeight(tokens: number): number {
+  if (tokens <= 0) return 0;
+  return Math.min(SWING_CAP, Math.max(SWING_FLOOR, Math.sqrt(tokens / TOKEN_REF)));
+}
 export const FOCUS_CAP = 100;
 
 /** Seconds of real time per +1 Focus, independent of token usage.
