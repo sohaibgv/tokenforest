@@ -1155,6 +1155,30 @@ function fusionChecks(): void {
     check("no character exceeds the copy cap", overCap.length === 0, `${overCap.length} over ${MAX_COPIES_PER_WORKER}`);
   }
 
+  // POWER CEILING. Merging is a new route to Legendary that bypasses the 1%
+  // pull rate, so the top of that route has to be a number someone chose
+  // rather than one that fell out. A Common merged three times is Legendary
+  // with a 1.6x star multiplier on top — strictly better than anything the
+  // gacha can hand you, which is correct only because of what it costs.
+  {
+    const pulled = roster([["ironbark", 0]])[0];
+    const climbed = roster([["rook", 3]])[0];
+    const pulledAtk = effectiveAtk(pulled, [], 0);
+    const climbedAtk = effectiveAtk(climbed, [], 0);
+    check(
+      "a fully merged common tops out at a pulled legendary x1.6",
+      effectiveRarity(climbed) === "legendary" && Math.abs(climbedAtk / pulledAtk - 1.6) < 0.001,
+      `${climbedAtk.toFixed(0)} vs ${pulledAtk.toFixed(0)} = x${(climbedAtk / pulledAtk).toFixed(2)}`,
+    );
+    // 5 commons per rare, 5 rares per epic, 5 epics per legendary.
+    const commonsPerLegendary = Math.pow(FUSION_FODDER_COUNT + 1, 3);
+    check(
+      "that ceiling costs 125 commons",
+      commonsPerLegendary === 125,
+      `${commonsPerLegendary} commons for one merged legendary`,
+    );
+  }
+
   // starRank is additive-optional, so a save written before the altar existed
   // must read as rank 0 and survive a double migration unchanged.
   {
