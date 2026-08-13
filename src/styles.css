@@ -1190,7 +1190,10 @@ body.shop-takeover #shop {
   display: flex;
   gap: var(--gap-lg);
   margin-top: var(--gap-md);
-  align-items: flex-start;
+  /* Stretch, not flex-start. The roster already filled the height while the
+     member sheet shrank to its content, so on a tall window the card stopped
+     two-thirds of the way down with dead panel below it. */
+  align-items: stretch;
 }
 
 /* The Team tab owns its own vertical space, so the roster can scroll beside a
@@ -1228,8 +1231,7 @@ body.shop-takeover #shop {
    gacha.ts), so this scrolls independently of the pane beside it, bounded by
    the layout rather than by a guessed pixel height. */
 .team-roster {
-  flex: 0 0 42%;
-  max-width: 190px;
+  flex: 0 0 clamp(150px, 30%, 280px);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1422,6 +1424,83 @@ body.shop-takeover #shop {
   overflow-y: auto;
 }
 
+/* The member sheet, restored. These five rules were collateral damage when the
+   dead .team-tile block above them was removed — the delete ran from
+   `.team-tile {` to `.hp-bar {` and everything between went with it, including
+   the pane's own `flex: 1`. The symptom was that the sheet stopped growing
+   with the window: at 1200px it was still a 287px card adrift in a 1184px
+   panel, with no background and no border to even read as a card. */
+.team-detail {
+  flex: 1;
+  min-width: 0;
+  /* Lets the portrait below size itself against this pane's width. */
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  padding: 8px;
+  background: rgba(var(--text-bright-rgb), 0.03);
+  border: 1px solid var(--bg-inset);
+  border-radius: var(--radius-sm);
+}
+
+.team-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-sm);
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+
+.team-card-head > div:first-child {
+  font-weight: 600;
+}
+
+.team-detail-head {
+  font-size: 12px;
+}
+
+.team-detail-portrait {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 0;
+}
+
+/* The portrait scales with the PANE, not the viewport. `vh` was the obvious
+   reach and the wrong one: a tall narrow window would have blown the character
+   up inside a column too narrow to hold them. Container units track the thing
+   that actually grows. Pixel art normally wants integer scaling, but
+   `image-rendering: pixelated` is nearest-neighbour at any ratio, so it stays
+   crisp — and a character stuck at 64px while the window doubles is what made
+   the sheet feel broken on resize. */
+.team-detail-portrait-img {
+  height: clamp(56px, 26cqi, 220px);
+  max-height: 100%;
+  width: auto;
+  image-rendering: pixelated;
+}
+
+/* Persistent (subtler than the one-time gacha pull-reveal celebration) chrome
+   for epic/legendary members, so an owned rare pull keeps reading as special
+   long after the reveal animation ends. */
+.team-card-epic {
+  border-left: 2px solid var(--rarity-epic);
+}
+
+.team-card-epic .team-card-head > div:first-child {
+  text-shadow: 0 0 5px rgba(var(--rarity-epic-rgb), 0.5);
+}
+
+.team-card-legendary {
+  border-left: 2px solid var(--accent-gold);
+}
+
+.team-card-legendary .team-card-head > div:first-child {
+  text-shadow: 0 0 6px rgba(var(--accent-gold-rgb), 0.6);
+}
+
 .hp-bar {
   height: 4px;
   background: var(--bg-inset);
@@ -1561,7 +1640,9 @@ body.shop-takeover #shop {
   gap: var(--gap-sm);
   flex-wrap: wrap;
   flex: 0 0 auto;
-  margin-top: 3px;
+  /* Sits at the foot of the card rather than wherever the content happened to
+     end. */
+  margin-top: auto;
   padding-top: 4px;
   border-top: 1px solid var(--bg-inset);
 }
@@ -1813,7 +1894,7 @@ body.shop-takeover #shop {
   /* Capped and centred: stretched across the full pane the four sacrifices sat
      at the corners of a wide rectangle, which reads as a table, not a ring. */
   width: 100%;
-  max-width: 300px;
+  max-width: clamp(280px, 55%, 460px);
   margin: 0 auto;
   padding: 1px 2px;
   border-radius: var(--radius-lg);
