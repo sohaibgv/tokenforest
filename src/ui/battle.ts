@@ -216,6 +216,23 @@ export function initBattle(game: Game): void {
   const body = document.getElementById("battle-body")!;
   body.replaceChildren();
 
+  /** Every screen this overlay can show. Exactly one is visible at a time.
+   *
+   * Each show* function used to hide its siblings by listing them explicitly,
+   * which worked right up until the door and event screens were added: the
+   * older functions had never heard of them, so taking a chest ROOM left the
+   * event panel sitting on top of the chest reveal, swallowing every click
+   * aimed at Continue. The run looked frozen.
+   *
+   * Adding a panel to this list is now the only thing required to make every
+   * screen hide it. */
+  const ALL_PANELS: HTMLElement[] = [];
+
+  /** Reveals exactly one panel and hides the rest. */
+  function showOnly(panel: HTMLElement | null): void {
+    for (const p of ALL_PANELS) p.classList.toggle("hidden", p !== panel);
+  }
+
   // --- persistent DOM, built once --------------------------------------
   const top = document.createElement("div");
   top.className = "battle-top";
@@ -513,6 +530,10 @@ export function initBattle(game: Game): void {
     eventPanel,
     ledger.el,
   );
+  // The ledger is deliberately NOT in this list: it is a toggle the player
+  // opens over whatever is on screen, not one of the mutually-exclusive
+  // screens, and hiding it on every transition would close it under them.
+  ALL_PANELS.push(box, revivalPanel, boonPanel, chestPanel, clearPanel, doorPanel, eventPanel);
 
   // --- state -------------------------------------------------------------
   let mode: Mode = "idle";
@@ -799,10 +820,7 @@ export function initBattle(game: Game): void {
     }
     textEl.textContent = text;
     hideBubbles();
-    revivalPanel.classList.add("hidden");
-    boonPanel.classList.add("hidden");
-    chestPanel.classList.add("hidden");
-    box.classList.remove("hidden");
+    showOnly(box);
     mode = "outcome";
     syncClickCapture();
   }
@@ -825,10 +843,7 @@ export function initBattle(game: Game): void {
    * identical either way — only this header line's wording changes;
    * afterRevivalResolved() is what actually branches behavior per choice. */
   function showRevivalOffer(revival: { free: boolean; cost: number; afterWipe: boolean }): void {
-    box.classList.add("hidden");
-    boonPanel.classList.add("hidden");
-    chestPanel.classList.add("hidden");
-    revivalPanel.classList.remove("hidden");
+    showOnly(revivalPanel);
     if (revival.afterWipe) {
       revivalText.textContent = "Your party was wiped! Revive the whole team to retry this stage?";
     } else {
@@ -896,10 +911,7 @@ export function initBattle(game: Game): void {
    * always shows the same 3 cards a pause-then-resume (even across an app
    * restart) originally offered. No skip: the only way out is picking one. */
   function showBoonOffer(offer: RunOffer): void {
-    box.classList.add("hidden");
-    revivalPanel.classList.add("hidden");
-    chestPanel.classList.add("hidden");
-    boonPanel.classList.remove("hidden");
+    showOnly(boonPanel);
     boonCards.forEach((card, i) => {
       const offered = offer.cards[i];
       const def = offered ? BOON_DEFS_BY_ID[offered.boonId] : undefined;
@@ -964,10 +976,7 @@ export function initBattle(game: Game): void {
    * the reward is already permanently applied to the save by the time this
    * shows (see Game.grantChest); this is purely informational. */
   function showChestReveal(chest: ChestRevealSummary): void {
-    box.classList.add("hidden");
-    revivalPanel.classList.add("hidden");
-    boonPanel.classList.add("hidden");
-    chestPanel.classList.remove("hidden");
+    showOnly(chestPanel);
     const amberLine = chest.amber > 0 ? ` and ${abbrev(chest.amber)} amber` : "";
     chestRewardsEl.replaceChildren();
     const woodLine = document.createElement("div");
@@ -1016,11 +1025,7 @@ export function initBattle(game: Game): void {
    * afford-gating convention), just reachable without a round trip through
    * the DOM overlay. */
   function showDepthCleared(): void {
-    box.classList.add("hidden");
-    revivalPanel.classList.add("hidden");
-    boonPanel.classList.add("hidden");
-    chestPanel.classList.add("hidden");
-    clearPanel.classList.remove("hidden");
+    showOnly(clearPanel);
     const adv = game.save.adventure;
     if (adv) {
       const toll = game.nextStageFee();
@@ -1087,13 +1092,7 @@ export function initBattle(game: Game): void {
    * shape is something the player steers rather than something that happens to
    * them. */
   function showDoors(exits: RoomSpec[]): void {
-    box.classList.add("hidden");
-    revivalPanel.classList.add("hidden");
-    boonPanel.classList.add("hidden");
-    chestPanel.classList.add("hidden");
-    clearPanel.classList.add("hidden");
-    eventPanel.classList.add("hidden");
-    doorPanel.classList.remove("hidden");
+    showOnly(doorPanel);
     hideBubbles();
     doorCards.forEach((card, i) => {
       const room = exits[i];
@@ -1117,13 +1116,7 @@ export function initBattle(game: Game): void {
 
   /** Shops, springs, shrines and chaos gates. */
   function showRoomEvent(event: { roomId: string; kind: string }): void {
-    box.classList.add("hidden");
-    revivalPanel.classList.add("hidden");
-    boonPanel.classList.add("hidden");
-    chestPanel.classList.add("hidden");
-    clearPanel.classList.add("hidden");
-    doorPanel.classList.add("hidden");
-    eventPanel.classList.remove("hidden");
+    showOnly(eventPanel);
     hideBubbles();
     eventTitle.textContent = ROOM_TITLE[event.kind] ?? "A quiet room";
     eventLeave.classList.remove("hidden");
@@ -1292,13 +1285,7 @@ export function initBattle(game: Game): void {
       showDoors(exits);
       return;
     }
-    revivalPanel.classList.add("hidden");
-    boonPanel.classList.add("hidden");
-    chestPanel.classList.add("hidden");
-    clearPanel.classList.add("hidden");
-    doorPanel.classList.add("hidden");
-    eventPanel.classList.add("hidden");
-    box.classList.remove("hidden");
+    showOnly(box);
     // Deliberately "done", not "idle" — "idle" is syncModeFromGameState's
     // transient "no living actor yet, keep polling" wait state mid-fight
     // and would immediately re-trigger showOutcome every frame here

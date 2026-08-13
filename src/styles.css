@@ -1178,19 +1178,66 @@ body.shop-takeover #shop {
   align-items: flex-start;
 }
 
+/* The Team tab owns its own vertical space, so the roster can scroll beside a
+   detail pane that stays put. #shop-list becomes a flex column ONLY here — for
+   every other tab it stays a plain block, because those tabs append flat card
+   lists that would shrink to fit instead of scrolling. */
+.shop-list-team {
+  display: flex;
+  flex-direction: column;
+  /* Kept scrollable as a FALLBACK. At the shop takeover's own 560x480 the
+     layout below fits exactly and this never scrolls, so the roster is the
+     only scroller — which is the whole point. But the window is resizable down
+     to 280x200, and at that size something has to give; the parent scrolling
+     is a far better failure than the roster collapsing. */
+  overflow-y: auto;
+}
+
+.shop-list-team .team-layout {
+  /* Fill the space the list actually has, and no more.
+     `min-height: 0` is required: a flex item defaults to `min-height: auto`,
+     which refuses to shrink below its content — with a twenty-member roster
+     that made the layout 876px tall inside a 251px list, so the roster never
+     scrolled and the list did. Which is the bug, wearing a different hat. */
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* Roster column: just wide enough for a tile plus a little padding.
    Rosters have no upper bound (every gacha worker pull pushes a new
    member — see gacha.ts's save.team.push, no MAX_WOODCUTTERS-style cap),
-   so this scrolls independently of the detail panel instead of growing the
-   whole panel past the 560x480 shop-takeover window. */
+   so this scrolls independently of the detail panel.
+
+   It used to be capped at a flat `max-height: 320px`, which was taller than
+   the 251px #shop-list it lives inside at the shop takeover's own window size.
+   The roster hung out of the bottom of its parent and BOTH scrolled, so which
+   list moved depended on where the pointer happened to be. Bounded by the
+   layout now instead of by a guessed number, so it cannot outgrow its
+   container at any window size. */
 .team-roster {
   flex: 0 0 60px;
   display: flex;
   flex-direction: column;
   gap: var(--gap-sm);
-  max-height: 320px;
+  max-height: 100%;
+  /* A floor so the column can never disappear. Squeezing the window far enough
+     drives the layout's height toward zero, and a roster rendered at 0px is a
+     Team tab with no team in it. Below this the list scrolls instead — a worse
+     experience than the roomy case, but a working one. */
+  min-height: 110px;
   overflow-y: auto;
-  padding-right: 2px;
+  /* No padding-right. It existed to keep tiles clear of the platform's own
+     scrollbar; the styled bar below is 5px and sits in the same place, so
+     reserving another 2px on top just narrows the tiles for nothing. This is
+     the app's narrowest scroll region, and the tiles fill its width, so every
+     pixel here shows. */
+}
+
+/* The detail pane scrolls on its own too, rather than stretching the layout —
+   a long member card must not push the roster's scroll region off screen. */
+.shop-list-team .team-detail {
+  max-height: 100%;
+  overflow-y: auto;
 }
 
 .team-tile {
@@ -4004,4 +4051,109 @@ button:active:not(:disabled) {
   border-color: var(--curse);
   color: var(--curse);
   font-weight: 600;
+}
+
+
+/* --- Scrollbars ----------------------------------------------------------
+ *
+ * Every scrolling region in the app was showing the platform's default
+ * scrollbar: a grey system chrome bar sitting inside a hand-drawn pixel-art
+ * panel, which is the single most out-of-place thing on screen.
+ *
+ * These are listed explicitly rather than applied with a `*` selector so that
+ * a new scroll region is a deliberate decision — the styling and the
+ * scroll-chaining fix below belong together, and a blanket rule would hide
+ * from the next person that both are needed.
+ *
+ * `overscroll-behavior: contain` is the behavioural half. Without it, reaching
+ * the end of an inner list hands the remaining scroll to whatever is behind
+ * it, so an over-scroll in the roster would start moving the shop panel — the
+ * "scrolling does something unexpected" half of feeling broken.
+ */
+#shop-list,
+#adventure-body,
+#slot-picker,
+#prestige-reveal,
+#stats-panel,
+.team-roster,
+.shop-list-team .team-detail,
+.ledger-panel,
+.adv-codex {
+  overscroll-behavior: contain;
+  /* Firefox and the standards track. WKWebView and the Chromium-based
+     webviews use the ::-webkit- rules below; both are set so the app looks
+     the same on every platform Tauri ships to. */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(var(--text-bright-rgb), 0.28) transparent;
+}
+
+#shop-list::-webkit-scrollbar,
+#adventure-body::-webkit-scrollbar,
+#slot-picker::-webkit-scrollbar,
+#prestige-reveal::-webkit-scrollbar,
+#stats-panel::-webkit-scrollbar,
+.team-roster::-webkit-scrollbar,
+.shop-list-team .team-detail::-webkit-scrollbar,
+.ledger-panel::-webkit-scrollbar,
+.adv-codex::-webkit-scrollbar {
+  /* 5px, not the more common 8-10. WebKit reserves this width permanently
+     (Chromium overlays it instead), and the roster column is only 60px wide
+     with tiles that fill it — a wider bar visibly narrows them on macOS while
+     costing nothing on Windows. */
+  width: 5px;
+  height: 5px;
+}
+
+/* Transparent track, so the bar reads as a mark ON the panel rather than as a
+   channel cut into it — a filled track looks like a UI component bolted on,
+   which is exactly the impression being fixed. */
+#shop-list::-webkit-scrollbar-track,
+#adventure-body::-webkit-scrollbar-track,
+#slot-picker::-webkit-scrollbar-track,
+#prestige-reveal::-webkit-scrollbar-track,
+#stats-panel::-webkit-scrollbar-track,
+.team-roster::-webkit-scrollbar-track,
+.shop-list-team .team-detail::-webkit-scrollbar-track,
+.ledger-panel::-webkit-scrollbar-track,
+.adv-codex::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#shop-list::-webkit-scrollbar-thumb,
+#adventure-body::-webkit-scrollbar-thumb,
+#slot-picker::-webkit-scrollbar-thumb,
+#prestige-reveal::-webkit-scrollbar-thumb,
+#stats-panel::-webkit-scrollbar-thumb,
+.team-roster::-webkit-scrollbar-thumb,
+.shop-list-team .team-detail::-webkit-scrollbar-thumb,
+.ledger-panel::-webkit-scrollbar-thumb,
+.adv-codex::-webkit-scrollbar-thumb {
+  background: rgba(var(--text-bright-rgb), 0.26);
+  border-radius: 3px;
+}
+
+#shop-list::-webkit-scrollbar-thumb:hover,
+#adventure-body::-webkit-scrollbar-thumb:hover,
+#slot-picker::-webkit-scrollbar-thumb:hover,
+#prestige-reveal::-webkit-scrollbar-thumb:hover,
+#stats-panel::-webkit-scrollbar-thumb:hover,
+.team-roster::-webkit-scrollbar-thumb:hover,
+.shop-list-team .team-detail::-webkit-scrollbar-thumb:hover,
+.ledger-panel::-webkit-scrollbar-thumb:hover,
+.adv-codex::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--text-bright-rgb), 0.45);
+}
+
+/* The corner where a horizontal and vertical bar would meet. Left unstyled it
+   renders as a small opaque system-grey square. */
+#shop-list::-webkit-scrollbar-corner,
+#adventure-body::-webkit-scrollbar-corner,
+#slot-picker::-webkit-scrollbar-corner,
+#prestige-reveal::-webkit-scrollbar-corner,
+#stats-panel::-webkit-scrollbar-corner,
+.team-roster::-webkit-scrollbar-corner,
+.shop-list-team .team-detail::-webkit-scrollbar-corner,
+.ledger-panel::-webkit-scrollbar-corner,
+.adv-codex::-webkit-scrollbar-corner {
+  background: transparent;
 }

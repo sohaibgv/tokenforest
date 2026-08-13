@@ -186,8 +186,51 @@ export function createTeamPanel(game: Game): TeamPanel {
   let selectedMemberId: string | null = null;
   let mounted: HTMLElement | null = null;
 
+  /** Everything render() actually reads, as a comparable string.
+   *
+   * The shop rebuilds its list on a 1s interval. For most tabs that is
+   * harmless, but this panel is a two-pane layout with a scrolling roster, and
+   * a rebuild throws away the scroll position along with the DOM — scroll down
+   * the roster, wait a second, and it snaps back to the top. It is also the
+   * click-eating pattern this codebase has been bitten by before: a tile
+   * replaced between mousedown and mouseup never receives the click.
+   *
+   * So the panel only rebuilds when something it displays has actually
+   * changed. */
+  function renderKey(): string {
+    const s = game.save;
+    return [
+      selectedMemberId,
+      s.wood,
+      s.inventory.length,
+      s.prestigeLevel,
+      ...s.team.map(
+        (m) =>
+          `${m.id}:${m.defId}:${m.level}:${m.xp ?? 0}:${m.currentHp}/${m.maxHp}:${m.status}:` +
+          `${m.equipped.woodchopping ?? ""},${m.equipped.adventuring ?? ""},` +
+          `${m.equipped.utility ?? ""},${m.equipped.utility2 ?? ""}`,
+      ),
+      ...(Object.keys(s.shards) as (keyof typeof s.shards)[]).map((r) => `${r}${s.shards[r]}`),
+    ].join("|");
+  }
+  let lastKey: string | null = null;
+
   function render(listEl: HTMLElement): void {
     mounted = listEl;
+
+    const key = renderKey();
+    // A repaint that would produce identical DOM is skipped outright. This is
+    // what stops the 1s refresh from resetting the roster's scroll.
+    if (key === lastKey && listEl.querySelector(".team-layout")) return;
+    lastKey = key;
+
+    // When a rebuild IS warranted (a purchase, a level-up, a new pull), the
+    // roster's scroll position is carried across it. Losing your place in the
+    // list every time you equip something is the same annoyance in a smaller
+    // costume.
+    const prevRoster = listEl.querySelector(".team-roster");
+    const prevScroll = prevRoster ? prevRoster.scrollTop : 0;
+
     listEl.replaceChildren();
     const s = game.save;
     // Heal-All stays OUTSIDE the two-pane layout, full-width, above it —
@@ -232,6 +275,8 @@ export function createTeamPanel(game: Game): TeamPanel {
     }
 
     listEl.append(layout);
+    // Restore after append — scrollTop on a detached node is silently dropped.
+    if (prevScroll > 0) roster.scrollTop = prevScroll;
   }
 
   /** Re-renders, then briefly flashes the detail panel whose identity

@@ -257,6 +257,13 @@ export function initShop(game: Game): void {
       document.createTextNode(` amber: ${abbrev(s.amber)}`),
     );
 
+    // The Team tab is the one panel that manages its own vertical space: its
+    // roster column scrolls independently of the detail pane beside it, which
+    // only works if the layout is bounded by the list's real height rather
+    // than by a guessed pixel figure. The class lets styles.css set that up
+    // without turning #shop-list into a flex column for every other tab,
+    // whose flat card lists would then shrink to fit instead of scrolling.
+    listEl.classList.toggle("shop-list-team", tab === "team");
     if (tab === "team") {
       teamPanel.render(listEl);
       return;
