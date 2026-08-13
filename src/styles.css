@@ -470,12 +470,27 @@ body.shop-takeover #shop {
   color: var(--text-primary);
 }
 
+/* Seven tabs, one line. There was no container rule at all, so the buttons
+   simply flowed and wrapped — at the shop's own 560px takeover width "Style"
+   dropped to a second row and the header grew from 34px to 47px, which is
+   13px stolen from the panel below on every single tab. Tight padding plus
+   nowrap keeps them on one line; the scroll is the escape hatch at the 280px
+   window minimum, where seven tabs genuinely do not fit. */
+#shop-tabs {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+
 #shop-tabs button {
   background: none;
   border: none;
   color: var(--text-secondary);
   font: inherit;
-  padding: var(--pad-btn-compact);
+  padding: 2px 5px;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -1203,207 +1218,208 @@ body.shop-takeover #shop {
   min-height: 0;
 }
 
-/* Roster column: just wide enough for a tile plus a little padding.
-   Rosters have no upper bound (every gacha worker pull pushes a new
-   member — see gacha.ts's save.team.push, no MAX_WOODCUTTERS-style cap),
-   so this scrolls independently of the detail panel.
+/* Roster column.
+   Wide enough to carry a portrait, a name, a level and a stat line, because
+   that is what choosing between forty workers actually requires. It used to be
+   60px — a strip of 40px tiles with two 21x13px arrows stacked in the corner
+   of each, which was 18 of the screen's 47 buttons and unreadable besides.
 
-   It used to be capped at a flat `max-height: 320px`, which was taller than
-   the 251px #shop-list it lives inside at the shop takeover's own window size.
-   The roster hung out of the bottom of its parent and BOTH scrolled, so which
-   list moved depended on where the pointer happened to be. Bounded by the
-   layout now instead of by a guessed number, so it cannot outgrow its
-   container at any window size. */
+   Rosters have no upper bound (every duplicate pull now pushes a member — see
+   gacha.ts), so this scrolls independently of the pane beside it, bounded by
+   the layout rather than by a guessed pixel height. */
 .team-roster {
-  flex: 0 0 60px;
+  flex: 0 0 42%;
+  max-width: 190px;
   display: flex;
   flex-direction: column;
-  gap: var(--gap-sm);
+  gap: 2px;
   max-height: 100%;
   /* A floor so the column can never disappear. Squeezing the window far enough
      drives the layout's height toward zero, and a roster rendered at 0px is a
-     Team tab with no team in it. Below this the list scrolls instead — a worse
-     experience than the roomy case, but a working one. */
+     Team tab with no team in it. */
   min-height: 110px;
   overflow-y: auto;
-  /* No padding-right. It existed to keep tiles clear of the platform's own
-     scrollbar; the styled bar below is 7px and sits in the same place, so
-     reserving another 2px on top just narrows the tiles for nothing. This is
-     the app's narrowest scroll region, and the tiles fill its width, so every
-     pixel here shows. */
+  padding-right: 2px;
 }
 
-/* The detail pane scrolls on its own too, rather than stretching the layout —
-   a long member card must not push the roster's scroll region off screen. */
-.shop-list-team .team-detail {
-  max-height: 100%;
-  overflow-y: auto;
+/* Tier heading. The roster is grouped rather than ordered because with
+   duplicates stacking up, "which tier am I closest to merging" is the question
+   the list is actually asked — and a flat list of forty names answers nothing.
+   Sticky so the heading you are under stays legible while you scroll past a
+   long tier. */
+.team-group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 2px 2px;
+  background: var(--bg-panel);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
-.team-tile {
+.team-stars {
+  letter-spacing: -1px;
+  font-size: 9px;
+}
+
+.team-row {
   position: relative;
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 4px;
-  background: rgba(var(--text-bright-rgb), 0.03);
-  border: 1px solid var(--bg-inset);
+  gap: 5px;
+  padding: 3px 4px;
+  /* The tier colour lives on a left edge rather than a full border: it has to
+     read at a glance down a scrolling column, and a box outline around every
+     row turns the list into a grid of cells. */
+  border-left: 3px solid transparent;
   border-radius: var(--radius-sm);
+  background: rgba(var(--text-bright-rgb), 0.03);
   cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color 0.1s ease, border-color 0.1s ease;
 }
 
-.team-tile:hover {
-  background: rgba(var(--text-bright-rgb), 0.06);
+.team-row:hover {
+  background: rgba(var(--text-bright-rgb), 0.09);
 }
 
-/* Selected-tile state — same classList.toggle("selected", ...) idiom the
-   rest of the UI uses for a single-choice highlight (mirrors .team-slots
-   button.active's toggle("active", ...) pattern just below). */
-.team-tile.selected {
-  border-color: var(--accent-green);
-  background: rgba(var(--text-bright-rgb), 0.08);
+.team-row.selected {
+  background: rgba(var(--accent-green-rgb), 0.18);
 }
 
-/* Same persistent epic/legendary chrome convention as .team-card-epic/
-   -legendary below, just a left-edge accent sized for the compact tile. */
-.team-tile-epic {
-  border-left: 2px solid var(--rarity-epic);
+.team-row.nested {
+  margin-left: 10px;
 }
 
-.team-tile-legendary {
-  border-left: 2px solid var(--accent-gold);
+.team-row.rarity-border-common { border-left-color: var(--rarity-common); }
+.team-row.rarity-border-rare { border-left-color: var(--rarity-rare); }
+.team-row.rarity-border-epic { border-left-color: var(--rarity-epic); }
+.team-row.rarity-border-legendary { border-left-color: var(--accent-gold); }
+
+.team-row-portrait-img {
+  flex: 0 0 auto;
+  image-rendering: pixelated;
 }
 
-.team-tile-portrait {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-/* Small level badge, top-left corner of the tile. */
-.team-tile-level {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  font-size: 8px;
-  font-weight: 700;
-  line-height: 1;
-  padding: 1px 3px;
-  background: var(--btn-bg);
-  color: var(--text-bright);
-  border-radius: var(--radius-sm);
-}
-
-/* .status-dot, corner-pinned instead of inline next to the name (there's no
-   name on the compact tile). */
-.team-tile-status {
-  position: absolute;
-  bottom: 2px;
-  right: 2px;
-  margin-right: 0;
-}
-
-/* Compact stacked ▲/▼ (reuses .team-reorder's flex/gap + button styling
-   below), corner-pinned so reordering doesn't require selecting the tile
-   first. */
-.team-tile-reorder {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.team-tile-reorder button {
-  font-size: 7px;
-  line-height: 1;
-  padding: 1px 2px;
-}
-
-/* Detail panel: the one selected member's full card — larger portrait,
-   name/level/rarity, HP bar, atk/hp line, equip-slot chips, and (when a
-   slot is toggled open) the item picker + level-up button. Takes the rest
-   of the layout's width since the slot chips and item-picker rows need
-   real room. */
-.team-detail {
-  flex: 1;
+.team-row-text {
+  flex: 1 1 auto;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap-sm);
-  padding: 8px;
-  background: rgba(var(--text-bright-rgb), 0.03);
-  border: 1px solid var(--bg-inset);
-  border-radius: var(--radius-sm);
 }
 
-.team-detail-head {
-  font-size: 12px;
-}
-
-.team-detail-portrait {
+.team-row-name {
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 4px 0;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* Persistent (subtler than the one-time gacha pull-reveal celebration)
-   chrome for epic/legendary team members, so an owned rare pull keeps
-   reading as special after the reveal animation ends. */
-.team-card-epic {
-  border-left: 2px solid var(--rarity-epic);
-  padding-left: 6px;
+.team-row-stat {
+  font-size: 9px;
 }
 
-.team-card-epic .team-card-head > div:first-child {
-  text-shadow: 0 0 5px rgba(var(--rarity-epic-rgb), 0.5);
+/* "Something better is in your bag." Green, small, and on the row itself, so
+   the roster answers "who needs attention" without opening anyone. */
+.team-row-upgrade {
+  color: var(--accent-green);
+  font-size: 9px;
+  flex: 0 0 auto;
 }
 
-.team-card-legendary {
-  border-left: 2px solid var(--accent-gold);
-  padding-left: 6px;
+/* The stack count is its own button because it does its own job: the row
+   selects the worker, this opens the pile. Full row height so it is a real
+   target rather than a 13px sliver. */
+.team-row-count {
+  flex: 0 0 auto;
+  align-self: stretch;
+  min-width: 24px;
+  background: rgba(var(--text-bright-rgb), 0.1);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
 }
 
-.team-card-legendary .team-card-head > div:first-child {
-  text-shadow: 0 0 6px rgba(var(--accent-gold-rgb), 0.6);
+.team-row-count:hover {
+  background: rgba(var(--text-bright-rgb), 0.22);
 }
 
-.team-card-head {
+/* Altar states. While the pedestal is open the roster stops being a list of
+   workers and becomes a list of ingredients, so it has to say plainly which
+   ones the altar will take. */
+.team-row.altar-eligible {
+  border-left-color: var(--accent-green);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-green-rgb), 0.4);
+}
+
+.team-row.altar-seated {
+  opacity: 0.45;
+}
+
+/* Head bar: the roster-wide actions, in one place. Auto-equip used to sit in
+   the Heal All row, which is a row about healing. */
+.team-headbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11px;
-}
-
-.team-card-head > div:first-child {
-  font-weight: 600;
-}
-
-.team-reorder {
-  display: flex;
   gap: var(--gap-sm);
+  padding-bottom: 2px;
 }
 
-.team-reorder button {
+.team-headbar-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.team-headbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.team-headbar-actions button {
   background: var(--btn-bg);
   border: none;
   border-radius: var(--radius-sm);
   color: var(--text-bright);
-  font-size: 9px;
-  padding: var(--pad-btn-compact);
+  font: inherit;
+  font-size: 10px;
+  padding: 4px 8px;
   cursor: pointer;
 }
 
-.team-reorder button:hover:not(:disabled) {
+.team-headbar-actions button:hover:not(:disabled) {
   background: var(--btn-bg-hover);
 }
 
-.team-reorder button:disabled {
+.team-headbar-actions button:disabled {
   background: var(--bg-inset);
   color: var(--text-disabled);
   cursor: default;
+}
+
+.team-altar-btn.active {
+  background: var(--rarity-epic);
+  color: var(--text-on-accent);
+}
+
+/* The detail pane scrolls on its own rather than stretching the layout — a
+   long member card must not push the roster's scroll region off screen. */
+.shop-list-team .team-detail {
+  max-height: 100%;
+  overflow-y: auto;
 }
 
 .hp-bar {
@@ -1444,16 +1460,113 @@ body.shop-takeover #shop {
   }
 }
 
-.team-actions,
-.team-slots {
+/* The member sheet's body scrolls, not the whole pane — the head stays put so
+   you always know whose card you are reading. */
+.team-detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.team-detail-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+}
+
+/* Portrait beside the vitals rather than above them. Stacked, the portrait
+   block was 440x83px of empty space in a pane that then had to scroll for the
+   gear rows. */
+.team-detail-body > .team-detail-portrait {
+  flex: 0 0 auto;
+}
+
+.team-vitals {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Gear as rows, not chips. The chips were icon-only: what was equipped read as
+   a coloured dot and whether anything better existed read as a bare "▲",
+   neither of which can be understood without hovering each one in turn. */
+.team-gear {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.team-gear-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  background: rgba(var(--text-bright-rgb), 0.04);
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.1s ease;
+}
+
+.team-gear-row:hover {
+  background: rgba(var(--text-bright-rgb), 0.1);
+}
+
+.team-gear-row.has-upgrade {
+  border-left-color: var(--accent-green);
+}
+
+.team-gear-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.team-gear-label {
+  font-size: 9px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.team-gear-value {
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.team-gear-empty {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.team-slot-upgrade {
+  color: var(--accent-green);
+  font-size: 9px;
+}
+
+/* Pinned to the foot of the member sheet, outside its scrolling body — these
+   are the two things you came to the pane to do, and they must not be the
+   first thing that scrolls out of reach. */
+.team-actions {
   display: flex;
   gap: var(--gap-sm);
   flex-wrap: wrap;
+  flex: 0 0 auto;
   margin-top: 3px;
+  padding-top: 4px;
+  border-top: 1px solid var(--bg-inset);
 }
 
-.team-actions button,
-.team-slots button {
+.team-actions button {
   background: var(--btn-bg);
   border: none;
   border-radius: var(--radius-sm);
@@ -1464,8 +1577,7 @@ body.shop-takeover #shop {
   cursor: pointer;
 }
 
-.team-actions button:hover:not(:disabled),
-.team-slots button:hover {
+.team-actions button:hover:not(:disabled) {
   background: var(--btn-bg-hover);
 }
 
@@ -1475,63 +1587,518 @@ body.shop-takeover #shop {
   cursor: default;
 }
 
-/* Bigger padding than the shared .team-actions/.team-slots rule above, since
-   the chip's icon now renders at 3x scale (24x24) and needs breathing room
-   instead of the tight 2px/6px text-button padding. */
-.team-slots button {
-  display: flex;
-  align-items: center;
-  padding: 4px 8px;
+/* Back chevron shared by the picker and the altar — both REPLACE the member
+   sheet rather than appending under it, so both need a way home. */
+.pane-back {
+  background: none;
+  border: none;
+  color: var(--text-bright);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 6px 0 0;
+  cursor: pointer;
 }
 
-.team-slots button.active {
-  background: var(--accent-green);
-  color: var(--text-on-accent);
+.pane-back:hover {
+  color: var(--accent-green);
+}
+
+.item-picker-pane {
+  min-height: 0;
 }
 
 .item-picker {
   display: flex;
   flex-direction: column;
-  gap: var(--gap-sm);
-  margin-top: 4px;
-  padding: 4px 6px;
-  background: var(--bg-panel);
-  border-radius: var(--radius-sm);
+  gap: 2px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
-.item-picker button {
+.item-row {
   display: flex;
   align-items: center;
+  gap: 6px;
+  background: rgba(var(--text-bright-rgb), 0.04);
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font: inherit;
+  font-size: 10px;
+  padding: 3px 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.item-row:hover {
+  background: rgba(var(--text-bright-rgb), 0.1);
+}
+
+.item-row-upgrade {
+  border-left-color: var(--accent-green);
+}
+
+/* An item currently on someone else. Still clickable — equipping it transfers
+   it — but dimmed and sorted last, because taking it costs a teammate. */
+.item-row-worn {
+  opacity: 0.6;
+}
+
+.item-row-unequip {
+  color: var(--text-secondary);
+}
+
+.item-row-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.item-row-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.item-row-delta {
+  display: flex;
+  gap: 6px;
+  font-size: 9px;
+}
+
+/* The whole point of the picker rewrite: what this item does to YOUR numbers,
+   not what its numbers are. The old rows printed the item's absolute stats,
+   which told the player nothing without holding the equipped item's stats in
+   their head — and printed one row per copy, so a real bag showed 21 rows for
+   8 distinct items. */
+.gear-delta.up {
+  color: var(--accent-green);
+}
+
+.gear-delta.down {
+  color: var(--danger);
+}
+
+.gear-delta.flat {
+  color: var(--text-secondary);
+}
+
+.item-picker-preview {
+  flex: 0 0 auto;
+  image-rendering: pixelated;
+}
+
+.item-picker-worn-tag {
+  color: var(--text-secondary);
+  font-style: italic;
+  font-size: 9px;
+  flex: 0 0 auto;
+}
+
+/* Altar mode flips the layout's axis. The pedestal is the widest thing this
+   panel ever draws and the shortest on patience: five sockets, a stat
+   comparison and two buttons do not fit in a 330px column beside a roster,
+   and what gave way was the sockets. Full width above, reserve strip below. */
+.team-layout.altar-mode {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.team-layout.altar-mode .team-roster {
+  flex: 0 0 auto;
+  max-width: none;
+  min-height: 0;
+  height: 74px;
+  max-height: 74px;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* Horizontal strips hide their bar — see the Scrollbars section; a bar under
+     an 80px row costs height this layout does not have. */
+  scrollbar-width: none;
+}
+
+.team-layout.altar-mode .team-roster::-webkit-scrollbar {
+  display: none;
+}
+
+/* Tier headings become vertical spines between the groups rather than rows
+   above them — the strip runs sideways, so a heading that stacks makes no
+   sense in it. */
+.team-layout.altar-mode .team-group {
+  position: static;
+  flex: 0 0 auto;
+  writing-mode: vertical-rl;
+  padding: 2px 1px;
+  font-size: 8px;
+  background: none;
+}
+
+.team-layout.altar-mode .team-row {
+  flex: 0 0 auto;
+  width: 84px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.team-layout.altar-mode .team-row.nested {
+  margin-left: 0;
+}
+
+.team-layout.altar-mode .team-row-stat {
+  font-size: 8px;
+}
+
+.team-layout.altar-mode .fusion-altar {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Fusion Altar ---------------------------------------------------------- */
+
+.fusion-altar {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: rgba(var(--text-bright-rgb), 0.03);
+  border: 1px solid var(--bg-inset);
+  border-radius: var(--radius-sm);
+  max-height: 100%;
+  /* The PANE does not scroll; its middle does. Head and actions are pinned so
+     the Merge button — the entire reason this screen exists — is never the
+     thing that falls off the bottom edge. */
+  overflow: hidden;
+}
+
+/* Head rows for the altar and the picker put the back chevron NEXT to the
+   title, not at the opposite end of the row — .team-card-head's
+   space-between is right for "name ... class tag" and wrong for a back
+   button, which belongs beside what it goes back from. */
+.fusion-altar > .team-card-head,
+.item-picker-pane > .team-card-head {
+  justify-content: flex-start;
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.fusion-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+/* Four sockets orbiting a fifth, laid out on a 3x3 grid: corners for the
+   sacrifices, middle for the worker being raised. A grid rather than absolute
+   positioning so it reflows on its own down to the 280px window minimum
+   instead of needing a second hand-placed layout. */
+.fusion-pedestal {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, auto);
+  place-items: center;
+  gap: 1px;
+  /* Capped and centred: stretched across the full pane the four sacrifices sat
+     at the corners of a wide rectangle, which reads as a table, not a ring. */
+  width: 100%;
+  max-width: 300px;
+  margin: 0 auto;
+  padding: 1px 2px;
+  border-radius: var(--radius-lg);
+  /* The altar's own light. Warms as the pedestal fills. */
+  background: radial-gradient(
+    ellipse at center,
+    rgba(var(--rarity-epic-rgb), 0.16) 0%,
+    rgba(var(--text-bright-rgb), 0.05) 55%,
+    transparent 78%
+  );
+  transition: background 0.3s ease;
+}
+
+.fusion-pedestal.ready {
+  background: radial-gradient(
+    ellipse at center,
+    rgba(var(--accent-gold-rgb), 0.3) 0%,
+    rgba(var(--rarity-epic-rgb), 0.16) 50%,
+    transparent 78%
+  );
+}
+
+/* `display: contents` so the four sockets become grid items of the pedestal
+   itself and can be placed at its corners — the wrapper exists only to keep
+   the markup honest about what the four are. */
+.fusion-ring {
+  display: contents;
+}
+
+.fusion-socket {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 36px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  cursor: default;
+}
+
+/* Empty sockets are dashed and dim — visibly waiting for something, rather
+   than looking like a component that failed to load. */
+.fusion-socket:not(.filled) {
+  border: 1px dashed rgba(var(--text-bright-rgb), 0.35);
+}
+
+.fusion-socket.filled {
+  border: 1px solid rgba(var(--text-bright-rgb), 0.2);
+  background: rgba(var(--text-bright-rgb), 0.05);
+}
+
+.fusion-socket-plus {
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.fusion-socket-sacrifice:nth-child(1) { grid-area: 1 / 1; }
+.fusion-socket-sacrifice:nth-child(2) { grid-area: 1 / 3; }
+.fusion-socket-sacrifice:nth-child(3) { grid-area: 3 / 1; }
+.fusion-socket-sacrifice:nth-child(4) { grid-area: 3 / 3; }
+
+.fusion-socket-target {
+  grid-area: 2 / 2;
+  min-width: 46px;
+  min-height: 40px;
+  padding: 1px;
+  border-width: 2px;
+}
+
+.fusion-socket-target.filled {
+  border-color: var(--accent-gold);
+  box-shadow: 0 0 10px rgba(var(--accent-gold-rgb), 0.35);
+}
+
+.fusion-socket-img {
+  image-rendering: pixelated;
+}
+
+.fusion-who {
+  font-weight: 700;
+}
+
+.fusion-socket-clear {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  line-height: 1;
+  background: var(--bg-panel);
+  border: 1px solid rgba(var(--text-bright-rgb), 0.3);
+  border-radius: 50%;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.fusion-socket-clear:hover {
+  color: var(--danger);
+}
+
+.fusion-preview {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 6px;
+  background: rgba(var(--text-bright-rgb), 0.04);
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+}
+
+.fusion-tier-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-weight: 700;
+}
+
+/* Both stat comparisons on one line. As four stacked rows the preview was
+   63px — more than a third of everything the altar had to work with. */
+.fusion-stat-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.fusion-arrow {
+  color: var(--text-secondary);
+}
+
+.fusion-stat-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fusion-stat-label {
+  color: var(--text-secondary);
+  font-size: 9px;
+}
+
+.fusion-stat-after {
+  font-weight: 700;
+}
+
+.fusion-refund {
+  font-size: 9px;
+  font-weight: 400;
+  margin-left: auto;
+}
+
+.fusion-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--gap-sm);
+  padding-top: 4px;
+  border-top: 1px solid var(--bg-inset);
+}
+
+.fusion-actions button {
+  flex: 1 1 auto;
   background: var(--btn-bg);
   border: none;
   border-radius: var(--radius-sm);
   color: var(--text-bright);
   font: inherit;
   font-size: 10px;
-  padding: var(--pad-btn-compact);
+  padding: 5px 8px;
   cursor: pointer;
-  text-align: left;
 }
 
-/* Weapon/charm preview prepended to each item-picker row (src/ui/team.ts's
-   renderItemPicker) — a little breathing room before the rarity dot/text so
-   the tiny pixel art doesn't crowd directly against them. */
-.item-picker-preview {
-  margin-right: 6px;
-}
-
-.item-picker button:hover {
+.fusion-actions button:hover:not(:disabled) {
   background: var(--btn-bg-hover);
 }
 
-/* Flags an owned item's picker entry as currently equipped on a DIFFERENT
-   team member — clicking it still works (Game.equipItem now safely
-   transfers gear off whoever had it, see unequipInstanceEverywhere), this
-   is purely so the player sees the swap coming instead of it happening
-   silently. */
-.item-picker-worn-tag {
-  color: var(--text-secondary);
-  font-style: italic;
+.fusion-actions button:disabled {
+  background: var(--bg-inset);
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+/* Fusion animation ------------------------------------------------------ */
+
+.fusion-fx-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+
+/* One sparkle chip. The vector is per-chip (--dx/--dy set inline by
+   ui/fusion-fx.ts) so the keyframes stay static — the same trick the gacha
+   reveal's sparkles use, with the direction reversed: those scatter outward
+   from a revealed card, these fall inward onto the pedestal. */
+.fusion-spark {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  border-radius: 1px;
+  background: var(--accent-gold-light);
+  animation: fusion-converge 560ms ease-in forwards;
+}
+
+.fusion-spark-rare { background: var(--rarity-rare); }
+.fusion-spark-epic { background: var(--rarity-epic); }
+/* Legendary uses --accent-gold, never --rarity-legendary: that token is
+   #815c07, a dark brown that reads as a smudge against the panel rather than
+   as light. The gacha's legendary sparkles made the same call. */
+.fusion-spark-legendary { background: var(--accent-gold-light); }
+
+@keyframes fusion-converge {
+  0% {
+    transform: translate(0, 0) scale(1);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(var(--dx), var(--dy)) scale(0.3);
+    opacity: 0;
+  }
+}
+
+/* A sacrifice on its way out. */
+.fusion-socket-sacrifice.dissolving {
+  animation: fusion-dissolve 620ms ease-in forwards;
+}
+
+@keyframes fusion-dissolve {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.75);
+  }
+}
+
+.fusion-socket-target.fusion-impact {
+  animation: fusion-bloom 420ms ease-out;
+}
+
+@keyframes fusion-bloom {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 rgba(var(--accent-gold-rgb), 0);
+  }
+  35% {
+    transform: scale(1.18);
+    box-shadow: 0 0 22px rgba(var(--accent-gold-rgb), 0.85);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 10px rgba(var(--accent-gold-rgb), 0.35);
+  }
+}
+
+/* The brief asked for a canvas camera shake. The roster is DOM and the canvas
+   is behind the shop overlay and not visible while this plays, so the panel
+   itself is what shakes — same felt impact, and it is the thing on screen. */
+.fusion-shake {
+  animation: fusion-shake 180ms ease-in-out 2;
+}
+
+@keyframes fusion-shake {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(-2px, 1px); }
+  75% { transform: translate(2px, -1px); }
+}
+
+/* Sockets stop responding while the merge plays, so a stray click during the
+   animation cannot re-seat a worker who is already gone. */
+.fusion-altar.fusing .fusion-socket-clear,
+.fusion-altar.fusing .fusion-actions button {
+  pointer-events: none;
 }
 
 /* Adventure overlay ----------------------------------------------------- */
@@ -4194,49 +4761,6 @@ button:active:not(:disabled) {
  *
  * Green, matching the accent the rest of the app already uses for "this is
  * available to you" — deliberately not gold, which is reserved for rarity. */
-/* NO border treatment on the tile.
-   `.team-tile.selected` already colours its border with --accent-green, so
-   marking upgrades the same way made "this member is selected" and "this
-   member has gear waiting" the same visual — and with a fresh roster, where
-   everyone has an upgrade, the whole column lit up and the selection was
-   impossible to find. The pip carries the meaning instead. */
-
-.team-tile-upgrade {
-  position: absolute;
-  /* Bottom-left is the tile's one free corner: the level badge holds
-     top-left, the priority arrows top-right, the status dot bottom-right.
-     The first attempt put this top-right, underneath the arrows. */
-  bottom: 2px;
-  left: 2px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--accent-green);
-  /* A ring against the tile so the pip stays visible on the epic/legendary
-     tiles, which already carry their own coloured chrome. */
-  box-shadow: 0 0 0 1px var(--bg-panel);
-  pointer-events: none;
-}
-
-.team-slots button.has-upgrade {
-  border-color: var(--accent-green);
-}
-
-.team-slot-upgrade {
-  margin-left: 2px;
-  font-size: 8px;
-  line-height: 1;
-  color: var(--accent-green);
-}
-
-/* Picker rows are sorted best-first, so the upgrades cluster at the top and
-   this tag confirms why they are there. */
-.item-picker-upgrade-tag {
-  color: var(--accent-green);
-  font-size: 10px;
-  font-weight: 600;
-}
-
 .item-picker button.item-row-upgrade {
   border-left: 2px solid var(--accent-green);
 }

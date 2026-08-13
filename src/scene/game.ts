@@ -5695,6 +5695,17 @@ export class Game {
     return true;
   }
 
+  /** Ordering without the re-equip. The roster panel groups its display by
+   * tier, so an arbitrary hand-picked order is not representable there any
+   * more — this is the one control that sets what the order actually means:
+   * index 0 is the first member assigned to a live chopping session. */
+  sortRoster(): boolean {
+    const s = this.save;
+    sortRosterByPower(s.team, s.inventory, s.prestigeLevel);
+    scheduleSave(s, true);
+    return true;
+  }
+
   buyBoost(id: string): boolean {
     const s = this.save;
     const spec = BOOSTS.find((b) => b.id === id);

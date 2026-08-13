@@ -6,6 +6,7 @@ import {
   ITEM_EFFECT_LABELS,
   itemDefById,
   PROVISIONS,
+  RARITY_ORDER,
   WORKER_CLASS_INFO,
   WORKER_DEFS_BY_ID,
   type ItemDef,
@@ -30,17 +31,21 @@ import {
 import { BODY_SPRITE_W, drawHeldWeapon, WEAPON_APPEARANCE } from "../scene/weapons";
 import {
   effectiveAtk,
+  effectiveMaxHp,
+  effectiveRarity,
   equippedItem,
   levelUpCost,
   MAX_LEVEL,
   memberClass,
+  starCount,
   xpToNext,
   bestUpgradeFor,
-  itemScore,
   type ItemSlot,
   type Rarity,
   type TeamMemberSave,
 } from "../team";
+import { FUSION_BLOCKER_COPY, FUSION_FODDER_COUNT, type FusionPlan } from "../fusion";
+import { playFusion } from "./fusion-fx";
 import { pixelIcon, pixelIconComposite } from "./pixel-icon";
 
 /** Compact real-number summary of an item's stats, for the equip picker and
@@ -179,14 +184,67 @@ export function requestSelectMember(id: string): void {
   pendingSelectMemberId = id;
 }
 
+/** What the right-hand pane is showing. The picker and the altar REPLACE the
+ * member sheet rather than appending below it — the old picker appended, which
+ * put 822px of content in a 288px pane and meant every equip decision started
+ * with a scroll past the portrait, the HP bar, the XP bar and the level
+ * button. */
+type PaneMode = "sheet" | "picker" | "altar";
+
+/** Roster rows are grouped by tier and collapse identical workers into one
+ * stacked row. A stack is one character at one merge rank — two Rooks at rank
+ * 0 stack, a Rook at rank 1 does not stack with them, because they are no
+ * longer the same thing. */
+interface RosterStack {
+  key: string;
+  members: TeamMemberSave[];
+  rarity: Rarity;
+}
+
 export function createTeamPanel(game: Game): TeamPanel {
-  const openSlot = new Map<string, ItemSlot | "utility2" | null>();
-  // Which single roster member's detail panel is showing on the right —
-  // same per-render-closure state pattern as `openSlot` above, just a lone
-  // id instead of a per-member map since only one member can be selected at
-  // a time (barracks roster/detail split, §two-pane layout).
+  let mode: PaneMode = "sheet";
+  let openSlot: ItemSlot | "utility2" | null = null;
   let selectedMemberId: string | null = null;
   let mounted: HTMLElement | null = null;
+  /** Stacks the player has opened to see the individual copies inside. */
+  const expanded = new Set<string>();
+
+  // --- altar state ---
+  let altarTarget: string | null = null;
+  let altarFodder: string[] = [];
+  /** Set while a merge animation owns the pedestal — render() must not tear
+   * the DOM out from under it (the same rule ui/gacha.ts follows for its reel
+   * with `revealing`). */
+  let fusing = false;
+
+  function tierIndex(r: Rarity): number {
+    return RARITY_ORDER.indexOf(r);
+  }
+
+  /** Every roster member, grouped into stacks, highest tier first and
+   * strongest first within a tier. This is display order only — the ACTUAL
+   * roster order (which decides who gets picked for a live chopping session)
+   * is save.team's own order, set by the Sort action. */
+  function rosterStacks(): RosterStack[] {
+    const s = game.save;
+    const byKey = new Map<string, RosterStack>();
+    for (const m of s.team) {
+      const rarity = effectiveRarity(m);
+      const key = `${m.defId}:${m.starRank ?? 0}`;
+      const stack = byKey.get(key);
+      if (stack) stack.members.push(m);
+      else byKey.set(key, { key, members: [m], rarity });
+    }
+    const stacks = [...byKey.values()];
+    for (const st of stacks) st.members.sort((a, b) => b.level - a.level || a.id.localeCompare(b.id));
+    stacks.sort(
+      (a, b) =>
+        tierIndex(b.rarity) - tierIndex(a.rarity) ||
+        b.members[0].level - a.members[0].level ||
+        a.key.localeCompare(b.key),
+    );
+    return stacks;
+  }
 
   /** Everything render() actually reads, as a comparable string.
    *
@@ -198,26 +256,26 @@ export function createTeamPanel(game: Game): TeamPanel {
    * replaced between mousedown and mouseup never receives the click.
    *
    * So the panel only rebuilds when something it displays has actually
-   * changed. */
+   * changed. EVERY piece of panel state belongs here, not just the saved
+   * ones — `openSlot` was missing for a long time, and the symptom was that
+   * clicking a gear slot did nothing at all: the handler flipped the state,
+   * called render(), and render() saw an unchanged key and returned. It only
+   * appeared when the wood counter happened to tick a second later. */
   function renderKey(): string {
     const s = game.save;
     return [
+      mode,
+      openSlot ?? "",
       selectedMemberId,
-      // The open gear slot MUST be in the key. It is panel state, not save
-      // state, which is exactly why it was missed — and the symptom was that
-      // clicking a gear slot did nothing at all: the handler flipped
-      // `openSlot`, called render(), and render() saw an unchanged key and
-      // returned without building the picker. It only appeared when something
-      // else moved the key, in practice the wood counter ticking a second
-      // later while chopping. Anything the panel DISPLAYS belongs here,
-      // whether or not it is persisted.
-      selectedMemberId ? (openSlot.get(selectedMemberId) ?? "") : "",
+      altarTarget ?? "",
+      altarFodder.join(","),
+      [...expanded].sort().join(","),
       s.wood,
       s.inventory.length,
       s.prestigeLevel,
       ...s.team.map(
         (m) =>
-          `${m.id}:${m.defId}:${m.level}:${m.xp ?? 0}:${m.currentHp}/${m.maxHp}:${m.status}:` +
+          `${m.id}:${m.defId}:${m.level}:${m.xp ?? 0}:${m.starRank ?? 0}:${m.currentHp}/${m.maxHp}:${m.status}:` +
           `${m.equipped.woodchopping ?? ""},${m.equipped.adventuring ?? ""},` +
           `${m.equipped.utility ?? ""},${m.equipped.utility2 ?? ""}`,
       ),
@@ -226,57 +284,57 @@ export function createTeamPanel(game: Game): TeamPanel {
   }
   let lastKey: string | null = null;
 
+  function repaint(): void {
+    if (mounted) render(mounted);
+  }
+
   function render(listEl: HTMLElement): void {
     mounted = listEl;
+    if (fusing) return;
 
     const key = renderKey();
-    // A repaint that would produce identical DOM is skipped outright. This is
-    // what stops the 1s refresh from resetting the roster's scroll.
     if (key === lastKey && listEl.querySelector(".team-layout")) return;
     lastKey = key;
 
-    // When a rebuild IS warranted (a purchase, a level-up, a new pull), the
-    // roster's scroll position is carried across it. Losing your place in the
-    // list every time you equip something is the same annoyance in a smaller
-    // costume.
     const prevRoster = listEl.querySelector(".team-roster");
     const prevScroll = prevRoster ? prevRoster.scrollTop : 0;
 
     listEl.replaceChildren();
     const s = game.save;
-    // Heal-All stays OUTSIDE the two-pane layout, full-width, above it —
-    // it's an action, not a roster entry.
-    listEl.append(renderHealRow());
 
-    // An external "select this member" request (see requestSelectMember)
-    // wins over both the remembered selection and the default-to-first
-    // fallback below — consumed exactly once, so a plain re-render later
-    // doesn't keep fighting the player's own subsequent clicks.
     if (pendingSelectMemberId && s.team.some((m) => m.id === pendingSelectMemberId)) {
       selectedMemberId = pendingSelectMemberId;
+      mode = "sheet";
     }
     pendingSelectMemberId = null;
 
-    // Default to the first roster member on initial render, and fall back
-    // to the first member again if the previously-selected one somehow
-    // vanished from the roster (defensive — team members are never removed
-    // today, but this keeps the panel from silently showing nothing).
     if (!selectedMemberId || !s.team.some((m) => m.id === selectedMemberId)) {
       selectedMemberId = s.team[0]?.id ?? null;
     }
+    // The altar's target can be merged away or sent on a run by another
+    // screen while this one sits open.
+    if (altarTarget && !s.team.some((m) => m.id === altarTarget)) altarTarget = null;
+    altarFodder = altarFodder.filter((id) => s.team.some((m) => m.id === id));
+
+    listEl.append(renderHeadBar());
 
     const layout = document.createElement("div");
     layout.className = "team-layout";
-
-    const roster = document.createElement("div");
-    roster.className = "team-roster";
-    s.team.forEach((member, i) => {
-      roster.append(renderRosterTile(member, i, s.team.length, member.id === selectedMemberId));
-    });
-    layout.append(roster);
+    // In altar mode the two panes swap axis: the pedestal takes the full width
+    // and the roster becomes a horizontal reserve strip beneath it. Side by
+    // side, the altar got ~330x108 — not enough for five sockets, a stat
+    // preview and two buttons, and the sockets were the part that scrolled.
+    // The reserve is still the roster, still grouped, still clickable; it is
+    // just laid out the way the Muster screen lays out its bench.
+    layout.classList.toggle("altar-mode", mode === "altar");
+    layout.append(renderRoster());
 
     const selected = s.team.find((m) => m.id === selectedMemberId);
-    if (selected) {
+    if (mode === "altar") {
+      layout.append(renderAltar());
+    } else if (selected && mode === "picker" && openSlot) {
+      layout.append(renderItemPicker(selected, openSlot));
+    } else if (selected) {
       layout.append(renderDetail(selected));
     } else {
       const empty = document.createElement("div");
@@ -286,90 +344,96 @@ export function createTeamPanel(game: Game): TeamPanel {
     }
 
     listEl.append(layout);
-    // Restore after append — scrollTop on a detached node is silently dropped.
-    if (prevScroll > 0) roster.scrollTop = prevScroll;
+    const roster = layout.querySelector<HTMLElement>(".team-roster");
+    if (roster && prevScroll > 0) roster.scrollTop = prevScroll;
   }
 
-  /** Re-renders, then briefly flashes the detail panel whose identity
-   * survives the rebuild (found via its data-member-id) — a lightweight
-   * "that worked" confirmation for level-up/equip/unequip, since render()
-   * otherwise tears down and rebuilds the DOM node instantly with no
-   * visible feedback. Scoped to `.team-detail` specifically (rather than
-   * any `[data-member-id]`) since a roster tile for the same member also
-   * carries that attribute and sits earlier in the DOM. */
-  function renderAndFlash(listEl: HTMLElement, memberId: string): void {
-    render(listEl);
-    const panel = listEl.querySelector<HTMLElement>(`.team-detail[data-member-id="${memberId}"]`);
+  function flashPane(): void {
+    const panel = mounted?.querySelector<HTMLElement>(".team-detail, .fusion-altar");
     if (!panel) return;
     panel.classList.add("flash-pulse");
     panel.addEventListener("animationend", () => panel.classList.remove("flash-pulse"), { once: true });
   }
 
-  /** Inline shortcut for Trail Rations — otherwise the only way to heal a
-   * resting/injured member is Shop → Provisions → Trail Rations, with no
-   * pointer from here that that's even where to look. */
-  function renderHealRow(): HTMLElement {
-    const s = game.save;
-    const spec = PROVISIONS.find((p) => p.id === "trailRations")!;
-    const needsHeal = s.team.some((m) => m.currentHp < m.maxHp || m.status === "resting");
-    const affordable = s.wood >= spec.cost;
-
-    const el = document.createElement("div");
-    el.className = "shop-row";
-    const info = document.createElement("div");
-    info.className = "shop-info";
-    const name = document.createElement("div");
-    name.textContent = "Heal All";
-    const blurb = document.createElement("div");
-    blurb.className = "shop-sub";
-    blurb.textContent = `${spec.blurb} · ${abbrev(spec.cost)} wood`;
-    info.append(name, blurb);
-    el.append(info);
-
-    const btn = document.createElement("button");
-    btn.className = "btn-primary";
-    btn.textContent = "Heal";
-    btn.disabled = !needsHeal || !affordable;
-    btn.title = !needsHeal
-      ? "Everyone's already at full HP"
-      : !affordable
-        ? `Need ${abbrev(spec.cost - s.wood)} more wood`
-        : `Heal your whole roster to full HP for ${abbrev(spec.cost)} wood`;
-    btn.addEventListener("click", () => {
-      game.useTrailRations();
-      if (mounted) render(mounted);
-    });
-    el.append(btn);
-
-    // Optimize Gear: one-click greedy re-equip of the whole roster by
-    // priority order (see team.ts's optimizeEquipment) — the QoL answer to
-    // hand-shuffling items across a growing roster.
-    const optBtn = document.createElement("button");
-    optBtn.textContent = "Auto-equip";
-    // The label used to say "Optimize gear", which described half of what it
-    // does and none of what it costs — it also REORDERS the roster, and roster
-    // order decides who gets assigned to a live chopping session. Worth saying
-    // out loud before someone presses it.
-    optBtn.title =
-      "Sort the roster strongest-first, then hand out your best items in that order. Also changes who chops first.";
-    optBtn.addEventListener("click", () => {
-      game.optimizeGear();
-      if (mounted) render(mounted);
-    });
-    el.append(optBtn);
-    return el;
+  function renderAndFlash(): void {
+    repaint();
+    flashPane();
   }
 
-  /** Left column: one small "slot" tile per roster member — portrait,
-   * level badge, status dot, and compact corner ▲/▼ priority-reorder
-   * controls. Clicking anywhere else on the tile selects that member for
-   * the detail panel on the right (renderDetail). Reordering works
-   * straight from the tile, no selection required first — same
-   * game.reorderTeam(member.id, ...) call the old inline card buttons
-   * made, just relocated. */
-  /** Does this member have an unused upgrade for any slot? Drives the roster
-   * tile's marker, so the player can see WHICH members need attention without
-   * selecting each one in turn. */
+  // --- head bar -----------------------------------------------------------
+
+  /** Roster-wide actions, gathered in one bar instead of being scattered.
+   * Auto-equip used to live in the Heal All row, which is a row about
+   * healing. */
+  function renderHeadBar(): HTMLElement {
+    const s = game.save;
+    const bar = document.createElement("div");
+    bar.className = "team-headbar";
+
+    const title = document.createElement("div");
+    title.className = "team-headbar-title";
+    title.textContent = `Roster ${s.team.length}`;
+    bar.append(title);
+
+    const actions = document.createElement("div");
+    actions.className = "team-headbar-actions";
+
+    // Heal lives here rather than in a row of its own. As a `.shop-row` with a
+    // name, a blurb and a button it cost ~50px of column height to express one
+    // verb — and on a 480px panel that was the difference between the altar's
+    // pedestal fitting and the altar's pedestal scrolling.
+    const spec = PROVISIONS.find((p) => p.id === "trailRations")!;
+    const needsHeal = s.team.some((m) => m.currentHp < m.maxHp || m.status === "resting");
+    const healBtn = document.createElement("button");
+    healBtn.textContent = `Heal · ${abbrev(spec.cost)}`;
+    healBtn.disabled = !needsHeal || s.wood < spec.cost;
+    healBtn.title = !needsHeal
+      ? "Everyone's already at full HP"
+      : s.wood < spec.cost
+        ? `Need ${abbrev(spec.cost - s.wood)} more wood`
+        : `${spec.blurb} — ${abbrev(spec.cost)} wood`;
+    healBtn.addEventListener("click", () => {
+      game.useTrailRations();
+      repaint();
+    });
+
+    const sortBtn = document.createElement("button");
+    sortBtn.textContent = "Sort";
+    sortBtn.title =
+      "Order the roster strongest first. Roster order decides who is sent to a live chopping session.";
+    sortBtn.disabled = s.team.length < 2;
+    sortBtn.addEventListener("click", () => {
+      game.sortRoster();
+      repaint();
+    });
+
+    const autoBtn = document.createElement("button");
+    autoBtn.textContent = "Auto-equip";
+    autoBtn.title = "Sort the roster strongest-first, then hand out your best items in that order.";
+    autoBtn.disabled = s.team.length === 0;
+    autoBtn.addEventListener("click", () => {
+      game.optimizeGear();
+      repaint();
+    });
+
+    const altarBtn = document.createElement("button");
+    altarBtn.className = "team-altar-btn";
+    altarBtn.textContent = "✦ Altar";
+    altarBtn.title = "Fusion Altar — spend four workers of a tier to raise a fifth to the next one.";
+    altarBtn.classList.toggle("active", mode === "altar");
+    altarBtn.addEventListener("click", () => {
+      mode = mode === "altar" ? "sheet" : "altar";
+      openSlot = null;
+      repaint();
+    });
+
+    actions.append(healBtn, sortBtn, autoBtn, altarBtn);
+    bar.append(actions);
+    return bar;
+  }
+
+  // --- roster -------------------------------------------------------------
+
   function memberHasUpgrade(member: TeamMemberSave): boolean {
     const s = game.save;
     const slots: (ItemSlot | "utility2")[] = ["woodchopping", "adventuring", "utility"];
@@ -377,137 +441,177 @@ export function createTeamPanel(game: Game): TeamPanel {
     return slots.some((slot) => bestUpgradeFor(member, slot, s.inventory, s.team) !== null);
   }
 
-  function renderRosterTile(member: TeamMemberSave, index: number, total: number, selected: boolean): HTMLElement {
+  function portraitFor(member: TeamMemberSave, scale: number, className: string): HTMLImageElement {
     const s = game.save;
     const def = WORKER_DEFS_BY_ID[member.defId];
-    const rarity = def?.rarity ?? "common";
-
-    const tile = document.createElement("div");
-    tile.className = "team-tile";
-    tile.dataset.memberId = member.id;
-    if (rarity === "epic") tile.classList.add("team-tile-epic");
-    else if (rarity === "legendary") tile.classList.add("team-tile-legendary");
-    tile.classList.toggle("selected", selected);
-    // A dot in the corner for "this one has better gear waiting", so the
-    // roster answers "who needs attention" at a glance rather than requiring
-    // the player to click through every member to find out.
-    const hasUpgrade = memberHasUpgrade(member);
-    tile.classList.toggle("has-upgrade", hasUpgrade);
-    if (hasUpgrade) {
-      const pip = document.createElement("span");
-      pip.className = "team-tile-upgrade";
-      tile.append(pip);
-    }
-    tile.title = hasUpgrade
-      ? `${def?.name ?? member.defId} · Lv${member.level} — better gear available`
-      : `${def?.name ?? member.defId} · Lv${member.level}`;
-
-    // Woodchopping always shows a weapon (defaults to common-tier if
-    // nothing's equipped) — matches the on-canvas resolution rule in
-    // game.ts/woodcutter.ts, so the portrait never looks bare-handed.
+    // Body art is chosen by EFFECTIVE rarity, so a merged worker visibly
+    // changes tier rather than only changing a number.
+    const rarity = effectiveRarity(member);
     const weaponDef = equippedItem(member, "woodchopping", s.inventory);
     const weaponRarity: Rarity = weaponDef?.rarity ?? "common";
-    // Per-character accent (Part E) merged in on top of the world palette —
-    // same merge order as game.ts's own render sites, spread last so it can
-    // never get clobbered by the world tint (which only ever touches R/r,
-    // never the accent letters C/N/H/h/Y/y).
     const worldPalette = game.getWorkerPalette(s.worldIndex);
     const accent = def?.accent;
-    const portraitPalette = accent ? { ...(worldPalette ?? {}), ...accent } : worldPalette;
-    const portraitWrap = document.createElement("div");
-    portraitWrap.className = "team-tile-portrait";
-    portraitWrap.append(
-      memberPortrait(
-        rarity,
-        portraitPalette,
-        weaponRarity,
-        game.weaponPalette(s.worldIndex),
-        2,
-        "team-tile-portrait-img",
-      ),
-    );
-    tile.append(portraitWrap);
-
-    const levelBadge = document.createElement("span");
-    levelBadge.className = "team-tile-level";
-    levelBadge.textContent = `${member.level}`;
-    tile.append(levelBadge);
-
-    const statusDot = document.createElement("span");
-    statusDot.className = `status-dot team-tile-status ${member.status}`;
-    statusDot.title = member.status;
-    tile.append(statusDot);
-
-    // Compact stacked ▲/▼ in the tile's corner — reordering shouldn't
-    // require selecting the member first.
-    const reorder = document.createElement("div");
-    reorder.className = "team-reorder team-tile-reorder";
-    const up = document.createElement("button");
-    up.textContent = "▲";
-    up.disabled = index === 0;
-    up.title = index === 0 ? "Already highest priority" : "Move up in priority order";
-    up.addEventListener("click", (e) => {
-      e.stopPropagation();
-      game.reorderTeam(member.id, index - 1);
-      if (mounted) render(mounted);
-    });
-    const down = document.createElement("button");
-    down.textContent = "▼";
-    down.disabled = index === total - 1;
-    down.title = index === total - 1 ? "Already lowest priority" : "Move down in priority order";
-    down.addEventListener("click", (e) => {
-      e.stopPropagation();
-      game.reorderTeam(member.id, index + 1);
-      if (mounted) render(mounted);
-    });
-    reorder.append(up, down);
-    tile.append(reorder);
-
-    tile.addEventListener("click", () => {
-      selectedMemberId = member.id;
-      if (mounted) render(mounted);
-    });
-
-    return tile;
+    const palette = accent ? { ...(worldPalette ?? {}), ...accent } : worldPalette;
+    return memberPortrait(rarity, palette, weaponRarity, game.weaponPalette(s.worldIndex), scale, className);
   }
 
-  /** Right pane: the ONE detail panel for whichever member is currently
-   * selected — larger portrait, name/level/rarity, HP bar, atk/hp line,
-   * the equip-slot chip row, and (when a slot is toggled open) the item
-   * picker + the level-up button. Reuses the exact same slot-chip and
-   * item-picker rendering/behavior the old per-card layout had — just
-   * mounted once here instead of appended under every card. */
+  /** The ★ badge. Stars encode the tier, so they and the border colour always
+   * agree — the badge is there because a colour alone cannot be counted. */
+  function starBadge(member: TeamMemberSave): HTMLElement {
+    const el = document.createElement("span");
+    const n = starCount(member);
+    el.className = `team-stars rarity-${effectiveRarity(member)}`;
+    el.textContent = "★".repeat(n);
+    el.title = `${effectiveRarity(member)} · ${n} star${n === 1 ? "" : "s"}`;
+    return el;
+  }
+
+  function renderRoster(): HTMLElement {
+    const s = game.save;
+    const roster = document.createElement("div");
+    roster.className = "team-roster";
+
+    // Which members the altar will accept right now, so the roster can light
+    // up the legal picks instead of making the player guess and be refused.
+    const altarWants = mode === "altar" ? eligibleForAltar() : null;
+
+    let lastTier: Rarity | null = null;
+    for (const stack of rosterStacks()) {
+      if (stack.rarity !== lastTier) {
+        lastTier = stack.rarity;
+        const head = document.createElement("div");
+        head.className = `team-group rarity-${stack.rarity}`;
+        head.append(starBadge(stack.members[0]), document.createTextNode(stack.rarity));
+        roster.append(head);
+      }
+      const isOpen = expanded.has(stack.key);
+      // A stack of one is just a row. A stack of many shows its best copy and
+      // a count; opening it lists the copies, which matters once you are
+      // choosing which of four Rooks to keep.
+      if (stack.members.length === 1 || isOpen) {
+        for (const m of stack.members) roster.append(rosterRow(m, stack, altarWants, stack.members.length > 1));
+      } else {
+        roster.append(rosterRow(stack.members[0], stack, altarWants, false));
+      }
+    }
+
+    if (s.team.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "shop-sub";
+      empty.textContent = "No workers yet — pull the Worker Gacha.";
+      roster.append(empty);
+    }
+    return roster;
+  }
+
+  function rosterRow(
+    member: TeamMemberSave,
+    stack: RosterStack,
+    altarWants: Set<string> | null,
+    inExpandedStack: boolean,
+  ): HTMLElement {
+    const s = game.save;
+    const def = WORKER_DEFS_BY_ID[member.defId];
+    const count = stack.members.length;
+
+    const row = document.createElement("div");
+    row.className = `team-row rarity-border-${effectiveRarity(member)}`;
+    row.dataset.memberId = member.id;
+    row.classList.toggle("selected", member.id === selectedMemberId && mode !== "altar");
+    row.classList.toggle("nested", inExpandedStack);
+    if (altarWants) {
+      row.classList.toggle("altar-eligible", altarWants.has(member.id));
+      row.classList.toggle("altar-seated", altarTarget === member.id || altarFodder.includes(member.id));
+    }
+
+    row.append(portraitFor(member, 2, "team-row-portrait-img"));
+
+    const text = document.createElement("div");
+    text.className = "team-row-text";
+    const nameLine = document.createElement("div");
+    nameLine.className = "team-row-name";
+    nameLine.textContent = def?.name ?? member.defId;
+    if (member.status !== "available") {
+      const dot = document.createElement("span");
+      dot.className = `status-dot ${member.status}`;
+      dot.title = member.status;
+      nameLine.append(dot);
+    }
+    const statLine = document.createElement("div");
+    statLine.className = "shop-sub team-row-stat";
+    statLine.textContent = `Lv${member.level} · ${abbrev(Math.round(effectiveAtk(member, s.inventory, s.prestigeLevel)))} atk`;
+    text.append(nameLine, statLine);
+    row.append(text);
+
+    if (memberHasUpgrade(member)) {
+      const mark = document.createElement("span");
+      mark.className = "team-row-upgrade";
+      mark.textContent = "▲";
+      mark.title = "Better gear is sitting in your bag";
+      row.append(mark);
+    }
+
+    // The count badge is its own control: tapping it opens the stack, tapping
+    // the row selects the worker. Two jobs, two targets, both full-height.
+    if (count > 1 && !inExpandedStack) {
+      const badge = document.createElement("button");
+      badge.className = "team-row-count";
+      badge.textContent = `×${count}`;
+      badge.title = `${count} copies — open to pick between them`;
+      badge.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (expanded.has(stack.key)) expanded.delete(stack.key);
+        else expanded.add(stack.key);
+        repaint();
+      });
+      row.append(badge);
+    } else if (inExpandedStack) {
+      const collapse = document.createElement("button");
+      collapse.className = "team-row-count";
+      collapse.textContent = "×";
+      collapse.title = "Collapse these copies";
+      collapse.addEventListener("click", (e) => {
+        e.stopPropagation();
+        expanded.delete(stack.key);
+        repaint();
+      });
+      row.append(collapse);
+    }
+
+    row.addEventListener("click", () => {
+      if (mode === "altar") {
+        seatAtAltar(member.id);
+        return;
+      }
+      selectedMemberId = member.id;
+      mode = "sheet";
+      openSlot = null;
+      repaint();
+    });
+
+    return row;
+  }
+
+  // --- member sheet -------------------------------------------------------
+
   function renderDetail(member: TeamMemberSave): HTMLElement {
     const s = game.save;
     const def = WORKER_DEFS_BY_ID[member.defId];
-    const rarity = def?.rarity ?? "common";
+    const rarity = effectiveRarity(member);
 
     const panel = document.createElement("div");
     panel.className = "team-detail";
     panel.dataset.memberId = member.id;
-    // Persistent (subtler than the pull-reveal celebration) chrome so an
-    // owned epic/legendary keeps reading as special on the roster, not just
-    // during its one-time gacha reveal.
     if (rarity === "epic") panel.classList.add("team-card-epic");
     else if (rarity === "legendary") panel.classList.add("team-card-legendary");
 
     const head = document.createElement("div");
     head.className = "team-card-head team-detail-head";
     const name = document.createElement("div");
-    name.className = `rarity-${rarity}`;
-    const rarityDot = document.createElement("span");
-    rarityDot.className = `rarity-dot rarity-${rarity}`;
-    const statusDot = document.createElement("span");
-    statusDot.className = `status-dot ${member.status}`;
-    statusDot.title = member.status;
-    name.append(
-      rarityDot,
-      document.createTextNode(`${def?.name ?? member.defId} · Lv${member.level}`),
-      statusDot,
-    );
+    name.className = `rarity-${rarity} team-detail-name`;
+    name.append(document.createTextNode(def?.name ?? member.defId), starBadge(member));
     head.append(name);
-    // Class tag (Bruiser/Warden/Scout): real pixel-art icon (see
-    // scene/ui-icons.ts CLASS_ICON) + name, hook details in the tooltip.
+
     const cls = memberClass(member);
     const clsInfo = WORKER_CLASS_INFO[cls];
     const clsTag = document.createElement("span");
@@ -520,24 +624,16 @@ export function createTeamPanel(game: Game): TeamPanel {
     head.append(clsTag);
     panel.append(head);
 
-    const weaponDef = equippedItem(member, "woodchopping", s.inventory);
-    const weaponRarity: Rarity = weaponDef?.rarity ?? "common";
-    const worldPalette = game.getWorkerPalette(s.worldIndex);
-    const accent = def?.accent;
-    const portraitPalette = accent ? { ...(worldPalette ?? {}), ...accent } : worldPalette;
+    const body = document.createElement("div");
+    body.className = "team-detail-body";
+
     const portraitWrap = document.createElement("div");
     portraitWrap.className = "team-detail-portrait";
-    portraitWrap.append(
-      memberPortrait(
-        rarity,
-        portraitPalette,
-        weaponRarity,
-        game.weaponPalette(s.worldIndex),
-        5,
-        "team-detail-portrait-img",
-      ),
-    );
-    panel.append(portraitWrap);
+    portraitWrap.append(portraitFor(member, 4, "team-detail-portrait-img"));
+    body.append(portraitWrap);
+
+    const vitals = document.createElement("div");
+    vitals.className = "team-vitals";
 
     const hpBar = document.createElement("div");
     hpBar.className = "hp-bar";
@@ -549,14 +645,13 @@ export function createTeamPanel(game: Game): TeamPanel {
     hpFill.classList.toggle("low", hpState === "low");
     hpFill.classList.toggle("critical", hpState === "critical");
     hpBar.append(hpFill);
-    panel.append(hpBar);
+    vitals.append(hpBar);
 
     const stat = document.createElement("div");
     stat.className = "shop-sub";
-    stat.textContent = `atk ${abbrev(Math.round(effectiveAtk(member, s.inventory, s.prestigeLevel)))} · hp ${abbrev(member.currentHp)}/${abbrev(member.maxHp)}`;
-    panel.append(stat);
+    stat.textContent = `Lv${member.level} · atk ${abbrev(Math.round(effectiveAtk(member, s.inventory, s.prestigeLevel)))} · hp ${abbrev(member.currentHp)}/${abbrev(member.maxHp)}`;
+    vitals.append(stat);
 
-    // Battle-XP progress toward the next level (grantXp/xpToNext — team.ts).
     if (member.level < MAX_LEVEL) {
       const xpNeed = xpToNext(member.level);
       const xpHave = Math.min(member.xp ?? 0, xpNeed);
@@ -567,70 +662,27 @@ export function createTeamPanel(game: Game): TeamPanel {
       xpFill.className = "xp-bar-fill";
       xpFill.style.width = `${Math.round((100 * xpHave) / xpNeed)}%`;
       xpBar.append(xpFill);
-      panel.append(xpBar);
-      const xpLabel = document.createElement("div");
-      xpLabel.className = "shop-sub xp-label";
-      xpLabel.textContent = `xp ${xpHave}/${xpNeed}`;
-      panel.append(xpLabel);
+      vitals.append(xpBar);
     }
+    body.append(vitals);
 
-    const slots = document.createElement("div");
-    slots.className = "team-slots";
-    // The extraUtility Power-up's second Utility slot only shows up once
-    // it's actually owned — every other member's panel is byte-for-byte
-    // unchanged until then.
+    // Gear as labelled ROWS. The old chips were icon-only, with what was
+    // equipped conveyed by a coloured dot and whether anything better existed
+    // by a bare "▲" — neither readable without hovering each one in turn.
+    const gear = document.createElement("div");
+    gear.className = "team-gear";
     const slotList: (ItemSlot | "utility2")[] = ["woodchopping", "adventuring", "utility"];
     if (game.hasPowerup("extraUtility")) slotList.push("utility2");
-    slotList.forEach((slot) => {
-      const btn = document.createElement("button");
-      const equippedId = slot === "utility2" ? (member.equipped.utility2 ?? null) : member.equipped[slot];
-      const equippedInst = equippedId ? s.inventory.find((i) => i.id === equippedId) : null;
-      const equippedDef = equippedInst ? itemDefById(equippedInst.defId) : null;
-      // Icon-only chip: the full "Woodchopping: Item Name" text lives in the
-      // tooltip; a rarity dot next to the icon still gives an at-a-glance
-      // read of what's equipped without any text at all. Scaled up (native
-      // 8x8 -> 24x24) so the glyph actually reads at a glance instead of
-      // being a barely-legible speck next to the chip's chrome.
-      const slotIcon = pixelIcon(SLOT_ICON[slot], { palette: UI_PALETTE, scale: 3 });
-      btn.append(slotIcon);
-      if (equippedDef) {
-        const dot = document.createElement("span");
-        dot.className = `rarity-dot rarity-${equippedDef.rarity}`;
-        dot.style.marginLeft = "4px";
-        dot.style.marginRight = "0";
-        btn.append(dot);
-      }
-      // "There is something better in your bag for this slot."
-      //
-      // Without this the only way to find out was to open every slot on every
-      // member and compare names against a list of stats you cannot see. The
-      // badge answers the question the player is actually asking, and the
-      // tooltip names the item so they can decide without opening anything.
-      const upgrade = bestUpgradeFor(member, slot, s.inventory, s.team);
-      if (upgrade) {
-        const mark = document.createElement("span");
-        mark.className = "team-slot-upgrade";
-        mark.textContent = "▲";
-        btn.append(mark);
-      }
-      btn.classList.toggle("has-upgrade", !!upgrade);
-      btn.title = upgrade
-        ? `${SLOT_LABEL[slot]}: ${equippedDef ? equippedDef.name : "empty"} — ${upgrade.name} is better and unused`
-        : `${SLOT_LABEL[slot]}: ${equippedDef ? equippedDef.name : "empty"}`;
-      btn.classList.toggle("active", openSlot.get(member.id) === slot);
-      btn.addEventListener("click", () => {
-        openSlot.set(member.id, openSlot.get(member.id) === slot ? null : slot);
-        if (mounted) render(mounted);
-      });
-      slots.append(btn);
-    });
-    panel.append(slots);
+    for (const slot of slotList) {
+      gear.append(renderGearRow(member, slot));
+    }
+    body.append(gear);
 
     const actions = document.createElement("div");
     actions.className = "team-actions";
     const cost = levelUpCost(member);
     const levelBtn = document.createElement("button");
-    levelBtn.textContent = member.level >= MAX_LEVEL ? "max" : `Level (${cost} ${rarity} shards)`;
+    levelBtn.textContent = member.level >= MAX_LEVEL ? "Max level" : `Level · ${cost} ${rarity} shards`;
     levelBtn.disabled = member.level >= MAX_LEVEL || s.shards[rarity] < cost;
     levelBtn.title =
       member.level >= MAX_LEVEL
@@ -640,24 +692,75 @@ export function createTeamPanel(game: Game): TeamPanel {
           : `Spend ${cost} ${rarity} shards to level up`;
     levelBtn.addEventListener("click", () => {
       game.levelUpMember(member.id);
-      if (mounted) renderAndFlash(mounted, member.id);
+      renderAndFlash();
     });
     actions.append(levelBtn);
+
+    const altarBtn = document.createElement("button");
+    altarBtn.className = "team-altar-btn";
+    altarBtn.textContent = "✦ Take to the Altar";
+    const check = game.fusionCheck(member.id);
+    altarBtn.disabled = !check.ok;
+    altarBtn.title = check.ok
+      ? `Raise ${def?.name ?? "them"} to the next tier by spending four other ${rarity} workers.`
+      : FUSION_BLOCKER_COPY[check.reason ?? "missing"];
+    altarBtn.addEventListener("click", () => {
+      altarTarget = member.id;
+      altarFodder = [];
+      mode = "altar";
+      repaint();
+    });
+    actions.append(altarBtn);
+
+    panel.append(body);
+    // The actions sit OUTSIDE the scrolling body, pinned to the foot of the
+    // pane. Inside it they were the first thing to fall off the bottom edge —
+    // which is the same "primary action below the fold" fault the Muster
+    // screen has, and it is no more acceptable here.
     panel.append(actions);
-
-    const openS = openSlot.get(member.id);
-    if (openS) {
-      panel.append(renderItemPicker(member, openS));
-    }
-
     return panel;
   }
 
-  /** Finds whichever OTHER team member currently has `instanceId` equipped
-   * (in any slot), if any — used to warn the player in the item picker
-   * before a click silently moves gear off of them (Game.equipItem's
-   * unequipInstanceEverywhere now handles the transfer safely, but the
-   * player should still see it coming). */
+  function renderGearRow(member: TeamMemberSave, slot: ItemSlot | "utility2"): HTMLElement {
+    const s = game.save;
+    const equippedDef = equippedItem(member, slot, s.inventory);
+    const upgrade = bestUpgradeFor(member, slot, s.inventory, s.team);
+
+    const row = document.createElement("button");
+    row.className = "team-gear-row";
+    row.classList.toggle("has-upgrade", !!upgrade);
+    row.append(pixelIcon(SLOT_ICON[slot], { palette: UI_PALETTE, scale: 2 }));
+
+    const text = document.createElement("div");
+    text.className = "team-gear-text";
+    const label = document.createElement("div");
+    label.className = "team-gear-label";
+    label.textContent = SLOT_LABEL[slot];
+    const value = document.createElement("div");
+    value.className = equippedDef ? `team-gear-value rarity-${equippedDef.rarity}` : "team-gear-value team-gear-empty";
+    value.textContent = equippedDef ? equippedDef.name : "empty";
+    text.append(label, value);
+    row.append(text);
+
+    if (upgrade) {
+      const mark = document.createElement("span");
+      mark.className = "team-slot-upgrade";
+      mark.textContent = "▲";
+      row.append(mark);
+    }
+    row.title = upgrade
+      ? `${SLOT_LABEL[slot]}: ${equippedDef ? equippedDef.name : "empty"} — ${upgrade.name} is better and unused`
+      : `${SLOT_LABEL[slot]}: ${equippedDef ? equippedDef.name : "empty"}`;
+    row.addEventListener("click", () => {
+      openSlot = slot;
+      mode = "picker";
+      repaint();
+    });
+    return row;
+  }
+
+  // --- item picker --------------------------------------------------------
+
   function equippedElsewhere(instanceId: string, excludeMemberId: string): TeamMemberSave | undefined {
     return game.save.team.find(
       (m) =>
@@ -669,112 +772,445 @@ export function createTeamPanel(game: Game): TeamPanel {
     );
   }
 
+  /** What equipping `d` into `slot` would actually do to this member's real
+   * numbers. Measured by running the game's own stat functions over a probe
+   * copy rather than by re-deriving anything here — a second formula would be
+   * wrong the first time either one changed. */
+  function gearDelta(
+    member: TeamMemberSave,
+    slot: ItemSlot | "utility2",
+    instanceId: string,
+  ): { atk: number; hp: number } {
+    const s = game.save;
+    const probe: TeamMemberSave = { ...member, equipped: { ...member.equipped, [slot]: instanceId } };
+    return {
+      atk:
+        Math.round(effectiveAtk(probe, s.inventory, s.prestigeLevel)) -
+        Math.round(effectiveAtk(member, s.inventory, s.prestigeLevel)),
+      hp: effectiveMaxHp(probe, s.inventory, s.prestigeLevel) - effectiveMaxHp(member, s.inventory, s.prestigeLevel),
+    };
+  }
+
+  function deltaChip(label: string, value: number): HTMLElement {
+    const el = document.createElement("span");
+    el.className = value > 0 ? "gear-delta up" : value < 0 ? "gear-delta down" : "gear-delta flat";
+    el.textContent = `${value > 0 ? "+" : ""}${abbrev(value)} ${label}`;
+    return el;
+  }
+
   function renderItemPicker(member: TeamMemberSave, slot: ItemSlot | "utility2"): HTMLElement {
     const s = game.save;
-    const picker = document.createElement("div");
-    picker.className = "item-picker";
+    const panel = document.createElement("div");
+    panel.className = "team-detail item-picker-pane";
+    panel.dataset.memberId = member.id;
+
+    const head = document.createElement("div");
+    head.className = "team-card-head";
+    const back = document.createElement("button");
+    back.className = "pane-back";
+    back.textContent = "‹";
+    back.title = "Back to the worker";
+    back.addEventListener("click", () => {
+      mode = "sheet";
+      openSlot = null;
+      repaint();
+    });
+    const title = document.createElement("div");
+    title.className = "team-detail-name";
+    title.textContent = SLOT_LABEL[slot];
+    head.append(back, title);
+    panel.append(head);
+
+    const body = document.createElement("div");
+    body.className = "item-picker";
+
     const baseSlot: ItemSlot = slot === "utility2" ? "utility" : slot;
     const equippedId = slot === "utility2" ? (member.equipped.utility2 ?? null) : member.equipped[slot];
 
     if (equippedId) {
+      const cur = itemDefById(s.inventory.find((i) => i.id === equippedId)?.defId ?? "");
       const unequipBtn = document.createElement("button");
-      unequipBtn.textContent = "Unequip";
+      unequipBtn.className = "item-row item-row-unequip";
+      unequipBtn.textContent = `Unequip ${cur?.name ?? "current"}`;
       unequipBtn.addEventListener("click", () => {
         game.unequipItem(member.id, slot);
-        if (mounted) renderAndFlash(mounted, member.id);
+        renderAndFlash();
       });
-      picker.append(unequipBtn);
+      body.append(unequipBtn);
     }
 
-    // A Utility item can only ever be equipped into ONE of a member's two
-    // slots at a time — excluded from both pickers' "owned" lists whichever
-    // slot it's already in, not just the one currently open.
+    // Identical items collapse into one row. The old list showed one row per
+    // instance — 21 rows for 8 distinct items in a real save, most of them
+    // the same sentence repeated four times.
     const owned = s.inventory.filter((inst) => {
       const d = itemDefById(inst.defId);
       if (!d || d.slot !== baseSlot) return false;
-      if (inst.id === member.equipped.woodchopping) return false;
-      if (inst.id === member.equipped.adventuring) return false;
-      if (inst.id === member.equipped.utility) return false;
-      if (inst.id === member.equipped.utility2) return false;
-      return true;
+      return (
+        inst.id !== member.equipped.woodchopping &&
+        inst.id !== member.equipped.adventuring &&
+        inst.id !== member.equipped.utility &&
+        inst.id !== member.equipped.utility2
+      );
     });
 
     if (owned.length === 0) {
       const empty = document.createElement("div");
       empty.className = "shop-sub";
-      empty.textContent = "no items of this type owned — pull the Item Gacha (Shop → Gacha tab) to find some";
-      picker.append(empty);
+      empty.textContent = "Nothing of this type in the bag — try the Item Gacha.";
+      body.append(empty);
     }
 
-    // Best first. The list was in whatever order the items happened to be
-    // pulled in, so choosing well meant reading every row and holding a
-    // comparison in your head — with no stats shown to compare against.
-    const equippedDefForSlot = equippedItem(member, slot, s.inventory);
-    const equippedScore = equippedDefForSlot ? itemScore(equippedDefForSlot) : 0;
-    owned.sort((a, b) => {
-      const da = itemDefById(a.defId);
-      const db = itemDefById(b.defId);
-      return (db ? itemScore(db) : 0) - (da ? itemScore(da) : 0);
-    });
-
+    interface Group {
+      def: ItemDef;
+      free: string[];
+      worn: { id: string; by: TeamMemberSave }[];
+    }
+    const groups = new Map<string, Group>();
     for (const inst of owned) {
       const d = itemDefById(inst.defId);
       if (!d) continue;
-      const itemBtn = document.createElement("button");
-      // Two facts the row could not previously convey: whether this is an
-      // upgrade on what is worn, and whether taking it strips a teammate.
-      // Both are decisions the player was being asked to make blind.
-      // "Worn by X" is already surfaced below; this is the other half of the
-      // decision the row was asking the player to make blind — is this
-      // actually better than what they have on?
-      const isUpgrade = itemScore(d) > equippedScore;
-      if (isUpgrade) itemBtn.classList.add("item-row-upgrade");
-      // Weapon/charm preview so the picker row shows what the item actually
-      // looks like, not just its name — woodchopping/adventuring weapons
-      // only carry a `.held.idle` pose (no standalone `.icon`), while
-      // utility charms only carry `.icon` (they're never held in-hand), so
-      // this fallback covers every slot uniformly. Defensive: every real
-      // rarity/slot combo has one or the other, but a missing lookup just
-      // skips the image rather than breaking the row.
-      const previewMap = WEAPON_APPEARANCE[baseSlot][d.rarity].icon ?? WEAPON_APPEARANCE[baseSlot][d.rarity].held?.idle;
-      if (previewMap) {
-        const preview = pixelIcon(previewMap, {
-          palette: game.weaponPalette(s.worldIndex) ?? undefined,
-          scale: 3,
-          className: "item-picker-preview",
-        });
-        itemBtn.append(preview);
+      let g = groups.get(inst.defId);
+      if (!g) {
+        g = { def: d, free: [], worn: [] };
+        groups.set(inst.defId, g);
       }
-      const dot = document.createElement("span");
-      dot.className = `rarity-dot rarity-${d.rarity}`;
-      const stats = itemStatSummary(d);
-      itemBtn.append(dot, document.createTextNode(`${d.name} (${d.rarity})${stats ? ` — ${stats}` : ""}`));
-      if (isUpgrade) {
-        const up = document.createElement("span");
-        up.className = "item-picker-upgrade-tag";
-        up.textContent = " ▲ upgrade";
-        itemBtn.append(up);
-      }
-      const wornBy = equippedElsewhere(inst.id, member.id);
-      if (wornBy) {
-        const wornDef = WORKER_DEFS_BY_ID[wornBy.defId];
-        const tag = document.createElement("span");
-        tag.className = "item-picker-worn-tag";
-        tag.textContent = ` — worn by ${wornDef?.name ?? wornBy.defId}`;
-        itemBtn.append(tag);
-        itemBtn.title = `Currently equipped on ${wornDef?.name ?? wornBy.defId} — equipping it here will move it off of them.`;
-      }
-      if (d.effectId) {
-        itemBtn.title = itemBtn.title ? `${itemBtn.title} ${ITEM_EFFECT_BLURBS[d.effectId]}` : ITEM_EFFECT_BLURBS[d.effectId];
-      }
-      itemBtn.addEventListener("click", () => {
-        game.equipItem(member.id, inst.id, slot);
-        if (mounted) renderAndFlash(mounted, member.id);
-      });
-      picker.append(itemBtn);
+      const by = equippedElsewhere(inst.id, member.id);
+      if (by) g.worn.push({ id: inst.id, by });
+      else g.free.push(inst.id);
     }
 
-    return picker;
+    const rows = [...groups.values()].map((g) => {
+      const instId = g.free[0] ?? g.worn[0]?.id;
+      return { g, instId, delta: gearDelta(member, slot, instId) };
+    });
+    // Upgrades first and biggest-gain first, then everything else, with
+    // items that would strip a teammate last.
+    rows.sort((a, b) => {
+      const aFree = a.g.free.length > 0 ? 1 : 0;
+      const bFree = b.g.free.length > 0 ? 1 : 0;
+      return bFree - aFree || b.delta.atk - a.delta.atk || b.delta.hp - a.delta.hp;
+    });
+
+    for (const { g, instId, delta } of rows) {
+      const d = g.def;
+      const btn = document.createElement("button");
+      btn.className = "item-row";
+      const isUpgrade = delta.atk > 0 || delta.hp > 0;
+      btn.classList.toggle("item-row-upgrade", isUpgrade);
+      btn.classList.toggle("item-row-worn", g.free.length === 0);
+
+      const previewMap =
+        WEAPON_APPEARANCE[baseSlot][d.rarity].icon ?? WEAPON_APPEARANCE[baseSlot][d.rarity].held?.idle;
+      if (previewMap) {
+        btn.append(
+          pixelIcon(previewMap, {
+            palette: game.weaponPalette(s.worldIndex) ?? undefined,
+            scale: 2,
+            className: "item-picker-preview",
+          }),
+        );
+      }
+
+      const text = document.createElement("div");
+      text.className = "item-row-text";
+      const nameLine = document.createElement("div");
+      nameLine.className = `item-row-name rarity-${d.rarity}`;
+      const total = g.free.length + g.worn.length;
+      nameLine.textContent = total > 1 ? `${d.name} ×${total}` : d.name;
+      const deltaLine = document.createElement("div");
+      deltaLine.className = "item-row-delta";
+      // The numbers the decision actually turns on, against what is worn right
+      // now — not the item's own absolute stats, which told the player nothing
+      // without holding the equipped item's numbers in their head.
+      if (delta.atk !== 0) deltaLine.append(deltaChip("atk", delta.atk));
+      if (delta.hp !== 0) deltaLine.append(deltaChip("hp", delta.hp));
+      if (delta.atk === 0 && delta.hp === 0) {
+        const same = document.createElement("span");
+        same.className = "gear-delta flat";
+        same.textContent = d.utility ? itemStatSummary(d) : "no change";
+        deltaLine.append(same);
+      }
+      text.append(nameLine, deltaLine);
+      btn.append(text);
+
+      if (g.free.length === 0 && g.worn.length > 0) {
+        const wornDef = WORKER_DEFS_BY_ID[g.worn[0].by.defId];
+        const tag = document.createElement("span");
+        tag.className = "item-picker-worn-tag";
+        tag.textContent = `on ${wornDef?.name ?? g.worn[0].by.defId}`;
+        btn.append(tag);
+        btn.title = `Equipping this takes it off ${wornDef?.name ?? "them"}.`;
+      }
+      const full = itemStatSummary(d);
+      btn.title = [btn.title, `${d.name} (${d.rarity})`, full, d.effectId ? ITEM_EFFECT_BLURBS[d.effectId] : ""]
+        .filter(Boolean)
+        .join(" · ");
+
+      btn.addEventListener("click", () => {
+        game.equipItem(member.id, instId, slot);
+        renderAndFlash();
+      });
+      body.append(btn);
+    }
+
+    panel.append(body);
+    return panel;
+  }
+
+  // --- fusion altar -------------------------------------------------------
+
+  /** Members the altar would currently accept — the target if none is chosen
+   * yet, otherwise anything that could fill a sacrifice socket. */
+  function eligibleForAltar(): Set<string> {
+    const s = game.save;
+    const out = new Set<string>();
+    if (!altarTarget) {
+      for (const m of s.team) if (game.fusionCheck(m.id).ok) out.add(m.id);
+      return out;
+    }
+    const target = s.team.find((m) => m.id === altarTarget);
+    if (!target) return out;
+    const tier = effectiveRarity(target);
+    for (const m of s.team) {
+      if (m.id === altarTarget || altarFodder.includes(m.id)) continue;
+      if (effectiveRarity(m) !== tier) continue;
+      if (m.status !== "available") continue;
+      out.add(m.id);
+    }
+    return out;
+  }
+
+  function seatAtAltar(memberId: string): void {
+    if (!altarTarget) {
+      if (game.fusionCheck(memberId).ok) {
+        altarTarget = memberId;
+        altarFodder = [];
+        repaint();
+      }
+      return;
+    }
+    if (memberId === altarTarget) return;
+    if (altarFodder.includes(memberId)) {
+      altarFodder = altarFodder.filter((id) => id !== memberId);
+      repaint();
+      return;
+    }
+    if (altarFodder.length >= FUSION_FODDER_COUNT) return;
+    if (!eligibleForAltar().has(memberId)) return;
+    altarFodder = [...altarFodder, memberId];
+    repaint();
+  }
+
+  function socket(member: TeamMemberSave | null, kind: "target" | "sacrifice", onClear: () => void): HTMLElement {
+    const el = document.createElement("div");
+    el.className = `fusion-socket fusion-socket-${kind}`;
+    el.classList.toggle("filled", !!member);
+    if (member) {
+      const who = WORKER_DEFS_BY_ID[member.defId]?.name ?? member.defId;
+      el.title = `${who} · Lv${member.level}`;
+      el.append(portraitFor(member, 2, "fusion-socket-img"));
+      const clear = document.createElement("button");
+      clear.className = "fusion-socket-clear";
+      clear.textContent = "×";
+      clear.title = "Take them back off the altar";
+      clear.addEventListener("click", (e) => {
+        e.stopPropagation();
+        onClear();
+      });
+      el.append(clear);
+    } else {
+      const plus = document.createElement("span");
+      plus.className = "fusion-socket-plus";
+      plus.textContent = "+";
+      el.append(plus);
+    }
+    return el;
+  }
+
+  function renderAltar(): HTMLElement {
+    const s = game.save;
+    const panel = document.createElement("div");
+    panel.className = "fusion-altar";
+
+    const head = document.createElement("div");
+    head.className = "team-card-head";
+    const back = document.createElement("button");
+    back.className = "pane-back";
+    back.textContent = "‹";
+    back.title = "Back to the roster";
+    back.addEventListener("click", () => {
+      mode = "sheet";
+      repaint();
+    });
+    const title = document.createElement("div");
+    title.className = "team-detail-name";
+    title.textContent = "✦ Fusion Altar";
+    head.append(back, title);
+    panel.append(head);
+
+    const target = s.team.find((m) => m.id === altarTarget) ?? null;
+    const fodder = altarFodder.map((id) => s.team.find((m) => m.id === id) ?? null);
+
+    const body = document.createElement("div");
+    body.className = "fusion-body";
+
+    const pedestal = document.createElement("div");
+    pedestal.className = "fusion-pedestal";
+    pedestal.classList.toggle("ready", !!target && altarFodder.length === FUSION_FODDER_COUNT);
+
+    const ring = document.createElement("div");
+    ring.className = "fusion-ring";
+    for (let i = 0; i < FUSION_FODDER_COUNT; i++) {
+      const m = fodder[i] ?? null;
+      ring.append(
+        socket(m, "sacrifice", () => {
+          altarFodder = altarFodder.filter((id) => id !== m?.id);
+          repaint();
+        }),
+      );
+    }
+    const centre = socket(target, "target", () => {
+      altarTarget = null;
+      altarFodder = [];
+      repaint();
+    });
+    pedestal.append(ring, centre);
+    body.append(pedestal);
+
+    const preview = document.createElement("div");
+    preview.className = "fusion-preview";
+    const plan = target ? game.fusionPlan(target.id, altarFodder) : null;
+
+    if (!target) {
+      const hint = document.createElement("div");
+      hint.className = "shop-sub";
+      hint.textContent = "Pick the worker to raise — tap one in the roster.";
+      preview.append(hint);
+    } else if (!plan) {
+      const need = FUSION_FODDER_COUNT - altarFodder.length;
+      const have = game.fusionFodderAvailable(target.id);
+      const hint = document.createElement("div");
+      hint.className = "shop-sub";
+      const tier = effectiveRarity(target);
+      hint.textContent =
+        have >= need
+          ? `Choose ${need} more ${tier} worker${need === 1 ? "" : "s"} to spend.`
+          : `Only ${have} spare ${tier} worker${have === 1 ? "" : "s"} available — you need ${need} more.`;
+      preview.append(hint);
+    } else {
+      const tiers = document.createElement("div");
+      tiers.className = "fusion-tier-line";
+      const who = document.createElement("span");
+      who.className = "fusion-who";
+      who.textContent = WORKER_DEFS_BY_ID[target.defId]?.name ?? target.defId;
+      tiers.append(who);
+      const from = document.createElement("span");
+      from.className = `rarity-${plan.fromRarity}`;
+      from.textContent = `${"★".repeat(plan.before.stars)} ${plan.fromRarity}`;
+      const arrow = document.createElement("span");
+      arrow.className = "fusion-arrow";
+      arrow.textContent = "➔";
+      const to = document.createElement("span");
+      to.className = `rarity-${plan.toRarity}`;
+      to.textContent = `${"★".repeat(plan.after.stars)} ${plan.toRarity}`;
+      tiers.append(from, arrow, to);
+      preview.append(tiers);
+
+      const refund = document.createElement("span");
+      refund.className = "shop-sub fusion-refund";
+      refund.textContent = `+${plan.shardRefund.amount} shards back`;
+      tiers.append(refund);
+
+      const stats = document.createElement("div");
+      stats.className = "fusion-stat-line";
+      stats.append(
+        statRow("ATK", plan.before.atk, plan.after.atk),
+        statRow("HP", plan.before.hp, plan.after.hp),
+      );
+      preview.append(stats);
+    }
+    panel.append(body);
+    // The preview is pinned beside the actions, not inside the scrolling
+    // body: the numbers ARE the decision, and a stat comparison you have to
+    // scroll to find is a stat comparison nobody reads.
+    panel.append(preview);
+
+    const actions = document.createElement("div");
+    actions.className = "fusion-actions";
+
+    const autoBtn = document.createElement("button");
+    autoBtn.textContent = "⚡ Auto-Fill";
+    autoBtn.disabled = !target;
+    autoBtn.title = target
+      ? "Seat the cheapest spare workers of this tier — never the ones you have levelled."
+      : "Pick a worker to raise first.";
+    autoBtn.addEventListener("click", () => {
+      if (!target) return;
+      altarFodder = game.fusionAutoFill(target.id);
+      repaint();
+    });
+
+    const mergeBtn = document.createElement("button");
+    mergeBtn.className = "btn-primary fusion-merge";
+    mergeBtn.textContent = "💥 Merge";
+    mergeBtn.disabled = !plan;
+    mergeBtn.title = plan
+      ? `Spend ${FUSION_FODDER_COUNT} workers to raise this one to ${plan.toRarity}.`
+      : !target
+        ? "Pick a worker to raise first."
+        : `Fill all ${FUSION_FODDER_COUNT} sockets to merge.`;
+    mergeBtn.addEventListener("click", () => {
+      if (!plan) return;
+      void runFusion(panel, plan);
+    });
+
+    actions.append(autoBtn, mergeBtn);
+    panel.append(actions);
+    return panel;
+  }
+
+  function statRow(label: string, before: number, after: number): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "fusion-stat-row";
+    const name = document.createElement("span");
+    name.className = "fusion-stat-label";
+    name.textContent = label;
+    const from = document.createElement("span");
+    from.textContent = abbrev(before);
+    const arrow = document.createElement("span");
+    arrow.className = "fusion-arrow";
+    arrow.textContent = "➔";
+    const to = document.createElement("span");
+    to.className = "fusion-stat-after";
+    to.textContent = abbrev(after);
+    const delta = document.createElement("span");
+    delta.className = "gear-delta up";
+    delta.textContent = `+${abbrev(after - before)} ▲`;
+    row.append(name, from, arrow, to, delta);
+    return row;
+  }
+
+  /** Plays the merge, then commits it.
+   *
+   * `fusing` freezes render() for the duration so the 1s shop refresh cannot
+   * tear the pedestal out mid-animation — the same guard ui/gacha.ts uses for
+   * its reel. The commit happens at the moment of impact rather than at the
+   * end, so a player who clicks through the animation never waits on it. */
+  async function runFusion(panel: HTMLElement, plan: FusionPlan): Promise<void> {
+    fusing = true;
+    try {
+      await playFusion(panel, plan, () => {
+        game.fuseMembers(plan);
+      });
+    } finally {
+      fusing = false;
+      altarFodder = [];
+      // Stay on the altar with the upgraded worker still seated — the result
+      // is the reward, and bouncing straight back to the roster would hide it.
+      lastKey = null;
+      repaint();
+      flashPane();
+    }
   }
 
   return { render };

@@ -23,7 +23,9 @@ export type SfxId =
   | "needleUp"
   | "needleDown"
   | "raftLaunch"
-  | "railWhistle";
+  | "railWhistle"
+  | "fusionCharge"
+  | "fusionBurst";
 
 let audio: AudioContext | null = null;
 let master: GainNode | null = null;
@@ -204,6 +206,27 @@ export function playSfx(id: SfxId, opts: { rarity?: Rarity } = {}): void {
       noise(0.24, { gain: 0.08, filterFreq: 2600 });
       tone(660, 0.3, { delay: 0.2, type: "triangle", sweepTo: 560, gain: 0.13 });
       break;
+    case "fusionCharge": {
+      // Four voices climbing together and converging on one pitch — the sound
+      // of the four sacrifices being pulled into the fifth. Deliberately ends
+      // unresolved: it is the wind-up, and fusionBurst is the landing.
+      for (let i = 0; i < 4; i++) {
+        tone(180 + i * 40, 0.5, { sweepTo: 660, gain: 0.075, delay: i * 0.05, type: "triangle" });
+      }
+      noise(0.5, { gain: 0.05, filterFreq: 900 });
+      break;
+    }
+    case "fusionBurst": {
+      // The impact, pitched by the tier it produced, so a merge into Legendary
+      // sounds like more than a merge into Rare. Same RARITY_FREQ table the
+      // gacha reveal uses, so the two celebrations share a key.
+      const base = RARITY_FREQ[opts.rarity ?? "common"];
+      noise(0.16, { gain: 0.3, filterFreq: 1800 });
+      tone(base, 0.3, { gain: 0.24 });
+      tone(base * 1.5, 0.28, { delay: 0.08, gain: 0.2 });
+      tone(base * 2, 0.42, { delay: 0.16, gain: 0.22, sweepTo: base * 2.2 });
+      break;
+    }
     case "prestige": // little fanfare arpeggio
       tone(523, 0.18, { gain: 0.2 });
       tone(659, 0.18, { delay: 0.12, gain: 0.2 });
