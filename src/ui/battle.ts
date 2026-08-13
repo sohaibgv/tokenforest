@@ -23,10 +23,80 @@
 // in an earlier version (a button removed mid-click never receives its
 // click event).
 
-import { buildEnemy, ENEMY_CHARACTERS_BY_ID, type EnemySpec } from "../adventure";
+import { ENEMY_CHARACTERS_BY_ID, type EnemySpec } from "../adventure";
 import { PLAYER_CRIT_CHANCE, type BattleAction, type BattleSnapshot } from "../battle";
-import { BOON_DEFS_BY_ID, type BoonId } from "../boons";
-import { getWorld, WORKER_CLASS_INFO, WORKER_DEFS_BY_ID } from "../economy";
+import {
+  BOON_DEFS_BY_ID,
+  describeBoon,
+  RARITY_LABEL,
+  type BoonSlot,
+} from "../run/boons";
+import type { RunOffer } from "../run/offers";
+import { PATRON_DEFS_BY_ID, type PatronId } from "../run/patrons";
+import {
+  DEPTH_NAMES,
+  depthOf,
+  ELITE_AFFIXES,
+  REWARD_LABEL,
+  TOTAL_ROOMS,
+  type RoomSpec,
+} from "../run/rooms";
+
+/** What a room is called on a door. Reads as a place rather than as a
+ * mechanic — "A trader's stall" tells the player what they will walk into;
+ * "shop" tells them what the code calls it. */
+const ROOM_TITLE: Record<string, string> = {
+  fight: "A fight",
+  elite: "Something worse",
+  boss: "The way down",
+  shop: "A trader's stall",
+  shrine: "A patron's shrine",
+  fountain: "A cold spring",
+  chaos: "A cracked gate",
+  chest: "Something left behind",
+};
+
+/** The line under a door's title: what is actually promised behind it. */
+function doorBlurb(room: RoomSpec): string {
+  if (room.kind === "elite") {
+    const affix = ELITE_AFFIXES.find((a) => a.id === room.affix);
+    return affix ? `${affix.name}. ${affix.blurb}` : "A harder fight, for a better reward.";
+  }
+  switch (room.reward) {
+    case "boon":
+      return room.patron
+        ? `${PATRON_DEFS_BY_ID[room.patron].name} is watching — ${PATRON_DEFS_BY_ID[room.patron].domain.toLowerCase()}.`
+        : "A patron is watching.";
+    case "rank":
+      return "Deepen something you already carry.";
+    case "acorns":
+      return "Whatever is in here is worth taking.";
+    case "heal":
+      return "Cold water. A moment to breathe.";
+    case "shop":
+      return "Somebody down here still trades.";
+    case "chaos":
+      return "A bad bargain, honestly offered.";
+    case "chest":
+      return "Something was left for whoever got this far.";
+    default:
+      return "Onward.";
+  }
+}
+
+/** What an exclusive slot is called on a card, when there is nothing being
+ * replaced and no rank to show. Naming the slot is how the player learns the
+ * system without a tutorial: three cards reading STRIKE, AURA, AURA teach the
+ * rule faster than any explanation of it. */
+const SLOT_LABEL: Record<BoonSlot, string> = {
+  strike: "Strike slot",
+  guard: "Guard slot",
+  rite: "Rite slot",
+  aura: "Aura",
+  fortune: "Fortune",
+  instant: "Instant",
+};
+import { WORKER_CLASS_INFO, WORKER_DEFS_BY_ID } from "../economy";
 import { abbrev, hpBarClass } from "../scene/floating-text";
 import type { ChestRevealSummary, Game } from "../scene/game";
 import { BUILDABLE_SPRITES, LOG, SPARK, type PixelMap } from "../scene/sprites";
@@ -43,37 +113,50 @@ import {
   CLASS_ICON,
   UI_PALETTE,
 } from "../scene/ui-icons";
+import { createLedger } from "./ledger";
 import { closeOtherOverlays, registerOverlay } from "./overlay-coordinator";
 import { pixelIcon } from "./pixel-icon";
 
 const TICK_MS = 30;
 
-/** One pixel-art icon per boon — shown on the boon-offer cards and the
- * compact "active boons" HUD chips, per an earlier audit flagging these as
- * the app's most "exciting moment" screens and thus worth the most visual
- * attention. Each pick loosely matches its effect: a fist for the ATK buff,
- * a shield for the HP buff, a heart for the instant heal, an eye for crit
- * chance, a mirror for reflect damage (it "bounces" the hit back), and a
- * spark for the instant ability recharge — the spark reuses sprites.ts's
- * existing SPARK asset verbatim (same one already used for weapon-slash
- * VFX), not a redrawn icon. */
-const BOON_ICON_MAP: Record<BoonId, PixelMap> = {
-  battleFury: BOON_FIST_ICON,
-  ironSkin: BOON_SHIELD_ICON,
-  secondWind: BOON_HEART_ICON,
-  keenReflexes: BOON_EYE_ICON,
-  guardiansWard: BOON_MIRROR_ICON,
-  vengefulSpirit: SPARK,
-  lumberBlessing: BOON_LOG_ICON,
-  battleTrance: BOON_TRANCE_ICON,
+/** One pixel-art sigil per PATRON, not per boon.
+ *
+ * The catalog is 55 boons; hand-drawing an icon for each would be a lot of art
+ * for very little signal, and worse, it would bury the thing the player
+ * actually needs to read at a glance. A patron's sigil appearing on a card is
+ * the useful information — it says which of the five the card belongs to,
+ * which is what a build is made of. The specific boon is named in words right
+ * beside it.
+ *
+ * Reuses the existing glyph set rather than adding art: a mirror for Bramble
+ * (it throws blows back), a fist for Cinder (pure aggression), a heart for Sap
+ * (endurance), an eye for Static (targeting and interference) and the trance
+ * glyph for Lumen (radiance). */
+const PATRON_ICON_MAP: Record<PatronId, PixelMap> = {
+  bramble: BOON_MIRROR_ICON,
+  cinder: BOON_FIST_ICON,
+  sap: BOON_HEART_ICON,
+  static: BOON_EYE_ICON,
+  lumen: BOON_TRANCE_ICON,
 };
 
-function boonIcon(id: BoonId, className?: string): HTMLImageElement {
-  // vengefulSpirit is the one exception: it draws SPARK with its own
-  // sprites.ts base palette, not UI_PALETTE, so it renders identically to
-  // the in-game VFX it's standing in for.
-  const palette = id === "vengefulSpirit" ? undefined : UI_PALETTE;
-  return pixelIcon(BOON_ICON_MAP[id], { palette, className });
+/** Slot glyphs override the patron sigil where the SLOT is the more useful
+ * thing to know — an instant boon is not part of a build at all, and a shield
+ * reads "defensive" faster than any patron colour. */
+const SLOT_ICON_MAP: Partial<Record<BoonSlot, PixelMap>> = {
+  instant: SPARK,
+  guard: BOON_SHIELD_ICON,
+  fortune: BOON_LOG_ICON,
+};
+
+function boonIcon(id: string, className?: string): HTMLImageElement {
+  const def = BOON_DEFS_BY_ID[id];
+  const map = (def && SLOT_ICON_MAP[def.slot]) ?? (def ? PATRON_ICON_MAP[def.patron] : BOON_FIST_ICON);
+  // SPARK is the one exception: it draws with its own sprites.ts base palette
+  // rather than UI_PALETTE, so an instant boon's glyph renders identically to
+  // the in-game VFX it stands for.
+  const palette = map === SPARK ? undefined : UI_PALETTE;
+  return pixelIcon(map, { palette, className });
 }
 
 /** Combined name for however many enemies are involved — "&" for exactly
@@ -124,6 +207,8 @@ type Mode =
   | "boon"
   | "chest"
   | "cleared"
+  | "doors"
+  | "room"
   | "done";
 
 export function initBattle(game: Game): void {
@@ -136,7 +221,15 @@ export function initBattle(game: Game): void {
   top.className = "battle-top";
   const round = document.createElement("span");
   round.className = "battle-round";
-  top.append(round);
+  // Opening the sheet is a decision the player makes mid-run, so the toggle
+  // lives in the persistent top bar rather than on any one reward screen —
+  // "what does my build actually do" is a question that comes up during a
+  // fight at least as often as between them.
+  const ledgerBtn = document.createElement("button");
+  ledgerBtn.className = "battle-ledger-btn";
+  ledgerBtn.textContent = "Ledger";
+  ledgerBtn.title = "Everything your build is doing, and what is doing it";
+  top.append(round, ledgerBtn);
 
   // Per-enemy name + HP-bar list — one row per living-or-dead EnemyUnit,
   // same persistent-DOM/diff-in-place discipline as partyWrap/partyRows
@@ -271,7 +364,9 @@ export function initBattle(game: Game): void {
   boonTitle.textContent = "Choose a boon";
   const boonCardsWrap = document.createElement("div");
   boonCardsWrap.className = "battle-boon-cards";
-  const boonCards = Array.from({ length: 3 }, () => {
+  // Four slots, not three: Overclock and The Long Day both widen the offer,
+  // and the extra node costs nothing while it stays hidden.
+  const boonCards = Array.from({ length: 4 }, () => {
     const btn = document.createElement("button");
     btn.className = "battle-boon-card";
     const tag = document.createElement("span");
@@ -280,11 +375,18 @@ export function initBattle(game: Game): void {
     name.className = "battle-boon-card-name";
     const desc = document.createElement("span");
     desc.className = "battle-boon-card-desc";
-    btn.append(tag, name, desc);
+    // The line that says what this pick COSTS — which exclusive boon it
+    // displaces, or which rank it moves. Without it, an exclusive slot is a
+    // trap rather than a decision.
+    const note = document.createElement("span");
+    note.className = "battle-boon-card-note";
+    btn.append(tag, name, desc, note);
     boonCardsWrap.append(btn);
-    return { btn, tag, name, desc };
+    return { btn, tag, name, desc, note };
   });
-  boonPanel.append(boonTitle, boonCardsWrap);
+  const boonReroll = document.createElement("button");
+  boonReroll.className = "battle-boon-reroll hidden";
+  boonPanel.append(boonTitle, boonCardsWrap, boonReroll);
 
   // --- chest-reveal screen, persistent DOM, built once --------------------
   // A milestone chest (stage 3 clear / stage 5 full clear) — the reward is
@@ -328,6 +430,73 @@ export function initBattle(game: Game): void {
   clearGrid.append(pushOnBtn, clearRetreatBtn);
   clearPanel.append(clearText, clearGrid);
 
+  // --- door choice, persistent DOM, built once ---------------------------
+  // The junction between rooms: two or three ways on, each showing what it
+  // promises. This is the run's core act of agency — everything else is
+  // reacting to what a fight did, this is choosing what the next one will be.
+  const doorPanel = document.createElement("div");
+  doorPanel.className = "battle-box battle-boon-panel hidden";
+  const doorTitle = document.createElement("div");
+  doorTitle.className = "battle-boon-title";
+  doorTitle.textContent = "Choose your way on";
+  const doorWrap = document.createElement("div");
+  doorWrap.className = "battle-boon-cards";
+  const doorCards = Array.from({ length: 4 }, () => {
+    const btn = document.createElement("button");
+    btn.className = "battle-boon-card battle-door-card hidden";
+    const tag = document.createElement("span");
+    tag.className = "battle-boon-card-tag";
+    const name = document.createElement("span");
+    name.className = "battle-boon-card-name";
+    const desc = document.createElement("span");
+    desc.className = "battle-boon-card-desc";
+    btn.append(tag, name, desc);
+    doorWrap.append(btn);
+    return { btn, tag, name, desc };
+  });
+  doorPanel.append(doorTitle, doorWrap);
+
+  // --- event room, persistent DOM, built once ----------------------------
+  // Shops, springs, shrines and chaos gates all resolve through here. One
+  // panel rather than four: they share a shape (a title, a line of prose, a
+  // short list of choices), and four near-identical panels would drift.
+  const eventPanel = document.createElement("div");
+  eventPanel.className = "battle-box battle-boon-panel hidden";
+  const eventTitle = document.createElement("div");
+  eventTitle.className = "battle-boon-title";
+  const eventText = document.createElement("div");
+  eventText.className = "battle-box-text";
+  const eventWrap = document.createElement("div");
+  eventWrap.className = "battle-boon-cards";
+  const eventCards = Array.from({ length: 4 }, () => {
+    const btn = document.createElement("button");
+    btn.className = "battle-boon-card hidden";
+    const tag = document.createElement("span");
+    tag.className = "battle-boon-card-tag";
+    const name = document.createElement("span");
+    name.className = "battle-boon-card-name";
+    const desc = document.createElement("span");
+    desc.className = "battle-boon-card-desc";
+    btn.append(tag, name, desc);
+    eventWrap.append(btn);
+    return { btn, tag, name, desc };
+  });
+  const eventLeave = document.createElement("button");
+  // Its own class as well as the shared styling one: this footer and the offer
+  // panel's reroll are different controls with different handlers, and a lookup
+  // by the shared class silently resolves to whichever is first in the DOM.
+  eventLeave.className = "battle-boon-reroll battle-event-action";
+  eventPanel.append(eventTitle, eventText, eventWrap, eventLeave);
+
+  const ledger = createLedger();
+  let ledgerOpen = false;
+  ledgerBtn.addEventListener("click", () => {
+    ledgerOpen = !ledgerOpen;
+    if (ledgerOpen) ledger.update(game.runStats(), game.battleSnapshot() ?? undefined);
+    ledger.el.classList.toggle("hidden", !ledgerOpen);
+    ledgerBtn.classList.toggle("active", ledgerOpen);
+  });
+
   body.append(
     top,
     stageInfo,
@@ -340,6 +509,9 @@ export function initBattle(game: Game): void {
     boonPanel,
     chestPanel,
     clearPanel,
+    doorPanel,
+    eventPanel,
+    ledger.el,
   );
 
   // --- state -------------------------------------------------------------
@@ -496,7 +668,19 @@ export function initBattle(game: Game): void {
   /** REWARD_MODES are fully click/button-driven screens (see their own
    * handlers) — syncModeFromGameState below must never override them mid-
    * display, only decide what comes next once their own handler moves on. */
-  const REWARD_MODES = new Set<Mode>(["outcome", "revival", "boon", "chest", "cleared", "done"]);
+  // "doors" and "room" belong here for the same reason every other entry does:
+  // they are fully button-driven, and letting the 30ms tick re-derive the mode
+  // underneath them would yank a live choice off the screen mid-decision.
+  const REWARD_MODES = new Set<Mode>([
+    "outcome",
+    "revival",
+    "boon",
+    "chest",
+    "cleared",
+    "doors",
+    "room",
+    "done",
+  ]);
 
   /** The live-combat half of the old advance()/tick() narration chain,
    * minus the narration: decides what the view should be showing RIGHT NOW
@@ -693,25 +877,67 @@ export function initBattle(game: Game): void {
    * AdventureState.pendingBoonOffer (see boons.ts's drawBoonOffer), so this
    * always shows the same 3 cards a pause-then-resume (even across an app
    * restart) originally offered. No skip: the only way out is picking one. */
-  function showBoonOffer(ids: BoonId[]): void {
+  function showBoonOffer(offer: RunOffer): void {
     box.classList.add("hidden");
     revivalPanel.classList.add("hidden");
     chestPanel.classList.add("hidden");
     boonPanel.classList.remove("hidden");
     boonCards.forEach((card, i) => {
-      const id = ids[i];
-      const def = id ? BOON_DEFS_BY_ID[id] : undefined;
-      card.btn.classList.toggle("hidden", !def);
-      if (!def) return;
-      card.tag.textContent = def.instant ? "Instant" : "This run";
-      card.tag.classList.toggle("instant", def.instant);
-      card.name.replaceChildren(boonIcon(id, "battle-boon-card-icon"), document.createTextNode(def.name));
-      card.desc.textContent = def.description;
+      const offered = offer.cards[i];
+      const def = offered ? BOON_DEFS_BY_ID[offered.boonId] : undefined;
+      card.btn.classList.toggle("hidden", !def || !offered);
+      if (!def || !offered) return;
+      const patron = PATRON_DEFS_BY_ID[def.patron];
+
+      // The rarity is the card's loudest signal, so it drives the border
+      // colour as well as the tag — a glance across three cards should find
+      // the Heroic before any word is read.
+      card.btn.className = `battle-boon-card rarity-border-${offered.rarity}`;
+      card.tag.textContent = offered.rankUp
+        ? "RANK UP"
+        : `${RARITY_LABEL[offered.rarity].toUpperCase()} · ${patron?.name.toUpperCase() ?? ""}`;
+      card.tag.classList.toggle("instant", def.slot === "instant");
+      card.tag.className = `battle-boon-card-tag rarity-${offered.rarity}${def.slot === "instant" ? " instant" : ""}`;
+
+      card.name.replaceChildren(
+        boonIcon(def.id, "battle-boon-card-icon"),
+        document.createTextNode(def.name),
+      );
+
+      const held = game.heldBoons().find((h) => h.id === def.id);
+      const rank = offered.rankUp ? (held?.rank ?? 1) + 1 : (held?.rank ?? 1);
+      card.desc.textContent = describeBoon(def, { rarity: offered.rarity, rank });
+
+      // Exclusive slots are the system's whole texture, and they only work if
+      // the card says what taking it costs. A silent replacement is the most
+      // frustrating thing this screen can do.
+      const replaced = offered.replacesId ? BOON_DEFS_BY_ID[offered.replacesId] : undefined;
+      card.note.textContent = replaced
+        ? `Replaces ${replaced.name}`
+        : offered.rankUp
+          ? `Rank ${(held?.rank ?? 1)} → ${rank}`
+          : SLOT_LABEL[def.slot];
+      card.note.classList.toggle("replaces", !!replaced);
+
       card.btn.onclick = () => {
-        game.pickBoon(id);
+        game.pickBoonCard(offered.boonId);
         finishRewardFlow();
       };
     });
+
+    layoutCards(boonCardsWrap, offer.cards.filter((c) => BOON_DEFS_BY_ID[c.boonId]).length);
+
+    const rerolls = offer.rerollsLeft;
+    boonReroll.classList.toggle("hidden", rerolls <= 0 && offer.rerollCount === 0);
+    boonReroll.disabled = rerolls <= 0;
+    boonReroll.textContent = rerolls > 0 ? `Reroll · ${rerolls} left` : "No rerolls left";
+    boonReroll.title = rerolls > 0 ? "Draw a fresh set of cards" : "You have no reroll charges.";
+    boonReroll.onclick = () => {
+      if (!game.rerollBoonOffer()) return;
+      const next = game.boonOffer();
+      if (next) showBoonOffer(next);
+    };
+
     mode = "boon";
     syncClickCapture();
   }
@@ -771,7 +997,7 @@ export function initBattle(game: Game): void {
    * own Push On/Retreat & Bank buttons (same Game calls, same fee-display/
    * afford-gating convention), just reachable without a round trip through
    * the DOM overlay. */
-  function showStageCleared(): void {
+  function showDepthCleared(): void {
     box.classList.add("hidden");
     revivalPanel.classList.add("hidden");
     boonPanel.classList.add("hidden");
@@ -779,22 +1005,27 @@ export function initBattle(game: Game): void {
     clearPanel.classList.remove("hidden");
     const adv = game.save.adventure;
     if (adv) {
-      const fee = game.nextStageFee();
-      const nextStage = adv.stage + 1;
-      const nextEnemies = buildEnemy(adv.world, nextStage as 1 | 2 | 3 | 4 | 5);
+      const toll = game.nextStageFee();
+      const depth = depthOf(adv.roomsCleared);
       const amberText = adv.pendingAmber > 0 ? ` and ${abbrev(adv.pendingAmber)} amber` : "";
-      clearText.textContent = `Stage ${adv.stage} cleared! Push on to fight ${enemyNamesList(nextEnemies)} (Stage ${nextStage}/5) for ${abbrev(fee)} wood, or retreat and bank ${abbrev(adv.pendingWood)} wood${amberText} now?`;
-      const affordable = game.save.wood >= fee;
+      clearText.textContent =
+        `${DEPTH_NAMES[depthOf(adv.roomsCleared - 1)]} is behind you. Descend into ` +
+        `${DEPTH_NAMES[depth] ?? "the deep"} for ${abbrev(toll)} wood, or leave now and ` +
+        `bank ${abbrev(adv.pendingWood)} wood${amberText}?`;
+      const affordable = game.save.wood >= toll;
       pushOnBtn.disabled = !affordable;
-      pushOnBtn.title = affordable ? "" : `Need ${abbrev(fee - game.save.wood)} more wood to push on.`;
-      pushOnBtn.textContent = `Push On · ${abbrev(fee)} wood`;
+      pushOnBtn.title = affordable ? "" : `Need ${abbrev(toll - game.save.wood)} more wood to descend.`;
+      pushOnBtn.textContent = `Descend · ${abbrev(toll)} wood`;
     }
     mode = "cleared";
     syncClickCapture();
   }
 
   pushOnBtn.addEventListener("click", () => {
-    if (!game.beginStageBattle()) return;
+    // Past a Depth boss there is exactly one way on, so "descend" and "take
+    // the only door" are the same action — no door screen is shown for it.
+    const exits = game.exitOffer();
+    if (!exits || exits.length === 0 || !game.pickExit(exits[0].id)) return;
     // beginStageBattle() already started the next fight in place (same
     // Game.startBattleForNextStage() a fresh embark/Push On always goes
     // through) — replicate the exact same entry beat tick()'s own
@@ -823,7 +1054,194 @@ export function initBattle(game: Game): void {
    * only ever comes with a boon too, stage 5 only ever has a chest, stage 3
    * has both boon and chest). Revival is checked first — a downed teammate
    * is more urgent/prominent than a boon pick. */
+  /** Lays a card grid out for however many cards are actually showing.
+   *
+   * Four cards go to a 2x2 rather than a single row of four: at the tray's
+   * width four columns leaves each card too narrow to hold a sentence, and a
+   * card whose description is cut off is worse than one more row. */
+  function layoutCards(wrap: HTMLElement, visible: number): void {
+    const cols = visible <= 3 ? Math.max(1, visible) : 2;
+    wrap.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  }
+
+  /** The junction screen. Each card is a door, showing the reward waiting
+   * behind it — which is the whole point: the choice is informed, so a run's
+   * shape is something the player steers rather than something that happens to
+   * them. */
+  function showDoors(exits: RoomSpec[]): void {
+    box.classList.add("hidden");
+    revivalPanel.classList.add("hidden");
+    boonPanel.classList.add("hidden");
+    chestPanel.classList.add("hidden");
+    clearPanel.classList.add("hidden");
+    eventPanel.classList.add("hidden");
+    doorPanel.classList.remove("hidden");
+    hideBubbles();
+    doorCards.forEach((card, i) => {
+      const room = exits[i];
+      card.btn.classList.toggle("hidden", !room);
+      if (!room) return;
+      card.btn.className = `battle-boon-card battle-door-card door-${room.reward}`;
+      card.tag.textContent = REWARD_LABEL[room.reward];
+      card.tag.className = `battle-boon-card-tag door-tag-${room.reward}`;
+      card.name.replaceChildren(document.createTextNode(ROOM_TITLE[room.kind] ?? "Onward"));
+      card.desc.textContent = doorBlurb(room);
+      card.btn.onclick = () => {
+        if (!game.pickExit(room.id)) return;
+        doorPanel.classList.add("hidden");
+        finishRewardFlow();
+      };
+    });
+    layoutCards(doorWrap, exits.length);
+    mode = "doors";
+    syncClickCapture();
+  }
+
+  /** Shops, springs, shrines and chaos gates. */
+  function showRoomEvent(event: { roomId: string; kind: string }): void {
+    box.classList.add("hidden");
+    revivalPanel.classList.add("hidden");
+    boonPanel.classList.add("hidden");
+    chestPanel.classList.add("hidden");
+    clearPanel.classList.add("hidden");
+    doorPanel.classList.add("hidden");
+    eventPanel.classList.remove("hidden");
+    hideBubbles();
+    eventTitle.textContent = ROOM_TITLE[event.kind] ?? "A quiet room";
+    eventLeave.classList.remove("hidden");
+    eventLeave.textContent = "Move on";
+    eventLeave.disabled = false;
+    eventLeave.onclick = () => {
+      game.leaveRoom();
+      finishRewardFlow();
+    };
+
+    const hide = () => eventCards.forEach((c) => c.btn.classList.add("hidden"));
+    const relayout = () =>
+      layoutCards(eventWrap, eventCards.filter((c) => !c.btn.classList.contains("hidden")).length);
+
+    if (event.kind === "shop") {
+      const shop = game.shopState();
+      const acorns = game.acorns();
+      eventText.textContent = `${abbrev(acorns)} acorns in hand.`;
+      hide();
+      (shop?.stock ?? []).forEach((entry, i) => {
+        const card = eventCards[i];
+        if (!card) return;
+        const label = game.shopEntryLabel(entry);
+        card.btn.classList.remove("hidden");
+        card.btn.className = `battle-boon-card${entry.sold ? " sold" : ""}`;
+        card.tag.textContent = entry.sold ? "SOLD" : `${entry.cost} ACORNS`;
+        card.name.replaceChildren(document.createTextNode(label.name));
+        card.desc.textContent = label.blurb;
+        const affordable = !entry.sold && acorns >= entry.cost;
+        card.btn.disabled = !affordable;
+        // The codebase's one tooltip convention: say WHY a control is dead.
+        card.btn.title = entry.sold
+          ? "Already bought."
+          : affordable
+            ? ""
+            : `Need ${entry.cost - acorns} more acorns.`;
+        card.btn.onclick = () => {
+          if (!game.buyShopEntry(i)) return;
+          showRoomEvent(event);
+        };
+      });
+      const rerollCost = game.shopRerollPrice();
+      eventLeave.textContent = `Move on  ·  Reroll ${rerollCost}`;
+      eventLeave.onclick = () => {
+        if (acorns >= rerollCost && game.rerollShopStock()) {
+          showRoomEvent(event);
+          return;
+        }
+        game.leaveRoom();
+        finishRewardFlow();
+      };
+      relayout();
+      mode = "room";
+      syncClickCapture();
+      return;
+    }
+
+    if (event.kind === "chaos") {
+      const gate = game.chaosOffer();
+      eventText.textContent = gate
+        ? `${gate.curse.blurb}`
+        : "The air here is wrong, but nothing answers.";
+      hide();
+      if (gate) {
+        const card = eventCards[0];
+        card.btn.classList.remove("hidden");
+        card.btn.className = "battle-boon-card door-chaos";
+        card.tag.textContent = "ACCEPT THE CURSE";
+        card.name.replaceChildren(document.createTextNode(gate.curse.name));
+        card.desc.textContent = gate.curse.rewardBlurb;
+        card.btn.disabled = false;
+        card.btn.onclick = () => {
+          game.acceptChaos();
+          finishRewardFlow();
+        };
+      }
+      eventLeave.textContent = "Walk away";
+      relayout();
+      mode = "room";
+      syncClickCapture();
+      return;
+    }
+
+    if (event.kind === "shrine") {
+      const held = game.heldBoons();
+      eventText.textContent = held.length
+        ? "Deepen what you already carry."
+        : "You carry nothing for the shrine to deepen.";
+      hide();
+      held.slice(0, 4).forEach((inst, i) => {
+        const def = BOON_DEFS_BY_ID[inst.id];
+        const card = eventCards[i];
+        if (!def) return;
+        card.btn.classList.remove("hidden");
+        card.btn.className = `battle-boon-card rarity-border-${inst.rarity}`;
+        card.tag.textContent = `RANK ${inst.rank} → ${inst.rank + 1}`;
+        card.name.replaceChildren(boonIcon(def.id, "battle-boon-card-icon"), document.createTextNode(def.name));
+        card.desc.textContent = describeBoon(def, { rarity: inst.rarity, rank: inst.rank + 1 });
+        card.btn.disabled = inst.rank >= def.maxRank;
+        card.btn.title = inst.rank >= def.maxRank ? "Already at its deepest." : "";
+        card.btn.onclick = () => {
+          game.shrineRankUp(inst.id);
+          finishRewardFlow();
+        };
+      });
+      relayout();
+      mode = "room";
+      syncClickCapture();
+      return;
+    }
+
+    // Fountain and chest: a single act, no decision to make.
+    hide();
+    eventText.textContent =
+      event.kind === "fountain"
+        ? "Cold water, and a moment to breathe."
+        : "Something was left here for whoever made it this far.";
+    eventLeave.textContent = event.kind === "fountain" ? "Drink and move on" : "Take it";
+    eventLeave.onclick = () => {
+      game.resolveSimpleRoom();
+      finishRewardFlow();
+    };
+    relayout();
+    mode = "room";
+    syncClickCapture();
+  }
+
   function finishRewardFlow(): void {
+    // A live, undecided fight outranks everything — this is the case the
+    // separate resume ladder in tick() used to own, folded in here so there is
+    // exactly one statement of the priority order to keep correct.
+    const live = game.save.adventure?.battle;
+    if (live && !live.outcome) {
+      enterFreshBattleBeat();
+      return;
+    }
     const revival = game.revivalOffer();
     if (revival) {
       showRevivalOffer(revival);
@@ -839,22 +1257,36 @@ export function initBattle(game: Game): void {
       showChestReveal(chest);
       return;
     }
-    if (game.save.adventure) {
-      showStageCleared();
+    const roomEvent = game.pendingRoomEvent();
+    if (roomEvent) {
+      showRoomEvent(roomEvent);
+      return;
+    }
+    // A Depth boss just fell and the run continues: the one moment worth
+    // stopping for, because it is the only place a toll is charged and the only
+    // place banking out is a genuinely live option.
+    if (game.depthCleared()) {
+      showDepthCleared();
+      return;
+    }
+    const exits = game.exitOffer();
+    if (exits) {
+      showDoors(exits);
       return;
     }
     revivalPanel.classList.add("hidden");
     boonPanel.classList.add("hidden");
     chestPanel.classList.add("hidden");
     clearPanel.classList.add("hidden");
+    doorPanel.classList.add("hidden");
+    eventPanel.classList.add("hidden");
     box.classList.remove("hidden");
     // Deliberately "done", not "idle" — "idle" is syncModeFromGameState's
     // transient "no living actor yet, keep polling" wait state mid-fight
     // and would immediately re-trigger showOutcome every frame here
     // (battle.outcome is still true). "done" is inert: nothing left to do
     // but exit the battle view — reached only once the run has genuinely
-    // ended (a stage-5 full clear, save.adventure already null here), never
-    // for an intermediate stage clear anymore (see showStageCleared above).
+    // ended, never for an intermediate room clear.
     mode = "done";
     hideBubbles();
     textEl.textContent = "";
@@ -1058,23 +1490,47 @@ export function initBattle(game: Game): void {
    * scratch each sync: the list is short (at most 6 distinct boons) and
    * only changes on a pick, so there's no meaningful cost to not diffing
    * it. */
+  /** The active-build tray.
+   *
+   * DIFFED, not rebuilt. The previous version called replaceChildren on every
+   * 30ms tick, which was safe only because the chips were inert — the moment
+   * anything here becomes clickable, rebuilding under the pointer swallows the
+   * click, which is the exact bug this file's header documents. Keying on the
+   * build's shape means the DOM is touched only when the build actually
+   * changes. */
+  let boonsHudKey = "";
   function syncBoonsHud(): void {
-    const boons = game.save.adventure?.boons;
-    const entries = boons ? Object.entries(boons).filter(([, n]) => n > 0) : [];
-    boonsHud.classList.toggle("hidden", entries.length === 0);
-    if (entries.length === 0) return;
+    const held = game.heldBoons();
+    const key = held.map((h) => `${h.id}:${h.rarity}:${h.rank}`).join("|");
+    boonsHud.classList.toggle("hidden", held.length === 0);
+    if (key === boonsHudKey) return;
+    boonsHudKey = key;
+    if (held.length === 0) {
+      boonsHud.replaceChildren();
+      return;
+    }
     boonsHud.replaceChildren(
-      ...entries.map(([id, n]) => {
+      ...held.map((inst) => {
+        const def = BOON_DEFS_BY_ID[inst.id];
         const chip = document.createElement("span");
-        chip.className = "battle-boon-chip";
-        const def = BOON_DEFS_BY_ID[id as BoonId];
-        const label = def && !def.instant ? `${def.name} ×${n}` : `${def?.name ?? id}`;
-        chip.append(boonIcon(id as BoonId, "battle-boon-chip-icon"), document.createTextNode(label));
-        chip.title = def?.description ?? "";
+        chip.className = `battle-boon-chip rarity-border-${inst.rarity}`;
+        chip.title = def ? `${def.name} — ${describeBoon(def, inst)}` : inst.id;
+        if (def) chip.append(boonIcon(def.id, "battle-boon-chip-icon"));
+        const label = document.createElement("span");
+        label.textContent = inst.rank > 1 ? `${def?.name ?? inst.id} ${inst.rank}` : (def?.name ?? inst.id);
+        chip.append(label);
         return chip;
       }),
     );
   }
+
+  // Game fires this whenever a run beat resolves on its side — entering a
+  // non-combat room, say. The dispatcher then re-derives what should be on
+  // screen. Push rather than poll: the 30ms tick exists to keep the HUD in
+  // sync, not to discover state changes.
+  game.onRunBeatResolved = () => {
+    if (game.isBattleViewOpen()) finishRewardFlow();
+  };
 
   function tick(): void {
     const isOpen = game.isBattleViewOpen();
@@ -1082,49 +1538,21 @@ export function initBattle(game: Game): void {
       wasOpen = isOpen;
       if (isOpen) {
         closeOtherOverlays("battle");
-        const revival = game.revivalOffer();
-        const boonOffer = game.boonOffer();
-        const chest = game.pendingChestReveal();
+        // ONE priority ladder, in finishRewardFlow. This branch used to carry a
+        // hand-maintained second copy of it, with three comments explaining why
+        // each check sat where it did — which was already fragile at four
+        // beats, and would not have survived the six the room graph needs. The
+        // dispatcher re-derives everything from the save on every call, so it
+        // is exactly as correct on a cold resume as it is mid-run; the only
+        // case it did not previously cover (a live, undecided fight) is now its
+        // first branch.
         const battle = game.battleSnapshot();
-        if (revival) {
-          // A paused-then-resumed decision (possibly across an app restart)
-          // lands back on the exact same free/cost offer — see
-          // Game.revivalOffer. A win-case offer (afterWipe false) is always
-          // offered alongside a boon offer from the same stage win, and is
-          // checked first since revival always resolves before the boon
-          // pick (see finishRewardFlow); a loss-case offer (afterWipe true,
-          // a full wipe) never has a boon offer alongside it.
-          showRevivalOffer(revival);
-        } else if (boonOffer) {
-          // A paused-then-resumed pick (possibly across an app restart)
-          // lands back on the exact same 3 options — see Game.boonOffer.
-          showBoonOffer(boonOffer);
-        } else if (chest) {
-          showChestReveal(chest);
-        } else if (game.save.adventure && !game.save.adventure.battle) {
-          // Run still ongoing, no live battle, nothing pending — a paused-
-          // then-resumed "stage cleared, push on or retreat" prompt (see
-          // showStageCleared/finishRewardFlow). Checked ahead of
-          // `battle?.outcome` below: battleSnapshot() falls back to
-          // lastBattleSnapshot (the just-finished, still-outcome-decided
-          // fight) whenever adv.battle is null, which would otherwise
-          // re-trigger the "X defeated!" recap instead of this prompt.
-          showStageCleared();
-        } else if (battle?.outcome) {
+        if (!game.save.adventure && battle?.outcome) {
+          // The run is over and this is the closing recap — not a pending
+          // decision, so it sits outside the ladder.
           showOutcome(battle);
         } else {
-          revivalPanel.classList.add("hidden");
-          boonPanel.classList.add("hidden");
-          chestPanel.classList.add("hidden");
-          mode = "idle";
-          // A genuinely fresh open lands on enterFreshBattleBeat (one-time
-          // hint, if any, then bubbles/skillcheck via syncModeFromGameState);
-          // resuming a battle already mid-flight (a live skill check, or
-          // just back to a normal actor's turn) skips straight to the
-          // latter — enterFreshBattleBeat's hint condition already checks
-          // "nobody's acted yet" so calling it unconditionally here is safe
-          // either way, it just won't show a hint on a resume.
-          enterFreshBattleBeat();
+          finishRewardFlow();
         }
       }
     }
@@ -1135,6 +1563,17 @@ export function initBattle(game: Game): void {
     const adv = game.save.adventure;
     syncBoonsHud();
 
+    if (ledgerOpen) {
+      if (game.save.adventure) {
+        ledger.update(game.runStats(), game.battleSnapshot() ?? undefined);
+      } else {
+        ledgerOpen = false;
+        ledger.el.classList.add("hidden");
+        ledgerBtn.classList.remove("active");
+      }
+    }
+    ledgerBtn.classList.toggle("hidden", !game.save.adventure);
+
     const battle = game.battleSnapshot();
     if (battle) {
       syncEnemyRows(battle);
@@ -1143,12 +1582,12 @@ export function initBattle(game: Game): void {
       positionPlates();
       if (mode === "bubbles") positionBubbles();
     }
-    // adv.stage (not battle.enemy.stage) so this stays accurate even in the
-    // rare case there's no live BattleSnapshot at all — a boon pick resumed
-    // after an app restart (see Game's constructor for the normal fallback
-    // that avoids this, kept here only as a defensive belt-and-braces).
+    // Read off the run rather than off the live BattleSnapshot, so this stays
+    // accurate even when there is no fight at all — a door screen, a stall, or
+    // an offer resumed after an app restart.
     stageInfo.textContent = adv
-      ? `${getWorld(adv.world).name} · Stage ${adv.stage}/5 · pending ${abbrev(adv.pendingWood)} wood, ${abbrev(adv.pendingAmber)} amber`
+      ? `${DEPTH_NAMES[depthOf(adv.roomsCleared)]} · Room ${Math.min(TOTAL_ROOMS, adv.roomsCleared + 1)}/${TOTAL_ROOMS} · ` +
+        `${abbrev(adv.acorns)} acorns · ${abbrev(adv.pendingWood)} wood`
       : "";
 
     // Revival/boon/chest/cleared/done screens are entirely click/button-

@@ -105,6 +105,10 @@
   --plank-label: #4a3520; /* section labels on the board */
   --plank-edge: #6e4c30; /* board frame / nail heads */
   --notch-bg: #b2915f; /* budget plank face (gradient bottom) */
+  --curse: #9b2222; /* curses, and the "this pick costs you something" line.
+                       6.05:1 on --bg-panel. Deliberately NOT --danger, which
+                       measures 3.34:1 there and would fail the contrast gate
+                       the moment it were used for DOM text. */
   --danger: #d64545; /* matches canvas danger red (budget critical, battle MISS/KO) */
   --danger-rgb: 214, 69, 69;
   --warning: #e6a23c; /* matches canvas budget-bar amber state */
@@ -2842,8 +2846,14 @@ body.shop-takeover #shop {
   box-shadow: 0 4px 12px rgba(var(--accent-gold-rgb), 0.25);
 }
 
+/* display, not visibility. `visibility: hidden` keeps the element in the grid,
+ * which was harmless when there were exactly three fixed slots but silently
+ * adds an empty second ROW now that there are four (the fourth exists for
+ * Overclock and The Long Day, which widen the offer). That row read as a large
+ * unexplained gap under the cards. The visible column count is set from JS —
+ * see showBoonOffer — so the layout stays even at three or four. */
 .battle-boon-card.hidden {
-  visibility: hidden;
+  display: none;
 }
 
 .battle-boon-card-tag {
@@ -3589,4 +3599,317 @@ button:active:not(:disabled) {
 .build-slot.stocked {
   border-color: var(--accent-gold);
   background: linear-gradient(180deg, #f0d79a, #d9b467);
+}
+
+/* --- Adventure rework: rarity frames, door cards, shop rows ---------------
+ *
+ * The offer screen is the moment the run is about, so rarity has to be
+ * readable before a single word is: the card's top border carries it, which
+ * means a glance across three cards finds the Heroic without reading any of
+ * them. Reuses the existing --rarity-* tokens (already WCAG-checked against
+ * --bg-panel by sim/sim.ts) rather than introducing a parallel palette.
+ *
+ * Heroic deliberately reuses --rarity-legendary instead of adding a token:
+ * every new text/surface token has to earn its place in the contrast gate,
+ * and "the best tier is gold" is already the language the rest of the app
+ * speaks. */
+.battle-boon-card.rarity-border-common { border-top-color: var(--rarity-common); }
+.battle-boon-card.rarity-border-rare { border-top-color: var(--rarity-rare); }
+.battle-boon-card.rarity-border-epic { border-top-color: var(--rarity-epic); }
+.battle-boon-card.rarity-border-heroic {
+  border-top-color: var(--rarity-legendary);
+  /* The one tier that gets more than a colour. A Heroic should feel like it
+   * arrived rather than like it was dealt. */
+  box-shadow: 0 0 0 1px rgba(var(--accent-gold-rgb), 0.35), 0 4px 14px rgba(var(--accent-gold-rgb), 0.2);
+}
+
+/* The line that says what a pick COSTS: which exclusive boon it displaces, or
+ * which rank it moves. Quiet by default, loud when something is being given
+ * up — an exclusive slot is only a decision if the trade is visible. */
+.battle-boon-card-note {
+  font-size: 10px;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+.battle-boon-card-note.replaces {
+  color: var(--curse);
+  font-weight: 600;
+}
+
+.battle-boon-card-tag.rarity-common { color: var(--rarity-common); }
+.battle-boon-card-tag.rarity-rare { color: var(--rarity-rare); }
+.battle-boon-card-tag.rarity-epic { color: var(--rarity-epic); }
+.battle-boon-card-tag.rarity-heroic { color: var(--rarity-legendary); }
+
+/* Reroll sits under the cards, deliberately understated: it is a safety valve,
+ * not the main action, and a button competing with the cards for attention
+ * would be answering a question nobody asked yet. */
+.battle-boon-reroll {
+  align-self: center;
+  margin-top: var(--gap-sm);
+  padding: var(--pad-btn-compact);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.battle-boon-reroll:hover:not(:disabled) {
+  background: var(--btn-bg-hover);
+  border-color: var(--accent-gold);
+}
+.battle-boon-reroll:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Doors. Each reward type gets its own edge colour so the junction reads as a
+ * set of distinct promises rather than three identical buttons — the choice is
+ * supposed to be legible at a glance, mid-run, without stopping to read. */
+.battle-door-card { border-top-width: 2px; }
+.battle-door-card.door-boon { border-top-color: var(--accent-green); }
+.battle-door-card.door-rank { border-top-color: var(--accent-gold); }
+.battle-door-card.door-acorns { border-top-color: var(--accent-wood); }
+.battle-door-card.door-chest { border-top-color: var(--rarity-legendary); }
+.battle-door-card.door-heal { border-top-color: var(--rarity-rare); }
+.battle-door-card.door-shop { border-top-color: var(--accent-wood); }
+.battle-door-card.door-chaos { border-top-color: var(--curse); }
+.battle-door-card.door-elite { border-top-color: var(--curse); }
+
+.battle-boon-card-tag.door-tag-boon { color: var(--accent-green); }
+.battle-boon-card-tag.door-tag-rank { color: var(--accent-gold); }
+.battle-boon-card-tag.door-tag-acorns,
+.battle-boon-card-tag.door-tag-shop { color: var(--accent-wood); }
+.battle-boon-card-tag.door-tag-chest { color: var(--rarity-legendary); }
+.battle-boon-card-tag.door-tag-heal { color: var(--rarity-rare); }
+.battle-boon-card-tag.door-tag-chaos,
+.battle-boon-card-tag.door-tag-elite { color: var(--curse); }
+
+/* A sold-out stall slot stays on screen rather than disappearing: a shop that
+ * silently shrinks as you buy makes it impossible to see what you passed up. */
+.battle-boon-card.sold {
+  opacity: 0.45;
+  cursor: default;
+}
+.battle-boon-card:disabled {
+  cursor: default;
+  transform: none;
+}
+.battle-boon-card:disabled:hover {
+  background: var(--btn-bg);
+  border-color: var(--border-divider);
+  box-shadow: none;
+}
+
+/* --- The Field Ledger -----------------------------------------------------
+ *
+ * A dense numeric sheet, so it is laid out as a real table rather than as a
+ * list of sentences: fixed-width label, right-aligned value, provenance in the
+ * remaining space. Scanning down the value column has to work, because that is
+ * the column the player is actually watching move over a run. */
+.ledger-panel {
+  /* Clears the top bar rather than sliding under it — the round counter and
+     the Ledger toggle both live up there, and a title printed over them read
+     as a rendering fault. */
+  top: 26px;
+  /* Sizes to content, with a ceiling: a two-boon build should not open a
+     full-height panel of empty parchment, and a twelve-boon one still has to
+     stay inside the window. */
+  bottom: auto;
+  max-height: calc(100% - 42px);
+  overflow-y: auto;
+  justify-content: flex-start;
+  gap: 2px;
+  border-color: var(--accent-gold);
+}
+
+.ledger-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ledger-row {
+  display: grid;
+  /* Wide enough for the longest label ("Bark on guard") on one line — a
+     wrapping label breaks the row rhythm the value column depends on. */
+  grid-template-columns: 86px 48px 1fr;
+  align-items: baseline;
+  gap: var(--gap-sm);
+  padding: 1px 0;
+  font-size: 10px;
+  line-height: 1.35;
+}
+.ledger-row.hidden { display: none; }
+
+.ledger-label {
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+
+.ledger-value {
+  text-align: right;
+  color: var(--text-bright);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+/* A stat a charm or curse has dragged below its neutral value. Trade-offs are
+ * the point, so the sheet has to show the cost as plainly as the benefit. */
+.ledger-value.below-base { color: var(--curse); }
+
+.ledger-from {
+  color: var(--text-secondary);
+  border-left: 1px solid var(--border-divider);
+  padding-left: var(--gap-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ledger-notes {
+  margin-top: var(--gap-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ledger-note {
+  font-size: 10px;
+  color: var(--text-primary);
+}
+.ledger-note.cursed { color: var(--curse); font-weight: 600; }
+
+.battle-ledger-btn {
+  padding: 1px 6px;
+  background: rgba(var(--bg-panel-rgb), 0.9);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.battle-ledger-btn:hover { border-color: var(--accent-gold); }
+.battle-ledger-btn.active {
+  border-color: var(--accent-gold);
+  color: var(--accent-gold);
+}
+.battle-ledger-btn.hidden { display: none; }
+
+/* Keepsake rack on the Muster screen. Hidden entirely until the first token is
+ * earned — an empty rack of five greyed buttons is a wall of "you cannot do
+ * this yet" on the screen a new player sees first. */
+.adv-keepsakes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-sm);
+  justify-content: center;
+}
+.adv-keepsakes.hidden { display: none; }
+.adv-keepsake {
+  padding: 2px 8px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.adv-keepsake:hover:not(:disabled) { border-color: var(--accent-gold); }
+.adv-keepsake.active {
+  border-color: var(--accent-gold);
+  color: var(--accent-gold);
+  font-weight: 600;
+}
+.adv-keepsake:disabled { opacity: 0.4; cursor: default; }
+
+/* The Fated List. A dense grid of small tiles rather than rows: the whole
+ * appeal is seeing the shape of what you have and have not found, and a list
+ * long enough to scroll hides exactly that. */
+.adv-codex-toggle {
+  align-self: center;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.adv-codex-toggle:hover { color: var(--text-primary); border-color: var(--accent-gold); }
+
+.adv-codex {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  max-height: 110px;
+  overflow-y: auto;
+  padding: var(--gap-sm);
+  background: var(--bg-inset);
+  border-radius: var(--radius-sm);
+}
+.adv-codex.hidden { display: none; }
+
+.adv-codex-tile {
+  padding: 1px 5px;
+  background: var(--btn-bg);
+  border-radius: var(--radius-sm);
+  color: var(--text-bright);
+  font-size: 9px;
+  white-space: nowrap;
+}
+/* Undiscovered entries stay in the grid at full size. The gap is the point:
+ * an absence you can count is a reason to go back down. */
+.adv-codex-tile.locked {
+  background: transparent;
+  border: 1px dashed var(--border-divider);
+  color: var(--text-secondary);
+}
+
+/* Pact of the Grove. Each modifier states its cost in plain words and its
+ * worth as a number, and the header shows the payout live as they are toggled
+ * — pricing the wager before taking it is the whole mechanic. */
+.adv-pact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-sm);
+  align-items: center;
+}
+.adv-pact.hidden { display: none; }
+
+.adv-pact-title {
+  font-size: 10px;
+  color: var(--accent-gold);
+  font-weight: 600;
+}
+
+.adv-pact-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  justify-content: center;
+}
+
+.adv-pact-mod {
+  padding: 1px 6px;
+  background: var(--bg-inset);
+  border: 1px dashed var(--border-divider);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+}
+.adv-pact-mod:hover { color: var(--text-primary); }
+/* An active modifier reads in the curse colour, not the accent one: it is a
+ * thing the player has chosen to have done to them. */
+.adv-pact-mod.active {
+  border-style: solid;
+  border-color: var(--curse);
+  color: var(--curse);
+  font-weight: 600;
 }

@@ -33,7 +33,7 @@ import {
   TEAM_ICON,
   UI_PALETTE,
 } from "./scene/ui-icons";
-import { initAdventure } from "./ui/adventure";
+import { initAdventure, isAdventureOpen } from "./ui/adventure";
 import { initBattle } from "./ui/battle";
 import {
   anyOverlayOpen,
@@ -500,7 +500,7 @@ async function boot(): Promise<void> {
   const battleExitBtn = document.getElementById("battle-exit") as HTMLButtonElement;
   const stripEl = document.getElementById("strip")!;
 
-  type TakeoverMode = "none" | "pov" | "battle" | "shop";
+  type TakeoverMode = "none" | "pov" | "battle" | "shop" | "adventure";
   let takeoverMode: TakeoverMode = "none";
   /** The window size to restore once we return to "none" — captured ONCE on
    * the none->takeover transition, never re-captured on a takeover->takeover
@@ -515,6 +515,12 @@ async function boot(): Promise<void> {
     if (mode === "pov") return new LogicalSize(380, 340);
     if (mode === "battle") return new LogicalSize(460, 360);
     if (mode === "shop") return new LogicalSize(560, 480);
+    // Muster carries the formation, the provisions, the keepsake rack and the
+    // Fated List. At the widget's default 360x260 that is roughly 344x162 of
+    // usable panel, which was already tight before the rework added two more
+    // things to it. Matches the battle takeover's footprint so entering a run
+    // is not also a window resize.
+    if (mode === "adventure") return new LogicalSize(460, 360);
     return null;
   }
 
@@ -548,7 +554,9 @@ async function boot(): Promise<void> {
         ? "pov"
         : isShopOpen()
           ? "shop"
-          : "none";
+          : isAdventureOpen()
+            ? "adventure"
+            : "none";
     if (wantMode === takeoverMode) return;
     const prevMode = takeoverMode;
     takeoverMode = wantMode;

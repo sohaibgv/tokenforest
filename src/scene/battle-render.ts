@@ -18,7 +18,7 @@ import { getWorld, WORKER_DEFS_BY_ID } from "../economy";
 import type { GameSave } from "../game-state";
 import { equippedItem, type TeamMemberSave } from "../team";
 import { battleEnemySlot, battleEnemyZoom, battleIdleBob, battlePartySlot, BATTLE_ZOOM } from "./battle-layout";
-import { drawDungeonArena, drawFloorShadow } from "./dungeon";
+import { drawDoors, drawDungeonArena, drawFloorShadow } from "./dungeon";
 import type { FloatingText } from "./floating-text";
 import {
   DATA_BEAM,
@@ -57,6 +57,14 @@ export interface BattleRenderView {
   battleShakeT: number;
   battleSkillCheck: SkillCheck | null;
   battleSkillCheckGrace: number;
+
+  /** How many doorways to carve into the back wall, and which is hovered.
+   * Zero everywhere except a junction between rooms — the doors ARE the
+   * choice screen, drawn into the chamber rather than floated over it. */
+  doorCount: number;
+  doorHover: number | null;
+  /** Reward kind per door, for the sigils carved into the lintels. */
+  doorRewards: string[];
 
   battleSnapshot(): BattleSnapshot | null;
   currentBattleActorId(): string | null;
@@ -105,6 +113,11 @@ export function renderBattleScene(ctx: CanvasRenderingContext2D, v: BattleRender
   // ground colour still tints the masonry, so each world's dungeon keeps
   // its own flavour.
   drawDungeonArena(ctx, w, h, world.ground, v.animT);
+  // Doors belong to the back wall, so they go down with the architecture and
+  // before anything standing in the room.
+  if (v.doorCount > 0) {
+    drawDoors(ctx, w, h, world.ground, v.doorCount, v.doorHover, v.doorRewards);
+  }
   const vignette = ctx.createRadialGradient(
     w / 2,
     h * 0.45,

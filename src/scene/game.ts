@@ -4,13 +4,16 @@
 
 import { reportFell, type ChopEvent, type Snapshot } from "../bridge";
 import {
+  BASE_REROLLS,
   buildEnemy,
   chestDecoration,
   chestReward,
-  continueFee,
+  descentToll,
   embarkCost,
   reviveCost,
+  roomTier,
   type ChestReward,
+  type EliteAffixId,
 } from "../adventure";
 import {
   isBattleOver,
@@ -22,12 +25,39 @@ import {
   type TurnEvent,
 } from "../battle";
 import {
+  BOON_DEFS_BY_ID,
   BOON_HEAL_PCT,
   BOON_HP_PCT,
-  boonWoodMult,
-  drawBoonOffer,
-  type BoonId,
-} from "../boons";
+  describeBoon,
+  RARITY_LABEL,
+  type BoonInstance,
+} from "../run/boons";
+import { CHARM_DEFS, CHARM_DEFS_BY_ID, CURSE_DEFS, type CurseDef } from "../run/charms";
+import { applyOfferCard, drawOffer, rerollOffer, type OfferContext, type RunOffer } from "../run/offers";
+import { groveRank, grovePayoutMult, pactEnemyScaling } from "../run/pact";
+import { MAX_PATRON_FAVOR, type PatronId } from "../run/patrons";
+import {
+  depthOf,
+  exitsAfter,
+  generateRunMap,
+  isDepthBoundary,
+  isFinalRoom,
+  roomById,
+  TOTAL_ROOMS,
+  type RoomSpec,
+} from "../run/rooms";
+import { doorRects, hitDoor, type DoorRect } from "./dungeon";
+import {
+  canBuy,
+  CONSUMABLE_DEFS_BY_ID,
+  rerollShop,
+  rollShop,
+  roomAcorns,
+  shopRerollCost,
+  type ShopEntry,
+  type ShopState,
+} from "../run/shop";
+import { baseRunStats, deriveRunStats, type RunStats } from "../run/stats";
 import { maxWorldIndex } from "../unlocks";
 import {
   amberTradeCost,
@@ -142,7 +172,6 @@ export interface ChestRevealSummary {
   decorId?: string;
 }
 import type {
-  AdventureLogEntry,
   AdventureState,
   GameSave,
 } from "../game-state";
@@ -555,33 +584,29 @@ export class Game {
     this.onSkillCheckResult = (grade, wc) =>
       this.applyWoodchoppingItemEffects(grade, wc);
 
-    // Resuming mid-boon-pick (or mid-revive-decision — the two are always
-    // offered from the very same stage win, see finalizeBattleOutcome,
-    // though the revive offer is always resolved first by the normal UI
-    // flow) after a genuine app restart: the stage that was just won is
-    // already decided, but lastBattleSnapshot (normally only alive for the
-    // rest of THIS session — see its own doc comment) starts null on a
-    // fresh process, which would leave renderBattle with nothing to draw
-    // behind the boon-pick/revive UI. Seed that same fallback with a
-    // minimal already-decided snapshot of the cleared stage's enemy so the
-    // scene still renders — nothing here runs any turn logic against it,
-    // submitTurnAction/resolvePartyTurn are never called with it.
-    if (save.adventure?.pendingBoonOffer || save.adventure?.pendingRevival) {
+    // Resuming mid-decision after a genuine app restart — a pending offer, a
+    // pending revive, an unanswered door, or a half-resolved event room. The
+    // room that produced it is already decided, but lastBattleSnapshot (alive
+    // only for the rest of THIS session — see its own doc comment) starts null
+    // on a fresh process, which would leave renderBattle with nothing to draw
+    // behind the reward UI: a black chamber with a card panel floating in it.
+    //
+    // Seeding a minimal already-decided snapshot fixes that. Nothing runs turn
+    // logic against it — resolveTurn is never called with this — so which room
+    // it names does not matter, only that it is a real one.
+    //
+    // The door and event cases are easy to forget here precisely because they
+    // are new; leaving them out is a black-screen bug that only appears after a
+    // restart, which is the hardest kind to notice while building.
+    if (
+      save.adventure?.pendingOffer ||
+      save.adventure?.pendingRevival ||
+      save.adventure?.pendingExits ||
+      save.adventure?.pendingRoom
+    ) {
       const adv = save.adventure;
-      // `adv.stage` is 0 for a run that ended in a LOSS before clearing
-      // anything — the revival prompt is offered with nothing cleared — so
-      // the old bare `as 1|2|3|4|5` cast was simply false in exactly the case
-      // this branch exists to handle, and buildEnemy then threw here, in the
-      // constructor, taking the whole boot down with it. Which stage this
-      // decorative snapshot names does not matter (see above: no turn logic
-      // ever runs against it), only that it is a real one.
-      const clearedStage = Math.min(5, Math.max(1, adv.stage)) as
-        1 | 2 | 3 | 4 | 5;
       this.lastBattleSnapshot = {
-        // Every enemy of the just-cleared stage, all already at 0 hp — same
-        // "already decided win" fallback the old single-enemy version had,
-        // ids assigned the same way startBattle itself assigns them.
-        enemies: buildEnemy(adv.world, clearedStage).map((spec, index) => ({
+        enemies: buildEnemy(adv.world, roomTier(adv.roomsCleared)).map((spec, index) => ({
           id: `enemy-${index}`,
           spec,
           hp: 0,
@@ -606,6 +631,12 @@ export class Game {
       this.lastBattlePartyIds = [...adv.partyIds];
     }
   }
+
+  /** Fired whenever a run beat resolves and the reward flow should re-check
+   * what is pending. Mirrors the existing onWantAdventureOverlay hook: Game
+   * owns the state, ui/battle.ts owns the screens, and neither polls the
+   * other. */
+  onRunBeatResolved?: () => void;
 
   private makePlot(world: number, plotIndex: number): Plot {
     return new Plot(
@@ -1019,6 +1050,7 @@ export class Game {
     world: number,
     partyIds: string[],
     carried: ProvisionId[],
+    keepsake?: PatronId | null,
   ): boolean {
     const s = this.save;
     if (s.adventure) return false;
@@ -1040,10 +1072,38 @@ export class Game {
 
     s.wood -= cost;
     for (const m of party) m.status = "adventuring";
+
+    // One seed for the whole run. The map, every offer and every stall derive
+    // from it, so a run is reproducible from a single number — which is what
+    // makes a resumed run show the doors and cards it was already showing.
+    const seed = hashString(`${new Date().toISOString()}-${world}-${partyIds.join()}`);
+    // Dry Wells removes the pre-boss springs, which is a MAP property, so it
+    // has to be decided when the map is generated rather than when a fountain
+    // is walked into.
+    const map = generateRunMap(seed, { noFountains: (s.pact ?? []).includes("dryWells") });
+    const rank = groveRank(s.pact ?? []);
+
     s.adventure = {
       world,
       partyIds: [...partyIds],
-      stage: 0,
+      roomsCleared: 0,
+      seed,
+      map,
+      currentRoomId: map.slots[0][0].id,
+      pendingExits: null,
+      pendingRoom: null,
+      acorns: 0,
+      boonList: [],
+      charms: [],
+      curses: [],
+      bark: {},
+      rerollsLeft: BASE_REROLLS,
+      shop: null,
+      keepsake: keepsake ?? null,
+      // Snapshotted at embark so changing the pact mid-run cannot retroactively
+      // change what this run pays out.
+      groveRank: rank,
+      pact: [...(s.pact ?? [])],
       pendingWood: 0,
       pendingAmber: 0,
       carried: cappedCarried,
@@ -1051,53 +1111,142 @@ export class Game {
       startedAt: new Date().toISOString(),
       log: [],
       battle: null,
-      boons: {},
-      pendingBoonOffer: null,
+      pendingOffer: null,
       pendingRevival: null,
       freeReviveUsed: false,
     };
     s.stats.adventuresEmbarked += 1;
-    this.startBattleForNextStage();
+    this.enterRoom(map.slots[0][0]);
     return true;
   }
 
-  /** "Push On": pay the next stage's fee, then open the interactive turn-
-   * based fight for it. Returns false if there's no run, it's already fully
-   * cleared, a fight is already in progress, a boon pick is still pending
-   * (see finalizeBattleOutcome — no skipping the "pick exactly one" gate),
-   * a Team Down revive offer is still pending (see resolveRevival — this one
-   * CAN be skipped, but must still be explicitly resolved one way or another
-   * before pushing on), or the fee can't be afforded. */
-  beginStageBattle(): boolean {
+  /** Persists a change the UI made directly to `save` (the pact toggles are
+   * the only such case — they are pre-run configuration, not a run action, so
+   * they have no natural Game method of their own). */
+  persist(): void {
+    scheduleSave(this.save, true);
+  }
+
+  /** The run's derived build — one call, used by combat, the ledger and every
+   * reward screen so none of them can disagree about what the player has. */
+  runStats(): RunStats {
     const s = this.save;
     const adv = s.adventure;
-    if (
-      !adv ||
-      adv.battle ||
-      adv.stage >= 5 ||
-      adv.pendingBoonOffer ||
-      adv.pendingRevival
-    )
-      return false;
-    const fee = continueFee(getWorld(adv.world).mult, adv.stage + 1);
-    if (s.wood < fee) return false;
-    s.wood -= fee;
-    this.startBattleForNextStage();
-    return true;
+    if (!adv) return baseRunStats();
+    return deriveRunStats({
+      party: this.partyFor(adv.partyIds),
+      inventory: s.inventory,
+      prestigeLevel: s.prestigeLevel,
+      boonList: adv.boonList,
+      charms: adv.charms,
+      curses: adv.curses,
+      carried: adv.carried,
+      world: adv.world,
+    });
   }
 
-  private startBattleForNextStage(): void {
+  /** The room the party is standing in, or null between rooms. */
+  currentRoom(): RoomSpec | null {
+    const adv = this.save.adventure;
+    if (!adv?.currentRoomId) return null;
+    return roomById(adv.map, adv.currentRoomId);
+  }
+
+  /** The doors awaiting a choice, resolved from their persisted ids. Null
+   * whenever the party is not standing at a junction. */
+  exitOffer(): RoomSpec[] | null {
+    const adv = this.save.adventure;
+    if (!adv?.pendingExits) return null;
+    const rooms = adv.pendingExits.map((id) => roomById(adv.map, id)).filter((r): r is RoomSpec => !!r);
+    return rooms.length > 0 ? rooms : null;
+  }
+
+  /** A non-combat room awaiting resolution. */
+  pendingRoomEvent(): { roomId: string; kind: string } | null {
+    return this.save.adventure?.pendingRoom ?? null;
+  }
+
+  /** True when the party has just cleared a Depth boss and the run continues —
+   * the run's "descend or bank" moment, and the only place a toll is charged. */
+  depthCleared(): { depth: number; toll: number } | null {
+    const adv = this.save.adventure;
+    if (!adv || adv.pendingExits || adv.pendingRoom || adv.pendingOffer || adv.pendingRevival) return null;
+    if (!isDepthBoundary(adv.roomsCleared - 1)) return null;
+    return {
+      depth: depthOf(adv.roomsCleared - 1),
+      toll: descentToll(getWorld(adv.world).mult, depthOf(adv.roomsCleared)),
+    };
+  }
+
+  acorns(): number {
+    return this.save.adventure?.acorns ?? 0;
+  }
+
+  heldBoons(): BoonInstance[] {
+    return this.save.adventure?.boonList ?? [];
+  }
+
+  /**
+   * Enters a room: either opens its fight, or hands a non-combat room to the
+   * event flow.
+   *
+   * The single funnel for "the party is now somewhere new", so anything that
+   * must happen on arrival — curse countdown, Bark carried in from the last
+   * room — happens exactly once and in one place.
+   */
+  private enterRoom(room: RoomSpec): void {
     const s = this.save;
     const adv = s.adventure;
     if (!adv) return;
-    const nextStage = (adv.stage + 1) as 1 | 2 | 3 | 4 | 5;
+    adv.currentRoomId = room.id;
+    adv.pendingExits = null;
+
+    if (room.kind === "fight" || room.kind === "elite" || room.kind === "boss") {
+      this.startRoomBattle(room);
+      return;
+    }
+    // Non-combat rooms resolve through the event flow, which the battle view
+    // drives with a canvas dialogue rather than a DOM panel.
+    adv.pendingRoom = { roomId: room.id, kind: room.kind };
+    if (room.kind === "shop") {
+      adv.shop = rollShop(this.offerContext(), depthOf(adv.roomsCleared), adv.seed + adv.roomsCleared * 7919, adv.charms);
+    }
+    this.battleViewOpen = true;
+    scheduleSave(s, true);
+    this.onRunBeatResolved?.();
+  }
+
+  private startRoomBattle(room: RoomSpec): void {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv) return;
     const party = this.partyFor(adv.partyIds);
-    const enemies = buildEnemy(adv.world, nextStage);
+    // The room's affix is what makes an elite door's promise real — without
+    // this the sigil would announce "Armoured, bring status damage" over a
+    // fight that behaved exactly like every other one.
+    const enemies = buildEnemy(
+      adv.world,
+      roomTier(adv.roomsCleared),
+      room.affix as EliteAffixId | undefined,
+      // The pact the run EMBARKED under, not the one currently switched on —
+      // toggling a modifier mid-run must not retroactively change the fight
+      // the player is standing in, nor what it pays out.
+      pactEnemyScaling(adv.pact ?? []),
+    );
+    const stats = this.runStats();
     adv.battle = startBattle(party, enemies, s.inventory, {
       charmed: adv.carried.includes("fortuneCharm"),
       roped: adv.carried.includes("emergencyRope"),
-      boons: adv.boons,
+      stats,
     });
+    // Bark is the one status that outlives a battle — it is a wall the party
+    // built and carried, not a wound the last room left. Restoring it here
+    // rather than at pick time keeps the carry rule in one place.
+    for (const [memberId, shield] of Object.entries(adv.bark)) {
+      if (shield <= 0) continue;
+      adv.battle.statuses = adv.battle.statuses ?? {};
+      adv.battle.statuses[memberId] = { bark: { stacks: shield, rounds: 0, potency: 1 } };
+    }
     this.battleAnimQueue = [];
     this.battleAnim = null;
     this.battleEndT = 0;
@@ -1115,6 +1264,39 @@ export class Game {
     this.closeDialogue();
     this.battleViewOpen = true;
     scheduleSave(s, true);
+  }
+
+  /** Takes a door. Pays the descent toll when crossing into a new Depth. */
+  pickExit(roomId: string): boolean {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv?.pendingExits?.includes(roomId)) return false;
+    const room = roomById(adv.map, roomId);
+    if (!room) return false;
+    if (isDepthBoundary(adv.roomsCleared - 1)) {
+      const toll = descentToll(getWorld(adv.world).mult, room.depth);
+      if (s.wood < toll) return false;
+      s.wood -= toll;
+    }
+    this.enterRoom(room);
+    return true;
+  }
+
+  /** The offer context, assembled from the run and the build. One place, so
+   * the shop and the reward screen can never disagree about what is legal. */
+  private offerContext(): OfferContext {
+    const s = this.save;
+    const adv = s.adventure;
+    const stats = this.runStats();
+    return {
+      held: adv?.boonList ?? [],
+      prestigeLevel: s.prestigeLevel,
+      favor: s.patronFavor,
+      rarityLuck: stats.values.rarityLuck,
+      extraCards:
+        stats.values.extraOfferCount - ((adv?.pact ?? []).includes("leanOfferings") ? 1 : 0),
+      keepsake: adv?.keepsake ?? null,
+    };
   }
 
   /** Whoever's turn it currently is, or null if no battle is active. */
@@ -1280,7 +1462,7 @@ export class Game {
       s.inventory,
       s.prestigeLevel,
       Math.random,
-      adv.boons,
+      {},
       targetEnemyId,
       attackGrade,
     );
@@ -1363,67 +1545,77 @@ export class Game {
     const adv = s.adventure;
     const battle = adv?.battle;
     if (!adv || !battle) return;
-    const nextStage = (adv.stage + 1) as 1 | 2 | 3 | 4 | 5;
-    // Captured now — a stage-5 win banks + clears s.adventure below (via
-    // bankAdventure), so `adv.world` wouldn't be readable anymore by the
-    // time the milestone-chest check runs afterward.
+    const room = this.currentRoom();
+    const clearedIndex = adv.roomsCleared;
     const advWorld = adv.world;
+    const stats = this.runStats();
 
-    let stageWood = 0;
-    let stageAmber = 0;
+    let roomWood = 0;
+    let roomAmber = 0;
     let runOver = false;
 
     if (outcome === "win") {
-      // expeditionBonusPct: epic/legendary Adventuring gear's cleared-stage
-      // reward bonus, summed across the party the same additive way
-      // startBattle sums passive reflectPct.
-      const party = this.partyFor(adv.partyIds);
-      const expeditionBonus = party.reduce((sum, m) => {
-        const item = equippedItem(m, "adventuring", s.inventory);
-        return sum + (item?.adventuring?.expeditionBonusPct ?? 0);
-      }, 0);
-      // woodReward is summed across every enemy in the battle (was just the
-      // single enemy's reward pre-multi-enemy) — every enemy in one battle
-      // shares the same .stage, so the stage-5 amber check below still only
-      // needs to read it off the first unit.
-      const totalWoodReward = battle.enemies.reduce(
-        (sum, u) => sum + u.spec.woodReward,
-        0,
+      const totalWoodReward = battle.enemies.reduce((sum, u) => sum + u.spec.woodReward, 0);
+      const payout = grovePayoutMult(adv.groveRank);
+      roomWood = Math.round(
+        totalWoodReward * (1 + stats.values.expeditionPct) * stats.values.woodMult * payout,
       );
-      // Lumber Blessing (prestige-unlocked boon) multiplies stage wood on
-      // top of the party's expeditionBonusPct — the sim's run driver mirrors
-      // this exact line.
-      stageWood = Math.round(
-        totalWoodReward * (1 + expeditionBonus) * boonWoodMult(adv.boons),
+      roomAmber = Math.round(
+        (isFinalRoom(clearedIndex) ? 30 : Math.random() < 0.2 ? 5 : 0) *
+          (1 + stats.values.expeditionPct) *
+          stats.values.amberMult *
+          payout,
       );
-      stageAmber = Math.round(
-        (battle.enemies[0]?.spec.stage === 5
-          ? 30
-          : Math.random() < 0.2
-            ? 5
-            : 0) *
-          (1 + expeditionBonus),
+      adv.pendingWood += roomWood;
+      adv.pendingAmber += roomAmber;
+
+      // Acorns — the run-local currency, and the only reward that is DELETED
+      // when the run ends. Skipped for non-combat rooms, which reach this path
+      // only in the sense that they never do.
+      const earned = Math.round(
+        roomAcorns(depthOf(clearedIndex), room?.kind ?? "fight", Math.random) *
+          stats.values.acornMult *
+          ((adv.pact ?? []).includes("thinPurse") ? 0.5 : 1),
       );
-      adv.pendingWood += stageWood;
-      adv.pendingAmber += stageAmber;
-      adv.stage = nextStage;
-      // Battle XP: every party member (living or downed — they fought) earns
-      // the stage's XP the moment it's won, auto-leveling through the same
-      // level/levelMult math shard leveling uses. Mid-run levels apply to
-      // the run's remaining stages — the sim's run driver mirrors this.
-      const xpReward = stageXpReward(nextStage, advWorld);
-      for (const m of party) {
-        grantXp(m, xpReward, s.inventory, s.prestigeLevel);
+      adv.acorns += earned;
+
+      adv.roomsCleared = clearedIndex + 1;
+
+      // Curses count down per ROOM, not per fight, so a curse taken at a chaos
+      // gate expires on a schedule the player can actually plan around.
+      adv.curses = adv.curses
+        .map((c) => ({ ...c, roomsLeft: c.roomsLeft - 1 }))
+        .filter((c) => c.roomsLeft > 0);
+
+      // Bark survives into the next room — a wall the party built and carried,
+      // not a wound the last room left.
+      adv.bark = {};
+      for (const [unitId, state] of Object.entries(battle.statuses ?? {})) {
+        const shield = state.bark?.stacks ?? 0;
+        if (shield > 0 && adv.partyIds.includes(unitId)) adv.bark[unitId] = shield;
       }
-      if (nextStage === 5) {
+
+      const party = this.partyFor(adv.partyIds);
+      const xpReward = Math.round(stageXpReward(roomTier(clearedIndex), advWorld) * stats.values.xpMult);
+      for (const m of party) grantXp(m, xpReward, s.inventory, s.prestigeLevel);
+
+      // Patron favour: earned by CLEARING with a patron's boons, not merely by
+      // picking them. Committing has to survive contact with the run for the
+      // meta layer to mean anything.
+      if (isDepthBoundary(clearedIndex) || isFinalRoom(clearedIndex)) {
+        s.patronFavor = s.patronFavor ?? {};
+        for (const patron of new Set(adv.boonList.map((b) => BOON_DEFS_BY_ID[b.id]?.patron).filter(Boolean))) {
+          const id = patron as PatronId;
+          s.patronFavor[id] = Math.min(MAX_PATRON_FAVOR, (s.patronFavor[id] ?? 0) + 1);
+        }
+      }
+
+      if (isFinalRoom(clearedIndex)) {
         s.stats.adventuresCleared += 1;
         runOver = true;
       }
     }
 
-    // Combined name for a potentially multi-enemy fight — "&" for exactly
-    // 2, an Oxford-style comma list + "&" for 3+, unchanged (just that one
-    // enemy's name) for the overwhelmingly common single-enemy case.
     const enemyNames = battle.enemies.map((u) => u.spec.name);
     const combinedEnemyName =
       enemyNames.length <= 1
@@ -1432,15 +1624,14 @@ export class Game {
           ? `${enemyNames[0]} & ${enemyNames[1]}`
           : `${enemyNames.slice(0, -1).join(", ")} & ${enemyNames[enemyNames.length - 1]}`;
 
-    const entry: AdventureLogEntry = {
-      stage: nextStage,
+    adv.log.push({
+      stage: clearedIndex + 1,
       enemyName: combinedEnemyName,
       outcome,
-      woodGained: stageWood,
-      amberGained: stageAmber,
+      woodGained: roomWood,
+      amberGained: roomAmber,
       narrowEscape: battle.narrowEscape,
-    };
-    adv.log.push(entry);
+    });
     if (adv.log.length > 8) adv.log.shift();
 
     this.lastBattleSnapshot = battle;
@@ -1453,8 +1644,8 @@ export class Game {
       const banked = runOver ? this.bankAdventure(1) : { wood: 0, amber: 0 };
       this.lastOutcome = {
         outcome,
-        stageWood,
-        stageAmber,
+        stageWood: roomWood,
+        stageAmber: roomAmber,
         runOver,
         bankedWood: banked.wood,
         bankedAmber: banked.amber,
@@ -1463,98 +1654,38 @@ export class Game {
         narrowEscape: battle.narrowEscape,
       };
 
-      // Milestone chest: stage-3 clear (run continues) or stage-5 full
-      // clear (run just ended, s.adventure is already null by this point)
-      // — a real, permanent reward applied straight to the save (see
-      // grantChest), never reduced by anything that happens afterward.
-      if (nextStage === 3 || nextStage === 5) {
-        this.grantChest(advWorld, nextStage);
+      // A chest at each Depth boss — a real, permanent reward applied straight
+      // to the save, never reduced by whatever happens afterward.
+      if (room?.kind === "boss") {
+        this.grantChest(advWorld, isFinalRoom(clearedIndex) ? 5 : 3);
       }
 
-      // Boon offer: every non-run-ending stage win (1-4) — not stage 5,
-      // since the run is over and there's no "rest of this run" left for a
-      // boon to apply to. Drawn once here and persisted on
-      // adv.pendingBoonOffer (see src/boons.ts's drawBoonOffer) so a
-      // pause-then-resume of an in-progress pick — even across an app
-      // restart — shows the identical 3 options, never a fresh random
-      // redraw. beginStageBattle refuses to start the next fight while
-      // this is set, enforcing the "must pick, no skip" rule.
-      // Team Down revive offer: same non-run-ending gate as the boon offer
-      // above, checked first since ui/battle.ts's finishRewardFlow shows it
-      // ahead of a pending boon pick (a downed teammate is more urgent).
-      // This is the WIN-case offer only — it can only ever trigger with 1+
-      // survivors (a full wipe never reaches a win outcome). The paid
-      // option is ALWAYS offered whenever anyone's down, regardless of
-      // whether the free roll below succeeds; the free roll is guaranteed
-      // once down to a single survivor, otherwise an independent 50%
-      // chance per downed member (1 - 0.5^deadCount: 50% for 1 down, 75%
-      // for 2, ...). Cost is a flat amber amount (see adventure.ts's
-      // reviveCost — unlike embarkCost/continueFee/chestReward, it does NOT
-      // scale with world tier, since amber income barely does either). The
-      // LOSS-case ("Team Down" after a full wipe) offer lives in the
-      // `outcome === "loss"` branch below — same shape, different odds
-      // rule and a very different resolution (see resolveRevival).
       if (!runOver && s.adventure) {
-        const party = this.partyFor(s.adventure.partyIds);
+        const live = s.adventure;
+        const party = this.partyFor(live.partyIds);
         const deadCount = party.filter((m) => m.currentHp <= 0).length;
         if (deadCount > 0) {
           const survivorCount = party.length - deadCount;
-          // Gated by freeReviveUsed: once this run's single free revive has
-          // already been spent (see resolveRevival), the roll always
-          // resolves to false — the underlying odds/guarantee formula below
-          // is untouched, only whether `free: true` is allowed at all.
           const freeRevive =
-            !s.adventure.freeReviveUsed &&
-            (survivorCount <= 1
-              ? true
-              : Math.random() < 1 - Math.pow(0.5, deadCount));
-          s.adventure.pendingRevival = {
-            free: freeRevive,
-            cost: reviveCost(),
-            afterWipe: false,
-          };
+            !live.freeReviveUsed &&
+            (survivorCount <= 1 ? true : Math.random() < 1 - Math.pow(0.5, deadCount));
+          live.pendingRevival = { free: freeRevive, cost: reviveCost(), afterWipe: false };
         }
-        s.adventure.pendingBoonOffer = drawBoonOffer(
-          party,
-          s.inventory,
-          s.adventure.abilityUsed,
-          Math.random,
-          s.prestigeLevel,
-        );
+        // The room's reward decides what comes next. A boon or rank door draws
+        // an offer; everything else goes straight to the doors, because the
+        // reward WAS the room.
+        if (room?.reward === "boon" || room?.reward === "rank" || room?.kind === "elite" || room?.kind === "boss") {
+          this.drawRoomOffer(room.reward === "rank", room.kind === "elite" || room.kind === "boss");
+        } else {
+          this.openExits();
+        }
       }
     } else {
-      // A "loss" outcome from battle.ts only ever means a genuine full
-      // party wipe (see battle.ts's `party.every(m => m.currentHp <= 0)`
-      // gate — the lastStandArmed/roped saves are already exhausted by the
-      // time outcome becomes "loss"), so deadCount is computed properly
-      // here rather than assumed, even though it should always equal
-      // party.length. Give the wipe the same "Team Down" revive chance a
-      // partial-death WIN already gets (see the win branch above) BEFORE
-      // committing to ending the run — unlike that win-case offer, there is
-      // no "guaranteed free if <=1 survivor" carve-out here: a wipe leaves
-      // 0 survivors, and auto-guaranteeing every wipe a free save would
-      // remove all real stakes from losing, so this uses the plain
-      // per-downed-member probabilistic roll only.
       const party = this.partyFor(adv.partyIds);
       const deadCount = party.filter((m) => m.currentHp <= 0).length;
       if (deadCount > 0) {
-        // Same freeReviveUsed gate as the win branch above — only the
-        // allow-`free: true` gate, the per-downed-member odds formula
-        // itself is untouched.
-        const freeRevive =
-          !adv.freeReviveUsed && Math.random() < 1 - Math.pow(0.5, deadCount);
-        adv.pendingRevival = {
-          free: freeRevive,
-          cost: reviveCost(),
-          afterWipe: true,
-        };
-        // Deferred: none of the usual loss finalization (resting marks,
-        // adventuresFailed, banking) happens yet — see finalizeLoss, run
-        // from resolveRevival once the player decides one way or another.
-        // lastOutcome reflects "nothing banked yet" so anything reading it
-        // before that (see ui/battle.ts's showOutcome's afterWipe check)
-        // gets sane, if intentionally incomplete, numbers rather than a
-        // stale summary from some earlier fight.
+        const freeRevive = !adv.freeReviveUsed && Math.random() < 1 - Math.pow(0.5, deadCount);
+        adv.pendingRevival = { free: freeRevive, cost: reviveCost(), afterWipe: true };
         this.lastOutcome = {
           outcome,
           stageWood: 0,
@@ -1567,13 +1698,360 @@ export class Game {
           narrowEscape: battle.narrowEscape,
         };
       } else {
-        // Not actually reachable per battle.ts's wipe gate above (a "loss"
-        // outcome always means everyone's at 0 HP) — kept so this stays a
-        // complete, honest path regardless of that invariant.
         this.finalizeLoss(adv, battle);
       }
     }
     scheduleSave(s, true);
+  }
+
+  /** Draws the offer a cleared room owes, and persists it verbatim.
+   *
+   * An elite or a boss always pays at least Epic — the reward has to visibly
+   * match the risk, or taking the elite door is a tax rather than a wager. */
+  private drawRoomOffer(rankUpOnly: boolean, elite = false): void {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv) return;
+    const stats = this.runStats();
+    const seed = (adv.seed + adv.roomsCleared * 104729) >>> 0;
+    const offer = drawOffer(this.offerContext(), seed, 3);
+    if (rankUpOnly) {
+      for (const card of offer.cards) {
+        if (adv.boonList.some((h) => h.id === card.boonId)) card.rankUp = true;
+      }
+    }
+    // An elite or a boss pays at least Epic. Taking the harder door has to be
+    // a WAGER, not a tax — a player who accepts a Regrowing elite and spends
+    // half the party's health on it must not then be handed the same Common
+    // card the safe door was offering.
+    if (elite) {
+      for (const card of offer.cards) {
+        const def = BOON_DEFS_BY_ID[card.boonId];
+        if (!def) continue;
+        if (card.rarity === "common" || card.rarity === "rare") {
+          card.rarity = def.rarities.includes("epic")
+            ? "epic"
+            : def.rarities[def.rarities.length - 1];
+        }
+      }
+    }
+    offer.rerollsLeft = adv.rerollsLeft + Math.round(stats.values.rerollCharges);
+    adv.pendingOffer = offer;
+    for (const card of offer.cards) this.discover(card.boonId);
+    scheduleSave(s, true);
+  }
+
+  /** Records a boon, charm or curse in the Fated List. Discovery is permanent;
+   * seeing a thing once is the reward. */
+  private discover(id: string): void {
+    const s = this.save;
+    s.codex = s.codex ?? [];
+    if (!s.codex.includes(id)) s.codex.push(id);
+  }
+
+  /** Opens the doors out of the current room. */
+  private openExits(): void {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv) return;
+    const exits = exitsAfter(adv.map, adv.roomsCleared - 1);
+    if (!exits) return;
+    adv.pendingExits = exits.map((r) => r.id);
+    adv.currentRoomId = null;
+    scheduleSave(s, true);
+  }
+
+  /** The offer awaiting a pick. */
+  boonOffer(): RunOffer | null {
+    return this.save.adventure?.pendingOffer ?? null;
+  }
+
+  /**
+   * Takes one of the offered cards.
+   *
+   * Three outcomes, and the distinction is the slot system working: a rank-up
+   * deepens what is held, a rarity upgrade replaces in place while KEEPING the
+   * rank already earned, and an exclusive pick displaces whatever the card
+   * named. The instant boons resolve their whole payload here and are never
+   * held at all.
+   */
+  pickBoonCard(boonId: string): boolean {
+    const s = this.save;
+    const adv = s.adventure;
+    const offer = adv?.pendingOffer;
+    if (!adv || !offer) return false;
+    const card = offer.cards.find((c) => c.boonId === boonId);
+    if (!card) return false;
+    const def = BOON_DEFS_BY_ID[boonId];
+    adv.pendingOffer = null;
+    this.discover(boonId);
+
+    if (def?.slot === "instant") {
+      this.applyInstantBoon(def.effects.find((e) => e.kind === "custom")?.handlerId);
+    } else {
+      adv.boonList = applyOfferCard(adv.boonList, card, adv.roomsCleared);
+      // Iron Skin touches real HP pools once, at pick time — the same
+      // apply-once treatment equipping gear already gets — rather than being a
+      // per-turn multiplier.
+      if (boonId === "ironSkin") this.applyInstantBoon("ironSkinHp");
+    }
+    this.openExits();
+    scheduleSave(s, true);
+    return true;
+  }
+
+  private applyInstantBoon(handlerId: string | undefined): void {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv || !handlerId) return;
+    const party = this.partyFor(adv.partyIds);
+    if (handlerId === "ironSkinHp") {
+      for (const m of party) {
+        if (m.currentHp <= 0) continue;
+        const bump = Math.round(m.maxHp * BOON_HP_PCT);
+        m.maxHp += bump;
+        m.currentHp = Math.min(m.maxHp, m.currentHp + bump);
+      }
+    } else if (handlerId === "secondWindHeal") {
+      for (const m of party) {
+        if (m.currentHp <= 0) continue;
+        m.currentHp = Math.min(m.maxHp, m.currentHp + Math.round(m.maxHp * BOON_HEAL_PCT));
+      }
+    } else if (handlerId === "rechargeAbility") {
+      adv.abilityUsed = false;
+    }
+  }
+
+  // --- non-combat rooms ---------------------------------------------------
+  //
+  // Shops, springs, shrines and chaos gates. Each resolves through
+  // `leaveRoom`, which is the single exit — so "the room is finished, open the
+  // doors" is stated once rather than at each of four call sites where one of
+  // them would eventually forget to open them and strand the run.
+
+  shopState(): ShopState | null {
+    return this.save.adventure?.shop ?? null;
+  }
+
+  shopRerollPrice(): number {
+    return shopRerollCost(this.save.adventure?.shop?.rerollCount ?? 0);
+  }
+
+  /** Display text for a stall entry — resolved here rather than in the UI so
+   * the shop and the offer screen name the same thing the same way. */
+  shopEntryLabel(entry: ShopEntry): { name: string; blurb: string } {
+    if (entry.kind === "charm") {
+      const def = CHARM_DEFS_BY_ID[entry.refId];
+      return { name: def?.name ?? entry.refId, blurb: def?.blurb ?? "" };
+    }
+    if (entry.kind === "consumable") {
+      const def = CONSUMABLE_DEFS_BY_ID[entry.refId];
+      return { name: def?.name ?? entry.refId, blurb: def?.blurb ?? "" };
+    }
+    const def = BOON_DEFS_BY_ID[entry.refId];
+    if (!def || !entry.card) return { name: entry.refId, blurb: "" };
+    const held = this.heldBoons().find((h) => h.id === def.id);
+    const rank = entry.card.rankUp ? (held?.rank ?? 1) + 1 : (held?.rank ?? 1);
+    return {
+      name: `${def.name} (${RARITY_LABEL[entry.card.rarity]})`,
+      blurb: describeBoon(def, { rarity: entry.card.rarity, rank }),
+    };
+  }
+
+  buyShopEntry(index: number): boolean {
+    const s = this.save;
+    const adv = s.adventure;
+    const entry = adv?.shop?.stock[index];
+    if (!adv || !entry) return false;
+    if (!canBuy(entry, adv.acorns, adv.charms, adv.boonList)) return false;
+    adv.acorns -= entry.cost;
+    entry.sold = true;
+
+    if (entry.kind === "charm") {
+      adv.charms.push(entry.refId);
+      this.discover(entry.refId);
+    } else if (entry.kind === "boon" && entry.card) {
+      // Instants resolve their payload rather than joining the build — the same
+      // split pickBoonCard makes, applied here too so a stall cannot sell a
+      // boon that behaves differently from the identical card on an offer
+      // screen.
+      const def = BOON_DEFS_BY_ID[entry.refId];
+      if (def?.slot === "instant") {
+        this.applyInstantBoon(def.effects.find((e) => e.kind === "custom")?.handlerId);
+      } else {
+        adv.boonList = applyOfferCard(adv.boonList, entry.card, adv.roomsCleared);
+        if (entry.refId === "ironSkin") this.applyInstantBoon("ironSkinHp");
+      }
+      this.discover(entry.refId);
+    } else if (entry.kind === "consumable") {
+      this.applyConsumable(entry.refId);
+    }
+    scheduleSave(s, true);
+    return true;
+  }
+
+  private applyConsumable(id: string): void {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv) return;
+    const party = this.partyFor(adv.partyIds);
+    if (id === "salve") {
+      for (const m of party) {
+        if (m.currentHp <= 0) continue;
+        m.currentHp = Math.min(m.maxHp, m.currentHp + Math.round(m.maxHp * 0.4));
+      }
+    } else if (id === "whetstone") {
+      // Deepens whatever is shallowest, so the purchase is never wasted on
+      // something already maxed.
+      const target = [...adv.boonList]
+        .filter((b) => b.rank < (BOON_DEFS_BY_ID[b.id]?.maxRank ?? 1))
+        .sort((a, b) => a.rank - b.rank)[0];
+      if (target) target.rank += 1;
+    } else if (id === "ward") {
+      adv.curses.shift();
+    } else if (id === "rerollToken") {
+      adv.rerollsLeft += 1;
+    }
+  }
+
+  rerollShopStock(): boolean {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv?.shop) return false;
+    const cost = shopRerollCost(adv.shop.rerollCount);
+    if (adv.acorns < cost) return false;
+    adv.acorns -= cost;
+    adv.shop = rerollShop(adv.shop, this.offerContext(), depthOf(adv.roomsCleared), adv.charms);
+    scheduleSave(s, true);
+    return true;
+  }
+
+  /** The chaos gate's wager: a named curse for a fixed number of rooms, in
+   * exchange for something the run could not otherwise reach. Drawn from the
+   * run seed so a resumed gate offers the same bargain. */
+  chaosOffer(): { curse: CurseDef } | null {
+    const adv = this.save.adventure;
+    if (!adv || adv.pendingRoom?.kind !== "chaos") return null;
+    const idx = (adv.seed + adv.roomsCleared * 31) % CURSE_DEFS.length;
+    return { curse: CURSE_DEFS[idx] };
+  }
+
+  acceptChaos(): boolean {
+    const s = this.save;
+    const adv = s.adventure;
+    const gate = this.chaosOffer();
+    if (!adv || !gate) return false;
+    adv.curses.push({ id: gate.curse.id, roomsLeft: gate.curse.rooms });
+    this.discover(gate.curse.id);
+
+    // The payout. Two of these hand back an OFFER rather than a thing, which
+    // is the point — a chaos gate should widen what the run can become, not
+    // just hand it a number.
+    switch (gate.curse.reward) {
+      case "rank2": {
+        const target = [...adv.boonList]
+          .filter((b) => b.rank < (BOON_DEFS_BY_ID[b.id]?.maxRank ?? 1))
+          .sort((a, b) => b.rank - a.rank)[0];
+        if (target) target.rank = Math.min(BOON_DEFS_BY_ID[target.id]?.maxRank ?? 1, target.rank + 2);
+        break;
+      }
+      case "rerolls":
+        adv.rerollsLeft += 2;
+        break;
+      case "charm": {
+        const available = CHARM_DEFS.filter((c) => !adv.charms.includes(c.id));
+        if (available.length > 0) {
+          const pick = available[(adv.seed + adv.roomsCleared) % available.length];
+          adv.charms.push(pick.id);
+          this.discover(pick.id);
+        }
+        break;
+      }
+      case "epicBoon":
+      case "duoOffer": {
+        const ctx = this.offerContext();
+        const offer = drawOffer(
+          { ...ctx, duoOnly: gate.curse.reward === "duoOffer" },
+          (adv.seed + adv.roomsCleared * 7717) >>> 0,
+          3,
+        );
+        for (const card of offer.cards) {
+          if (gate.curse.reward === "epicBoon" && card.rarity === "common") card.rarity = "epic";
+          this.discover(card.boonId);
+        }
+        adv.pendingOffer = offer;
+        break;
+      }
+    }
+    adv.pendingRoom = null;
+    adv.shop = null;
+    if (!adv.pendingOffer) this.openExits();
+    scheduleSave(s, true);
+    return true;
+  }
+
+  shrineRankUp(boonId: string): boolean {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv) return false;
+    const inst = adv.boonList.find((b) => b.id === boonId);
+    const def = BOON_DEFS_BY_ID[boonId];
+    if (!inst || !def || inst.rank >= def.maxRank) return false;
+    inst.rank += 1;
+    this.leaveRoom();
+    return true;
+  }
+
+  /** Fountains and chests — a single act with no decision attached. */
+  resolveSimpleRoom(): boolean {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv?.pendingRoom) return false;
+    if (adv.pendingRoom.kind === "fountain") {
+      // 35%, not 50%. At half a health bar a spring was strictly better than any
+      // boon on offer, and the balance harness showed a route that took every
+      // heal door and skipped the build outclearing every actual build. A
+      // fountain should be a relief, not a strategy.
+      for (const m of this.partyFor(adv.partyIds)) {
+        if (m.currentHp <= 0) continue;
+        m.currentHp = Math.min(m.maxHp, m.currentHp + Math.round(m.maxHp * 0.35));
+      }
+      // A spring also lifts the oldest curse. A room whose whole promise is
+      // relief should relieve more than hit points.
+      adv.curses.shift();
+    } else if (adv.pendingRoom.kind === "chest") {
+      this.grantChest(adv.world, 3);
+    }
+    this.leaveRoom();
+    return true;
+  }
+
+  /** The single exit from any non-combat room. */
+  leaveRoom(): boolean {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv?.pendingRoom) return false;
+    adv.pendingRoom = null;
+    adv.shop = null;
+    adv.roomsCleared += 1;
+    // Curses count down per room, including the quiet ones — otherwise a run
+    // could park in event rooms to wait a curse out.
+    adv.curses = adv.curses.map((c) => ({ ...c, roomsLeft: c.roomsLeft - 1 })).filter((c) => c.roomsLeft > 0);
+    this.openExits();
+    scheduleSave(s, true);
+    return true;
+  }
+
+  /** Rerolls the pending offer, spending a charge. */
+  rerollBoonOffer(): boolean {
+    const s = this.save;
+    const adv = s.adventure;
+    if (!adv?.pendingOffer || adv.pendingOffer.rerollsLeft <= 0) return false;
+    adv.pendingOffer = rerollOffer(adv.pendingOffer, this.offerContext(), 3);
+    adv.rerollsLeft = Math.max(0, adv.rerollsLeft - 1);
+    for (const card of adv.pendingOffer.cards) this.discover(card.boonId);
+    scheduleSave(s, true);
+    return true;
   }
 
   /** Read-only summary of the most recently finished fight, for the battle
@@ -1581,55 +2059,6 @@ export class Game {
    * fight has finished this session. */
   lastOutcomeSummary(): BattleOutcomeSummary | null {
     return this.lastOutcome;
-  }
-
-  /** The 3 boon ids currently awaiting a pick, or null — see
-   * finalizeBattleOutcome/AdventureState.pendingBoonOffer. */
-  boonOffer(): BoonId[] | null {
-    return this.save.adventure?.pendingBoonOffer ?? null;
-  }
-
-  /** Picks one of the currently offered boons: stacks it into
-   * adv.boons (read every subsequent turn by battle.ts for the four
-   * ongoing-passive boons), and applies the two instant-effect boons'
-   * one-time payload right here. Returns false if `id` isn't actually one
-   * of the 3 currently offered (stale UI click, e.g. after an unrelated
-   * resume already cleared the offer). */
-  pickBoon(id: BoonId): boolean {
-    const adv = this.save.adventure;
-    if (!adv?.pendingBoonOffer?.includes(id)) return false;
-    adv.boons = adv.boons ?? {};
-    adv.boons[id] = (adv.boons[id] ?? 0) + 1;
-    adv.pendingBoonOffer = null;
-
-    // Iron Skin/Second Wind touch real HP pools once, right now — the same
-    // "apply once, at pick time" treatment equipment changes already get
-    // from team.ts's syncHp — rather than being folded into the per-turn
-    // multipliers battle.ts reads for the other three boons. Downed (0 HP)
-    // members are left alone here: "heal the party" only ever means the
-    // living for a boon pick. Reviving a downed member is a separate,
-    // higher-priority "Team Down" offer shown before this one ever comes up
-    // (see finalizeBattleOutcome/resolveRevival below).
-    if (id === "ironSkin" || id === "secondWind") {
-      const party = this.partyFor(adv.partyIds);
-      for (const m of party) {
-        if (m.currentHp <= 0) continue;
-        if (id === "ironSkin") {
-          const bump = Math.round(m.maxHp * BOON_HP_PCT);
-          m.maxHp += bump;
-          m.currentHp = Math.min(m.maxHp, m.currentHp + bump);
-        } else {
-          m.currentHp = Math.min(
-            m.maxHp,
-            m.currentHp + Math.round(m.maxHp * BOON_HEAL_PCT),
-          );
-        }
-      }
-    } else if (id === "vengefulSpirit") {
-      adv.abilityUsed = false;
-    }
-    scheduleSave(this.save, true);
-    return true;
   }
 
   /** The pending "Team Down" revive offer, or null — see
@@ -1718,7 +2147,11 @@ export class Game {
       // branch) — cleared again explicitly so this reads correctly even if
       // that invariant ever changes.
       adv.battle = null;
-      this.startBattleForNextStage(); // schedules its own save
+      // A wipe-case revive retries the room the party just fell in, not the
+      // next one — the room was never cleared, so roomsCleared is unchanged and
+      // re-entering it is simply starting that fight again.
+      const room = this.currentRoom();
+      if (room) this.startRoomBattle(room);
       return true;
     }
     scheduleSave(s, true);
@@ -1825,7 +2258,9 @@ export class Game {
 
   adventureStatus(): {
     world: number;
-    stage: number;
+    roomsCleared: number;
+    depth: number;
+    acorns: number;
     partyIds: string[];
     pendingWood: number;
     pendingAmber: number;
@@ -1835,7 +2270,9 @@ export class Game {
     if (!adv) return null;
     return {
       world: adv.world,
-      stage: adv.stage,
+      roomsCleared: adv.roomsCleared,
+      depth: depthOf(adv.roomsCleared),
+      acorns: adv.acorns,
       partyIds: [...adv.partyIds],
       pendingWood: adv.pendingWood,
       pendingAmber: adv.pendingAmber,
@@ -1847,19 +2284,28 @@ export class Game {
       // until it's explicitly resolved one way or another — same
       // beginStageBattle gate), OR a milestone-chest reveal this session
       // hasn't dismissed yet.
+      // "There's something live to jump back into." Every pending decision
+      // counts, not just a live fight — an unanswered door or a half-shopped
+      // stall is just as much a reason to offer Resume, and omitting one of
+      // them shows the player a run that looks idle when it is waiting on them.
       battleInProgress:
         (!!adv.battle && adv.battle.outcome === null) ||
-        !!adv.pendingBoonOffer ||
+        !!adv.pendingOffer ||
         !!adv.pendingRevival ||
+        !!adv.pendingExits ||
+        !!adv.pendingRoom ||
         !!this.chestReveal,
     };
   }
 
-  /** Wood cost of the next Push On, for UI display — 0 if no run active. */
+  /** Wood cost of the next descent, for UI display. Zero everywhere except
+   * the two Depth boundaries — moving between rooms inside a Depth is free, so
+   * the run is never gated on the idle economy mid-Depth. */
   nextStageFee(): number {
     const adv = this.save.adventure;
     if (!adv) return 0;
-    return continueFee(getWorld(adv.world).mult, adv.stage + 1);
+    if (!isDepthBoundary(adv.roomsCleared - 1)) return 0;
+    return descentToll(getWorld(adv.world).mult, depthOf(adv.roomsCleared));
   }
 
   // --- layout -------------------------------------------------------------
@@ -2274,7 +2720,52 @@ export class Game {
     return deathSquash(this.deathAnims.get(id), Game.DEATH_SECS);
   }
 
-  handleBattleClick(): boolean {
+  /** Hovered door index, or null. Recomputed on every hover; never persisted,
+   * since it is pure pointer state. */
+  private doorHover: number | null = null;
+
+  /** The doors currently drawn on the back wall, in the order Game.exitOffer()
+   * returns them. Empty whenever the party is not at a junction. */
+  private doorRectsNow(): DoorRect[] {
+    const exits = this.exitOffer();
+    if (!exits || !this.battleViewOpen) return [];
+    return doorRects(this.w, this.h, exits.length);
+  }
+
+  /** Hover feedback for the doorways. Called from handleHover, which
+   * previously never checked battleViewOpen at all and so ran homestead and
+   * grid hit-tests during a takeover — meaningless there, and they would have
+   * fought the doors for the pointer. */
+  handleBattleHover(lx: number, ly: number): boolean {
+    const rects = this.doorRectsNow();
+    if (rects.length === 0) {
+      this.doorHover = null;
+      return false;
+    }
+    const hit = hitDoor(rects, lx, ly);
+    this.doorHover = hit;
+    return hit !== null;
+  }
+
+  doorHoverIndex(): number | null {
+    return this.doorHover;
+  }
+
+  handleBattleClick(lx = 0, ly = 0): boolean {
+    // Doors first: they are the only thing on the canvas that is a control
+    // rather than scenery, and a live skill check can never coexist with a
+    // junction (one is mid-fight, the other is between rooms).
+    const rects = this.doorRectsNow();
+    if (rects.length > 0) {
+      const hit = hitDoor(rects, lx, ly);
+      const exits = this.exitOffer();
+      if (hit !== null && exits?.[hit]) {
+        this.pickExit(exits[hit].id);
+        this.doorHover = null;
+        this.onRunBeatResolved?.();
+      }
+      return true;
+    }
     if (this.battleSkillCheck) {
       // Swallow the click while the opening grace window is live (see
       // beginBattleTiming) — but still consume it, so it can't fall through
@@ -3037,7 +3528,7 @@ export class Game {
       const adv = this.save.adventure;
       return {
         label: adv
-          ? `RESUME ADVENTURE - STAGE ${adv.stage}`
+          ? `RESUME ADVENTURE - ROOM ${adv.roomsCleared + 1}/${TOTAL_ROOMS}`
           : "SET OUT ON AN ADVENTURE",
         x: p.x,
         // BELOW the tent, unlike every other prop's label. The camp already
@@ -3144,12 +3635,26 @@ export class Game {
     return (
       this.buildModeActive() ||
       this.hoverTarget !== null ||
-      this.dialogueHover !== null
+      this.dialogueHover !== null ||
+      // A doorway is a control, so the cursor has to say so — without this the
+      // one genuinely clickable thing on the canvas between rooms looks
+      // exactly as inert as the flagstones.
+      this.doorHover !== null
     );
   }
 
   /** Canvas hover, driven from main.ts. */
   handleHover(lx: number, ly: number): void {
+    // A takeover owns the pointer. Without this the homestead grid, tree and
+    // cottage hit-tests all kept running underneath the battle view — they are
+    // meaningless in a dungeon, and they would have competed with the doorways
+    // for the same pixels the moment those became clickable.
+    if (this.battleViewOpen) {
+      this.hoverCell = null;
+      this.hoverTarget = null;
+      this.handleBattleHover(lx, ly);
+      return;
+    }
     // An open conversation takes the pointer, matching the way it takes every
     // click — otherwise the world's own hover labels keep firing underneath a
     // bubble the player is reading.
@@ -4228,7 +4733,7 @@ export class Game {
   /** Canvas click at logical coords. Returns false if nothing was hit. */
   handleClick(lx: number, ly: number): boolean {
     if (this.battleViewOpen) {
-      return this.handleBattleClick();
+      return this.handleBattleClick(lx, ly);
     }
     if (this.povTarget) {
       this.handlePovInput();
@@ -5954,6 +6459,13 @@ export class Game {
     heal: 0.5,
     enemyMove: 0.65,
     battleEnd: 0.3,
+    // Status beats are deliberately the fastest events in the table. A burn
+    // build can apply a status on every attack and tick one on every unit at
+    // round end, so at attack-length durations a three-enemy fight would spend
+    // longer showing bookkeeping than showing the fight. Short enough to read
+    // as a flourish attached to the hit that caused it, not a separate beat.
+    status: 0.22,
+    statusTick: 0.3,
   };
 
   /** Formation offsets for the 3 party slots, indexed the same way
@@ -6173,6 +6685,9 @@ export class Game {
       w: this.w,
       h: this.h,
       animT: this.animT,
+      doorCount: this.exitOffer()?.length ?? 0,
+      doorHover: this.doorHover,
+      doorRewards: this.exitOffer()?.map((r) => r.reward) ?? [],
       save: this.save,
       floats: this.floats,
       lastBattlePartyIds: this.lastBattlePartyIds,

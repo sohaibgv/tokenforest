@@ -15,7 +15,11 @@
 // removed mid-click never receives its click event). Same fix already
 // applied to ui/battle.ts; this brings this overlay in line with it.
 
-import { buildEnemy } from "../adventure";
+import { BOON_DEFS, describeBoon } from "../run/boons";
+import { CHARM_DEFS, CURSE_DEFS } from "../run/charms";
+import { groveRank, grovePayoutMult, PACT_DEFS, type PactId } from "../run/pact";
+import { PATRON_DEFS, PATRON_DEFS_BY_ID, type PatronId } from "../run/patrons";
+import { DEPTH_NAMES, doorLabel, TOTAL_ROOMS } from "../run/rooms";
 import { CURATED_WORLD_THEMES, getWorld, PROVISIONS, WORKER_DEFS_BY_ID, type ProvisionId } from "../economy";
 import { abbrev, hpBarClass } from "../scene/floating-text";
 import type { Game } from "../scene/game";
@@ -67,6 +71,40 @@ function flash(el: HTMLElement): void {
   el.classList.add("flash-pulse");
 }
 
+/** Whether the Muster/Field overlay is on screen.
+ *
+ * Read from the DOM rather than from a closure flag, matching isShopOpen — the
+ * overlay coordinator can close this panel without going through `close()`, so
+ * a cached boolean would drift out of sync with what is actually visible. */
+/** Everything the Fated List tracks, in a stable order: boons grouped by
+ * patron, then charms, then curses. Built once — the catalog never changes at
+ * runtime, and rebuilding it per render would be pure waste on a screen that
+ * re-renders on every click. */
+interface CodexEntry {
+  id: string;
+  name: string;
+  group: string;
+  blurb: string;
+}
+const CODEX_ENTRIES: CodexEntry[] = [
+  ...BOON_DEFS.map((d) => ({
+    id: d.id,
+    name: d.name,
+    group: `${PATRON_DEFS_BY_ID[d.patron].name} boon`,
+    blurb: describeBoon(d, { rarity: "common" as const, rank: 1 }),
+  })),
+  ...CHARM_DEFS.map((c) => ({ id: c.id, name: c.name, group: "Charm", blurb: c.blurb })),
+  ...CURSE_DEFS.map((c) => ({ id: c.id, name: c.name, group: "Curse", blurb: c.blurb })),
+];
+const CODEX_TOTAL = CODEX_ENTRIES.length;
+function codexEntries(): CodexEntry[] {
+  return CODEX_ENTRIES;
+}
+
+export function isAdventureOpen(): boolean {
+  return !document.getElementById("adventure")?.classList.contains("hidden");
+}
+
 export function initAdventure(game: Game): void {
   const overlay = document.getElementById("adventure")!;
   const openBtn = document.getElementById("adventure-btn")!;
@@ -86,6 +124,8 @@ export function initAdventure(game: Game): void {
   // UI element.
   let targetSlot: SlotKey | null = null;
   const selectedCarry = new Set<ProvisionId>();
+  let selectedKeepsake: PatronId | null = null;
+  let codexOpen = false;
   let refreshTimer: number | null = null;
 
   /** `partyIds` in embark order (front, then back-left, then back-right) —
@@ -318,6 +358,85 @@ export function initAdventure(game: Game): void {
   }
   musterEl.append(carryWrap);
 
+  // --- keepsake rack ------------------------------------------------------
+  //
+  // The one sanctioned thumb on the scale, and the only place a build can be
+  // steered BEFORE the run rather than by whatever the draws allow: the chosen
+  // patron is guaranteed the first card of every offer.
+  //
+  // Earned rather than given — a patron only appears here once its favour has
+  // been raised by actually clearing Depths with its boons. That is the whole
+  // between-runs loop in one control: commit to a patron, clear with it, and
+  // next time you can commit deliberately from room one.
+  const keepsakeWrap = document.createElement("div");
+  keepsakeWrap.className = "adv-keepsakes";
+  const keepsakeBtns = new Map<PatronId, HTMLButtonElement>();
+  for (const patron of PATRON_DEFS) {
+    const btn = document.createElement("button");
+    btn.className = "adv-keepsake";
+    btn.addEventListener("click", () => {
+      selectedKeepsake = selectedKeepsake === patron.id ? null : patron.id;
+      renderMuster();
+    });
+    keepsakeBtns.set(patron.id, btn);
+    keepsakeWrap.append(btn);
+  }
+  musterEl.append(keepsakeWrap);
+
+  // --- Pact of the Grove --------------------------------------------------
+  //
+  // Opt-in difficulty, and the reason the mode still has something to offer
+  // once it has been beaten. Each modifier says exactly what it does and
+  // exactly what it is worth, and the payout multiplier is shown live as they
+  // are toggled — a player has to be able to price the risk BEFORE taking it,
+  // or it is not a wager, it is just a harder setting.
+  //
+  // Hidden entirely until a first full clear: offering difficulty modifiers to
+  // someone who has not yet finished a run is offering them a way to lose
+  // faster.
+  const pactWrap = document.createElement("div");
+  pactWrap.className = "adv-pact hidden";
+  const pactTitle = document.createElement("div");
+  pactTitle.className = "adv-pact-title";
+  const pactBtns = new Map<PactId, HTMLButtonElement>();
+  const pactRow = document.createElement("div");
+  pactRow.className = "adv-pact-row";
+  for (const mod of PACT_DEFS) {
+    const btn = document.createElement("button");
+    btn.className = "adv-pact-mod";
+    btn.addEventListener("click", () => {
+      const s2 = game.save;
+      s2.pact = s2.pact ?? [];
+      s2.pact = s2.pact.includes(mod.id) ? s2.pact.filter((m) => m !== mod.id) : [...s2.pact, mod.id];
+      game.persist();
+      renderMuster();
+    });
+    pactBtns.set(mod.id, btn);
+    pactRow.append(btn);
+  }
+  pactWrap.append(pactTitle, pactRow);
+  musterEl.append(pactWrap);
+
+  // --- the Fated List -----------------------------------------------------
+  //
+  // Every boon, charm and curse, greyed until it has been SEEN once. Discovery
+  // is permanent and costs nothing to grant, which is the point: it turns
+  // "that card I got offered in a run I lost" into a thing that stays, and it
+  // gives a player who has stopped needing wood a reason to keep delving.
+  //
+  // Lives on the Muster screen behind a toggle rather than in its own overlay:
+  // it is read between runs, which is exactly when this screen is up, and a
+  // fourth top-level overlay would be a fourth thing to remember to close.
+  const codexToggle = document.createElement("button");
+  codexToggle.className = "adv-codex-toggle";
+  codexToggle.addEventListener("click", () => {
+    codexOpen = !codexOpen;
+    renderMuster();
+  });
+  const codexWrap = document.createElement("div");
+  codexWrap.className = "adv-codex hidden";
+  musterEl.append(codexToggle, codexWrap);
+
   const previewEl = document.createElement("div");
   previewEl.className = "shop-sub";
   musterEl.append(previewEl);
@@ -326,12 +445,13 @@ export function initAdventure(game: Game): void {
   embarkBtn.className = "btn-primary";
   embarkBtn.textContent = "Embark";
   embarkBtn.addEventListener("click", () => {
-    if (game.startAdventure(selectedWorld, currentPartyIds(), [...selectedCarry])) {
+    if (game.startAdventure(selectedWorld, currentPartyIds(), [...selectedCarry], selectedKeepsake)) {
       formation.front = null;
       formation.backLeft = null;
       formation.backRight = null;
       targetSlot = null;
       selectedCarry.clear();
+      selectedKeepsake = null;
       // startAdventure already opened the battle view for stage 1 — get
       // this overlay out of the way so the fight is actually visible.
       close();
@@ -532,8 +652,12 @@ export function initAdventure(game: Game): void {
 
   const pushBtn = document.createElement("button");
   pushBtn.addEventListener("click", () => {
-    // beginStageBattle already opens the battle view — get out of the way.
-    if (game.beginStageBattle()) close();
+    // A run between rooms is standing at a junction. The door screen lives in
+    // the battle view (it is drawn into the dungeon wall), so this just reopens
+    // that view and gets out of the way rather than duplicating the choice
+    // here in DOM.
+    game.openBattleView();
+    close();
   });
   fieldEl.append(pushBtn);
 
@@ -636,6 +760,70 @@ export function initAdventure(game: Game): void {
       btn.disabled = owned === 0 || (!selectedCarry.has(prov.id) && selectedCarry.size >= MAX_CARRIED);
     }
 
+    // A keepsake is only offered once its patron's favour has been earned. An
+    // unearned one is shown greyed with what it would take, rather than hidden
+    // — the meta loop only pulls if the player can see what they are working
+    // toward.
+    const favor = s.patronFavor ?? {};
+    let anyKeepsake = false;
+    for (const patron of PATRON_DEFS) {
+      const btn = keepsakeBtns.get(patron.id)!;
+      const level = favor[patron.id] ?? 0;
+      const unlocked = level >= 1;
+      anyKeepsake = anyKeepsake || unlocked;
+      btn.textContent = patron.name;
+      btn.disabled = !unlocked;
+      btn.classList.toggle("active", selectedKeepsake === patron.id);
+      btn.title = unlocked
+        ? `${patron.name}'s token — the first card of every offer will be ${patron.name}'s. ${patron.domain}.`
+        : `Clear a Depth using ${patron.name}'s boons to earn this token.`;
+    }
+    keepsakeWrap.classList.toggle("hidden", !anyKeepsake);
+
+    // Pact of the Grove.
+    const cleared = s.stats.adventuresCleared > 0;
+    pactWrap.classList.toggle("hidden", !cleared);
+    if (cleared) {
+      const active = s.pact ?? [];
+      const rank = groveRank(active);
+      const mult = grovePayoutMult(rank);
+      pactTitle.textContent =
+        rank > 0
+          ? `Pact of the Grove — rank ${rank}, ${Math.round((mult - 1) * 100)}% richer`
+          : "Pact of the Grove — make the delve harder for a better payout";
+      for (const mod of PACT_DEFS) {
+        const btn = pactBtns.get(mod.id)!;
+        btn.textContent = `${mod.name} +${mod.rank}`;
+        btn.classList.toggle("active", active.includes(mod.id));
+        btn.title = mod.blurb;
+      }
+    }
+
+    // Codex. Rebuilt only when opened or when the discovered set changes —
+    // it is a long list and this screen re-renders on every interaction.
+    const seen = new Set(s.codex ?? []);
+    const codexKey = `${codexOpen}:${seen.size}`;
+    codexToggle.textContent = codexOpen
+      ? `Hide the Fated List (${seen.size}/${CODEX_TOTAL})`
+      : `The Fated List (${seen.size}/${CODEX_TOTAL})`;
+    codexWrap.classList.toggle("hidden", !codexOpen);
+    if (codexOpen && codexWrap.dataset.key !== codexKey) {
+      codexWrap.dataset.key = codexKey;
+      codexWrap.replaceChildren(
+        ...codexEntries().map((entry) => {
+          const found = seen.has(entry.id);
+          const tile = document.createElement("div");
+          tile.className = found ? "adv-codex-tile" : "adv-codex-tile locked";
+          // An undiscovered entry shows its CATEGORY but not its name. Knowing
+          // there are three Bramble boons you have never seen is the hook; being
+          // told what they do would spend it.
+          tile.textContent = found ? entry.name : "? ? ?";
+          tile.title = found ? `${entry.group} — ${entry.blurb}` : `${entry.group} — not yet discovered`;
+          return tile;
+        }),
+      );
+    }
+
     const rationsSpec = PROVISIONS.find((pr) => pr.id === "trailRations")!;
     const availableCount = s.team.filter((m) => m.status === "available").length;
     const needsHeal = s.team.some((m) => m.currentHp < m.maxHp || m.status === "resting");
@@ -686,7 +874,10 @@ export function initAdventure(game: Game): void {
 
   function renderField(adv: NonNullable<ReturnType<Game["adventureStatus"]>>): void {
     const s = game.save;
-    tallyEl.textContent = `${getWorld(adv.world).name} · stage ${adv.stage}/5 · pending ${abbrev(adv.pendingWood)} wood, ${abbrev(adv.pendingAmber)} amber`;
+    tallyEl.textContent =
+      `${getWorld(adv.world).name} · ${DEPTH_NAMES[adv.depth as 1 | 2 | 3] ?? "the deep"} · ` +
+      `room ${Math.min(TOTAL_ROOMS, adv.roomsCleared + 1)}/${TOTAL_ROOMS} · ${abbrev(adv.acorns)} acorns · ` +
+      `pending ${abbrev(adv.pendingWood)} wood, ${abbrev(adv.pendingAmber)} amber`;
 
     syncParty(adv.partyIds);
     for (const id of adv.partyIds) {
@@ -712,16 +903,17 @@ export function initAdventure(game: Game): void {
     pushBtn.classList.toggle("hidden", adv.battleInProgress);
     nextEnemyEl.style.display = adv.battleInProgress ? "none" : "";
     if (!adv.battleInProgress) {
+      // What is actually ahead is a CHOICE of doors, not a fixed next fight, so
+      // this previews the choice rather than pretending to know the outcome of
+      // it. The doors themselves are drawn in the dungeon.
       const fee = game.nextStageFee();
-      const nextStage = (adv.stage + 1) as 1 | 2 | 3 | 4 | 5;
-      const nextEnemies = buildEnemy(adv.world, nextStage);
-      const nextLabel =
-        nextEnemies.length > 1
-          ? `${nextEnemies[0].name} +${nextEnemies.length - 1} more`
-          : nextEnemies[0].name;
-      nextEnemyEl.textContent = `Next up: ${nextLabel} (Stage ${nextStage}/5)`;
-      pushBtn.textContent = `Push On · ${abbrev(fee)} wood`;
+      const exits = game.exitOffer();
+      nextEnemyEl.textContent = exits
+        ? `Ahead: ${exits.map((r) => doorLabel(r).toLowerCase()).join(" · ")}`
+        : "The way on is open.";
+      pushBtn.textContent = fee > 0 ? `Descend · ${abbrev(fee)} wood` : "Press On";
       pushBtn.disabled = s.wood < fee;
+      pushBtn.title = s.wood >= fee ? "" : `Need ${abbrev(fee - s.wood)} more wood to descend.`;
     }
   }
 

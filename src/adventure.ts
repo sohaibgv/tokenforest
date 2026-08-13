@@ -28,9 +28,21 @@ export interface EnemySpecialAbility {
   skipChance: number;
 }
 
+/** Elite modifier, when this unit belongs to an elite room.
+ *
+ * An affix has to change how the fight is APPROACHED, not just how big its
+ * numbers are — that is the whole difference between an elite and a normal
+ * enemy with more health, and the reason the door can promise something
+ * specific ("bring status damage") rather than just "harder". */
+export type EliteAffixId = "armored" | "frenzied" | "insulated" | "regrowing";
+
 export interface EnemySpec {
   name: string;
   stage: Stage;
+  affix?: EliteAffixId;
+  /** Death Rattle (Pact of the Grove): this unit gets back up once. Set only on
+   * Depth bosses, and consumed the first time it saves them. */
+  revives?: boolean;
   atk: number; // pre-scaled by world mult
   hp: number; // pre-scaled by world mult
   woodReward: number; // pre-scaled by world mult
@@ -222,12 +234,44 @@ function specialFor(character: EnemyCharacterDef): EnemySpecialAbility | undefin
   return character.kind === "scientist" ? GLITCH_PULSE : undefined;
 }
 
+/**
+ * Difficulty tier for a room index, mapping the run's twelve rooms onto the
+ * five-tier enemy table above.
+ *
+ * The table is kept rather than replaced because every one of its numbers is
+ * load-bearing and hand-traced — tier 1 in particular is the subject of a
+ * determinism proof (a 1-ATK attacker always deals exactly 1, so the very first
+ * fight a new player attempts is a guaranteed win). Re-deriving twelve fresh
+ * tiers would throw that away for no gain.
+ *
+ * The curve climbs inside each Depth and resets slightly on descending, so a
+ * new Depth opens with a breather before its own ramp — the same shape a Hades
+ * biome has. Room 0 stays tier 1 so the opening fight is still the one the
+ * determinism proof describes.
+ */
+export function roomTier(roomIndex: number): Stage {
+  const TIERS: Stage[] = [
+    1, 1, 2, 3, // Depth I  — Thornwood, boss at tier 3
+    2, 3, 3, 4, // Depth II — The Grid, boss at tier 4
+    3, 4, 4, 5, // Depth III — Heartwood, final boss at tier 5
+  ];
+  return TIERS[Math.min(TIERS.length - 1, Math.max(0, Math.round(roomIndex)))];
+}
+
 /** Builds the full enemy line-up for a stage's fight. Stages 1-2 are a
  * 2-3-member "swarm" (see STAGE1_SWARM/STAGE2_SWARM's worked-math comment
  * above); stages 3-5 stay a single strong enemy, wrapped in a 1-element
  * array purely for a uniform return type — no behavior change there beyond
  * the type. */
-export function buildEnemy(world: number, stageIn: Stage): EnemySpec[] {
+export function buildEnemy(
+  world: number,
+  stageIn: Stage,
+  affix?: EliteAffixId,
+  /** Pact of the Grove scaling — the opt-in difficulty the player switched on
+   * at Muster. Defaults to no change, so every caller that has no pact (the
+   * Muster preview, the single-battle sim scenarios) is unaffected. */
+  pact: { hp: number; atk: number; bossRevives?: boolean } = { hp: 1, atk: 1 },
+): EnemySpec[] {
   const mult = getWorld(world).mult;
   // Clamp into the real 1-5 range before anything indexes off it.
   //
@@ -245,6 +289,22 @@ export function buildEnemy(world: number, stageIn: Stage): EnemySpec[] {
   // cast is the kind of thing that gets written again, and this function has
   // no business trusting an out-of-range index from any caller.
   const stage = Math.min(5, Math.max(1, Math.round(stageIn))) as Stage;
+  // Frenzied trades survivability for threat: it hits considerably harder but
+  // folds faster, so racing it is a real option and turtling against it is not.
+  //
+  // The first pass at this (x1.5 atk, x0.7 hp) made it EASIER than a normal
+  // elite — it died so quickly it never got to spend its damage, which the
+  // sim's cost measurement caught immediately. An elite has to be a net threat
+  // whichever way you answer it; the trade should change HOW you fight it, not
+  // whether it is worth taking the door.
+  //
+  // Insulated carries a health bump for the same reason from the other side:
+  // its whole effect is switching control off, which is worth nothing at all
+  // to a party that brought none, leaving it a free elite for most builds.
+  const atkMult = (affix === "frenzied" ? 1.7 : 1) * pact.atk;
+  const hpMult =
+    (affix === "frenzied" ? 0.85 : affix === "armored" ? 1.15 : affix === "insulated" ? 1.2 : 1) *
+    pact.hp;
   if (stage === 1 || stage === 2) {
     const swarm = stage === 1 ? STAGE1_SWARM : STAGE2_SWARM;
     return swarm.map((member, i) => {
@@ -252,8 +312,9 @@ export function buildEnemy(world: number, stageIn: Stage): EnemySpec[] {
       return {
         name: character.name,
         stage,
-        atk: member.atk * mult,
-        hp: member.hp * mult,
+        affix,
+        atk: member.atk * mult * atkMult,
+        hp: member.hp * mult * hpMult,
         woodReward: member.reward * mult,
         kind: character.kind,
         characterId: character.id,
@@ -266,8 +327,11 @@ export function buildEnemy(world: number, stageIn: Stage): EnemySpec[] {
   return [{
     name: character.name,
     stage,
-    atk: arch.atk * mult,
-    hp: arch.hp * mult,
+    affix,
+    // Only the single-enemy tiers can be bosses, and only those get back up.
+    revives: pact.bossRevives && stage >= 3 ? true : undefined,
+    atk: arch.atk * mult * atkMult,
+    hp: arch.hp * mult * hpMult,
     woodReward: arch.reward * mult,
     kind: character.kind,
     characterId: character.id,
@@ -292,6 +356,28 @@ export function embarkCost(worldMult: number): number {
 export function continueFee(worldMult: number, nextStage: number): number {
   return Math.round(ADVENTURE_CONTINUE_BASE * nextStage * worldMult);
 }
+
+/**
+ * Wood paid to descend into the next Depth.
+ *
+ * Charged TWICE per run (entering Depths II and III) rather than once per room.
+ * A per-room fee across twelve rooms would be eleven small taxes that
+ * collectively dwarf the payout and, worse, would gate the interesting part of
+ * the run behind the idle economy — you would stop pushing not because the run
+ * was going badly but because you were out of wood.
+ *
+ * Two tolls instead give the run exactly two commitment moments, which is what
+ * makes "descend or bank" a real question: by the time it is asked, there is
+ * something worth losing.
+ */
+export function descentToll(worldMult: number, depth: number): number {
+  return Math.round(ADVENTURE_CONTINUE_BASE * 4 * depth * worldMult);
+}
+
+/** Reroll charges a run starts with, before Patron's Ear and friends. One is
+ * deliberate: enough that the mechanic is discovered on the first run, few
+ * enough that spending it is a decision. */
+export const BASE_REROLLS = 1;
 
 /** Amber cost of the paid option on a "Team Down" revive offer (see
  * Game.finalizeBattleOutcome/resolveRevival) — a FLAT amber cost, not scaled

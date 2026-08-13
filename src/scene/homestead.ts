@@ -119,7 +119,7 @@ export function pushHomesteadDrawables(
         // Party-away marker sits on the tent itself rather than in a corner.
         const adv = v.save.adventure;
         if (adv) {
-          const label = `${adv.partyIds.length}/${adv.stage}`;
+          const label = `${adv.partyIds.length}/${adv.roomsCleared}`;
           const lx2 = Math.round(camp.x - textWidth(label) / 2);
           ctx.fillStyle = "#2a1e12";
           ctx.fillRect(lx2 - 2, camp.y - size.h - 8, textWidth(label) + 4, 7);

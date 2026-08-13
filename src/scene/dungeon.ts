@@ -247,16 +247,30 @@ function drawCeiling(ctx: CanvasRenderingContext2D, room: Room, pal: DungeonPale
  * somewhere-else, which is most of what stops a backdrop feeling like a wall
  * you were placed against. Offset toward the enemy side so it sits behind
  * what you're fighting — the way you came in is the way they came from. */
-function drawArch(ctx: CanvasRenderingContext2D, room: Room, pal: DungeonPalette): void {
+function drawArch(
+  ctx: CanvasRenderingContext2D,
+  room: Room,
+  pal: DungeonPalette,
+  /** Horizontal centre as a fraction of the room width. Defaults to the single
+   * decorative arch's original position, so the ordinary arena is unchanged. */
+  cxFrac = 0.74,
+  /** Half-width as a fraction. A row of doors needs narrower arches than the
+   * lone decorative one. */
+  halfFrac = 0.045,
+  /** Lit doors read as a way ON rather than as scenery: the mouth glows and
+   * the ring brightens. Driven by hover, so the choice reacts to the pointer
+   * the way a door in a lit room would. */
+  lit = false,
+): void {
   const { by0, by1 } = room;
-  const cx = Math.round(room.w * 0.74);
-  const halfW = Math.max(9, Math.round(room.w * 0.045));
+  const cx = Math.round(room.w * cxFrac);
+  const halfW = Math.max(7, Math.round(room.w * halfFrac));
   const top = Math.round(lerp(by0, by1, 0.28));
 
   const grad = ctx.createLinearGradient(0, top, 0, by1);
-  grad.addColorStop(0, "#08080c");
-  grad.addColorStop(0.72, "#131018");
-  grad.addColorStop(1, mixHex("#131018", pal.glow, 0.32));
+  grad.addColorStop(0, lit ? "#141019" : "#08080c");
+  grad.addColorStop(0.72, lit ? "#241d2c" : "#131018");
+  grad.addColorStop(1, mixHex("#131018", pal.glow, lit ? 0.72 : 0.32));
   ctx.fillStyle = grad;
   ctx.beginPath();
   ctx.moveTo(cx - halfW, by1);
@@ -267,7 +281,7 @@ function drawArch(ctx: CanvasRenderingContext2D, room: Room, pal: DungeonPalette
   ctx.fill();
 
   // Voussoir ring — the wedge stones around the arch.
-  ctx.strokeStyle = mixHex(pal.stone, "#9a9aa6", 0.35);
+  ctx.strokeStyle = lit ? mixHex(pal.stone, "#ffb45a", 0.6) : mixHex(pal.stone, "#9a9aa6", 0.35);
   ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.moveTo(cx - halfW, by1);
@@ -593,4 +607,205 @@ export function drawDungeonArena(
   fade.addColorStop(1, "rgba(4, 4, 7, 0.94)");
   ctx.fillStyle = fade;
   ctx.fillRect(-4, h * FOREGROUND_FADE, w + 8, h * (1 - FOREGROUND_FADE) + 8);
+}
+
+
+// --- Doorways -------------------------------------------------------------
+//
+// The junction between rooms, drawn INTO the chamber rather than over it.
+//
+// The obvious implementation is a row of DOM buttons floating above the
+// canvas, and it is the wrong one: the standing instruction for this app's UI
+// is that game state should be a physical object in the world, and a doorway
+// is the most literal case of that there is. The back wall was already sitting
+// empty behind the fight — the arches simply belong there.
+//
+// `doorRects` is PURE and recomputed from the live width and height on every
+// frame, never cached. The window is resizable mid-run, and a cached rect
+// lies about where it is the moment anyone drags an edge — the same reasoning
+// the dialogue layout carries for the same reason.
+
+export interface DoorRect {
+  /** Index into the exits array the caller passed. */
+  index: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Where a sigil should hang, above the arch mouth. */
+  sigilX: number;
+  sigilY: number;
+}
+
+/** Lays out `count` doorways across the back wall.
+ *
+ * Spread across the wall's inner span rather than the full canvas so the doors
+ * sit IN the room instead of floating off its edges, and clamped so three
+ * arches still fit at the 280px minimum window width. */
+export function doorRects(w: number, h: number, count: number): DoorRect[] {
+  if (count <= 0) return [];
+  const bx0 = Math.round(w * WALL_INSET);
+  const bx1 = Math.round(w * (1 - WALL_INSET));
+  const by0 = Math.round(h * CEILING_LINE);
+  const by1 = Math.round(h * FLOOR_LINE);
+  const span = bx1 - bx0;
+  const slot = span / count;
+  const halfFrac = Math.min(0.05, (slot * 0.34) / w);
+  const top = Math.round(lerp(by0, by1, 0.28));
+  return Array.from({ length: count }, (_, i) => {
+    const cx = Math.round(bx0 + slot * (i + 0.5));
+    const halfW = Math.max(7, Math.round(w * halfFrac));
+    return {
+      index: i,
+      // The clickable rect is deliberately taller and wider than the drawn
+      // arch: at the tray's size the mouth is ~15 logical px across, which is
+      // a cruel target. Padding it out costs nothing visually and makes the
+      // run's most important click comfortable.
+      x: cx - halfW - 3,
+      y: top - 8,
+      w: halfW * 2 + 6,
+      h: by1 - top + 12,
+      sigilX: cx,
+      sigilY: top - 4,
+    };
+  });
+}
+
+/** Which door contains this point, or null. */
+export function hitDoor(rects: DoorRect[], lx: number, ly: number): number | null {
+  for (const r of rects) {
+    if (lx >= r.x && lx <= r.x + r.w && ly >= r.y && ly <= r.y + r.h) return r.index;
+  }
+  return null;
+}
+
+/** A mark chiselled into the lintel above a doorway, saying what waits behind
+ * it.
+ *
+ * Deliberately simple geometry drawn in code rather than a sprite per reward:
+ * at the tray's scale a doorway lintel is about nine pixels across, which is
+ * too small for a legible pictogram and exactly right for a shape. A circle, a
+ * diamond and a cross are distinguishable at that size when a drawn key or
+ * chalice would not be, and they read as MASONRY — something carved by whoever
+ * built the room — rather than as an icon floating on top of it.
+ *
+ * The card below the arches carries the words; this only has to be enough to
+ * tell two doors apart at a glance while deciding. */
+function drawSigil(
+  ctx: CanvasRenderingContext2D,
+  kind: string,
+  x: number,
+  y: number,
+  color: string,
+  lit: boolean,
+): void {
+  const r = 3;
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = lit ? 1 : 0.72;
+  ctx.beginPath();
+  switch (kind) {
+    case "boon": // a ring — a patron's attention
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.stroke();
+      break;
+    case "rank": // a rising chevron — deepening what you hold
+      ctx.moveTo(x - r, y + r);
+      ctx.lineTo(x, y - r);
+      ctx.lineTo(x + r, y + r);
+      ctx.stroke();
+      break;
+    case "chest": // a squat box
+      ctx.rect(x - r, y - r + 1, r * 2, r * 2 - 1);
+      ctx.stroke();
+      break;
+    case "heal": // a cross, the oldest sign for it there is
+      ctx.moveTo(x - r, y);
+      ctx.lineTo(x + r, y);
+      ctx.moveTo(x, y - r);
+      ctx.lineTo(x, y + r);
+      ctx.stroke();
+      break;
+    case "shop": // scales
+      ctx.moveTo(x - r, y - 1);
+      ctx.lineTo(x + r, y - 1);
+      ctx.moveTo(x, y - r);
+      ctx.lineTo(x, y + r - 1);
+      ctx.stroke();
+      break;
+    case "chaos": // a broken diamond — something is wrong with this one
+      ctx.moveTo(x, y - r);
+      ctx.lineTo(x + r, y);
+      ctx.lineTo(x, y + r);
+      ctx.stroke();
+      break;
+    case "elite": // a filled diamond, the heaviest mark on the wall
+      ctx.moveTo(x, y - r - 1);
+      ctx.lineTo(x + r, y);
+      ctx.lineTo(x, y + r + 1);
+      ctx.lineTo(x - r, y);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    default: // acorns and anything else — a plain dot
+      ctx.arc(x, y, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+  }
+  ctx.restore();
+}
+
+/** What colour a reward's sigil is cut in. Mirrors the door-card border
+ * colours in styles.css so the mark on the wall and the card below it agree —
+ * two different colours for one door would be worse than no colour at all. */
+const SIGIL_COLORS: Record<string, string> = {
+  boon: "#8ef0a0",
+  rank: "#ffd166",
+  acorns: "#e8a06a",
+  chest: "#ffd166",
+  heal: "#7fd8c4",
+  shop: "#e8a06a",
+  chaos: "#e06a6a",
+  elite: "#e06a6a",
+};
+
+/** Draws the doorways. Call after the arena, before the fighters — they are
+ * part of the back wall, and anything standing in the room belongs in front of
+ * them. */
+export function drawDoors(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  groundHex: string,
+  count: number,
+  hovered: number | null,
+  /** One reward kind per door, in the same order. Omitted leaves the lintels
+   * bare, which is what the decorative single arch wants. */
+  rewards: string[] = [],
+): DoorRect[] {
+  const pal = dungeonPalette(groundHex);
+  const room: Room = {
+    w,
+    h,
+    bx0: Math.round(w * WALL_INSET),
+    bx1: Math.round(w * (1 - WALL_INSET)),
+    by0: Math.round(h * CEILING_LINE),
+    by1: Math.round(h * FLOOR_LINE),
+  };
+  const rects = doorRects(w, h, count);
+  for (const rect of rects) {
+    const lit = rect.index === hovered;
+    // A pool of light spills out of the hovered door onto the flagstones. It
+    // is the cheapest possible way to say "this one" without drawing a cursor
+    // or a highlight box, both of which would be UI rather than room.
+    if (lit) drawLightPool(ctx, rect.sigilX, room.by1 + 2, Math.max(22, w * 0.09), 0.3);
+    drawArch(ctx, room, pal, rect.sigilX / w, (rect.w - 6) / 2 / w, lit);
+    const reward = rewards[rect.index];
+    if (reward) {
+      drawSigil(ctx, reward, rect.sigilX, rect.sigilY - 3, SIGIL_COLORS[reward] ?? "#d8d0c0", lit);
+    }
+  }
+  return rects;
 }

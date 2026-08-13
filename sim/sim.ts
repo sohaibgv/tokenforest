@@ -29,24 +29,18 @@ import {
   buildEnemy,
   chestDecoration,
   chestReward,
-  continueFee,
+  descentToll,
+  roomTier,
   embarkCost,
   type Stage,
 } from "../src/adventure";
 import {
   isBattleOver,
-  resolvePartyTurn,
+  resolveTurn,
   startBattle,
   type BattleSnapshot,
   type SkillGrade,
 } from "../src/battle";
-import {
-  BOON_HEAL_PCT,
-  BOON_HP_PCT,
-  boonWoodMult,
-  drawBoonOffer,
-  type BoonId,
-} from "../src/boons";
 import {
   accrueCacheKoi,
   accrueOverflow,
@@ -100,7 +94,52 @@ import {
 } from "../src/economy";
 import { pullItem, pullPowerup, pullWorker } from "../src/gacha";
 import type { GameSave } from "../src/game-state";
-import { hashString, mulberry32 } from "../src/scene/rng";
+import { hashString, mulberry32 } from "../src/rng";
+import { migrateSave } from "../src/save-migrations";
+import {
+  boonMagnitude,
+  boonReplaces,
+  BOON_DEFS,
+  BOON_DEFS_BY_ID,
+  describeBoon,
+  slotCapacity,
+  AURA_CAP,
+  FORTUNE_CAP,
+  type BoonInstance,
+} from "../src/run/boons";
+import { PATRON_DEFS, PATRON_DEFS_BY_ID } from "../src/run/patrons";
+import { baseRunStats, deriveRunStats, type RunStats } from "../src/run/stats";
+import { canBuy, roomAcorns, rollShop } from "../src/run/shop";
+import { groveRank, grovePayoutMult, pactEnemyScaling, PACT_DEFS } from "../src/run/pact";
+import {
+  depthOf,
+  ELITE_AFFIXES,
+  generateRunMap,
+  exitsAfter,
+  isDepthBoundary,
+  isFinalRoom,
+  TOTAL_ROOMS,
+  type RoomSpec,
+} from "../src/run/rooms";
+import {
+  applyOfferCard,
+  drawOffer,
+  rerollOffer,
+  type OfferCard,
+  type OfferContext,
+} from "../src/run/offers";
+import {
+  absorbShield,
+  applyStatus,
+  consumeMark,
+  pruneStatuses,
+  resolvePotency,
+  statusMult,
+  STATUS_DEFS,
+  tickStatuses,
+  type StatusApplication,
+  type StatusBoard,
+} from "../src/statuses";
 import { isUnlocked, UNLOCKS } from "../src/unlocks";
 import {
   createMember,
@@ -141,7 +180,7 @@ interface RunScenario {
   world: number;
   trials: number;
   policy: Policy;
-  boonPolicy: "first";
+  boonPolicy: string;
   party: PartyMemberSpec[];
   expect: { clearPct: [number, number]; avgNetWood: [number, number] };
 }
@@ -158,6 +197,13 @@ interface MovesFile {
   parityGroups: ParityGroup[];
   runs: RunScenario[];
   gacha: { workerPulls: number; itemPulls: number; powerupPulls: number };
+  boonPaths?: {
+    scenario: string;
+    policies: string[];
+    trials: number;
+    maxSpreadPct: number;
+    minClearPct: number;
+  };
 }
 
 const moves: MovesFile = JSON.parse(
@@ -181,8 +227,73 @@ function inBand(value: number, [lo, hi]: [number, number]): boolean {
   return value >= lo && value <= hi;
 }
 
+// --- Identity harness ------------------------------------------------------
+//
+// This file is a SEEDED STREAM test, not a behavior test. Every band asserted
+// below is a function of WHICH DRAW INDEX each roll lands on — `battleWinPct`
+// replays one mulberry32 stream across all its trials, so inserting a single
+// extra rng() call anywhere upstream shifts every subsequent draw by one and
+// silently re-bands scenarios that have nothing to do with the change. The
+// failure then presents as a balance problem, which is the most expensive
+// possible way to discover a refactor bug.
+//
+// So a refactor that is meant to be inert has to prove it, and win% alone
+// can't: a new roll may happen to leave THIS seed's outcome untouched while
+// having already displaced the stream for everything after it. Two numbers per
+// scenario pin it down properly — the outcome at full precision, and how many
+// times the scenario drew at all.
+//
+// `SIM_IDENTITY=1 npm run test:sim` prints those as a stable, diffable block.
+// Capture it before an engine change, diff it after; an identical block means
+// the change genuinely did nothing, and any difference names the exact
+// scenario to look at. The governing rule this enforces is stated in
+// src/battle.ts's header: rng() is only called when the stat governing that
+// roll is non-default, so content that isn't in play costs no draws.
+
+/** Per-rng-stream draw counts, in creation order. Keyed by the scenario name
+ * (suffixed `#2`, `#3`… if a name ever spawns more than one stream) so each
+ * stream is counted separately rather than silently sharing a bucket. */
+const drawCounts = new Map<string, number>();
+/** Outcomes worth pinning, by the same key — a scenario may record more than
+ * one (a run records both clear% and net wood). */
+const identityValues = new Map<string, { label: string; value: number }[]>();
+
+function streamKey(name: string): string {
+  if (!drawCounts.has(name)) return name;
+  let n = 2;
+  while (drawCounts.has(`${name}#${n}`)) n++;
+  return `${name}#${n}`;
+}
+
 function scenarioRng(name: string): () => number {
-  return mulberry32((moves.seed ^ hashString(name)) >>> 0);
+  const base = mulberry32((moves.seed ^ hashString(name)) >>> 0);
+  const key = streamKey(name);
+  drawCounts.set(key, 0);
+  return () => {
+    drawCounts.set(key, drawCounts.get(key)! + 1);
+    return base();
+  };
+}
+
+/** Records an outcome against a scenario's FIRST stream — every caller runs
+ * exactly one stream per name today, and the suffixing above exists only so a
+ * future second stream can't corrupt the first one's count. */
+function recordIdentity(name: string, label: string, value: number): void {
+  const rows = identityValues.get(name) ?? [];
+  rows.push({ label, value });
+  identityValues.set(name, rows);
+}
+
+function reportIdentity(): void {
+  if (!process.env.SIM_IDENTITY) return;
+  console.log("\nIdentity baseline (SIM_IDENTITY=1):");
+  for (const [key, draws] of drawCounts) {
+    const rows = identityValues.get(key) ?? [];
+    // toPrecision(17) rather than the display toFixed(1) used everywhere else:
+    // the whole point is to expose drift far below what a reader would notice.
+    const outcomes = rows.map((r) => `${r.label}=${r.value.toPrecision(17)}`).join(" ");
+    console.log(`  ID  ${key}  draws=${draws}${outcomes ? `  ${outcomes}` : ""}`);
+  }
 }
 
 // --- Party construction ----------------------------------------------------
@@ -277,11 +388,19 @@ function runOneBattle(
   world: number,
   stage: Stage,
   policy: Policy,
-  boons: Record<string, number>,
+  /** Unused now that the legacy stack map is gone; kept positionally so the
+   * scenario call sites stay untouched. */
+  _legacyBoons: Record<string, number>,
   flags: RunFlags,
   rng: () => number,
+  /** The run's derived build. Omitted by the single-battle scenarios, which
+   * fight with no run around them; supplied by the delve driver so a build
+   * actually affects the fights it was built for. */
+  stats?: RunStats,
+  /** Elite modifier, when this room has one. */
+  affix?: string,
 ): "win" | "loss" {
-  const battle = startBattle(party, buildEnemy(world, stage), inventory, { boons });
+  const battle = startBattle(party, buildEnemy(world, stage, affix as never), inventory, { stats });
   let guard = 0;
   while (!battle.outcome && guard++ < MAX_TURNS) {
     const actorId = battle.turnOrder[battle.turnIndex];
@@ -289,8 +408,17 @@ function runOneBattle(
     const actor = party.find((m) => m.id === actorId);
     if (!actor) break;
     const { action, grade } = decideAction(policy, battle, party, actor, inventory, flags, rng);
-    const events = resolvePartyTurn(battle, party, actorId, action, grade, inventory, 0, rng, boons);
-    if (action === "ability" && events.some((e) => e.kind === "ability" || e.kind === "heal")) {
+    const events = resolveTurn({
+      battle,
+      party,
+      memberId: actorId,
+      action,
+      defendGrade: grade,
+      inventory,
+      stats: stats ?? baseRunStats(),
+      rng,
+    });
+    if (action === "ability" && events.some((e: { kind: string }) => e.kind === "ability" || e.kind === "heal")) {
       flags.abilityUsed = true;
     }
   }
@@ -319,68 +447,189 @@ function battleWinPct(scn: BattleScenario): number {
 // clear and 50% on a loss (the sim never revives — a wipe ends the run, the
 // same as declining the Team Down offer).
 
-function applyBoon(id: BoonId, boons: Record<string, number>, party: TeamMemberSave[], flags: RunFlags): void {
-  boons[id] = (boons[id] ?? 0) + 1;
-  if (id === "ironSkin" || id === "secondWind") {
-    for (const m of party) {
-      if (m.currentHp <= 0) continue;
-      if (id === "ironSkin") {
-        const bump = Math.round(m.maxHp * BOON_HP_PCT);
-        m.maxHp += bump;
-        m.currentHp = Math.min(m.maxHp, m.currentHp + bump);
-      } else {
-        m.currentHp = Math.min(m.maxHp, m.currentHp + Math.round(m.maxHp * BOON_HEAL_PCT));
-      }
-    }
-  } else if (id === "vengefulSpirit") {
-    flags.abilityUsed = false;
-  }
-}
-
-function runFullRun(
+/**
+ * Walks a whole twelve-room delve headlessly.
+ *
+ * Mirrors Game's room state machine: enter, fight, take the reward, choose a
+ * door, repeat — including descent tolls at the two Depth boundaries, acorn
+ * income, curse countdown and Bark carried between rooms. It is deliberately a
+ * SEPARATE implementation rather than a call into Game, because Game imports
+ * Tauri and the DOM; the price of that is that the two can drift, which is
+ * exactly why the invariants below assert shape (a run always ends, always in
+ * twelve rooms or fewer, always with a legal build) rather than exact numbers
+ * that would only ever agree by coincidence.
+ *
+ * `boonPolicy` decides which card gets taken, which is how the per-patron
+ * dominance check gets its different builds.
+ */
+function runFullDelve(
   scn: RunScenario,
   rng: () => number,
-): { cleared: boolean; netWood: number } {
+): { cleared: boolean; netWood: number; roomsCleared: number; boons: BoonInstance[]; acorns: number } {
   const { party, inventory } = buildParty(scn.party);
   const mult = getWorld(scn.world).mult;
   const flags: RunFlags = { abilityUsed: false };
-  const boons: Record<string, number> = {};
-  const expeditionBonus = party.reduce((sum, m) => {
-    const item = equippedItem(m, "adventuring", inventory);
-    return sum + (item?.adventuring?.expeditionBonusPct ?? 0);
-  }, 0);
+  const seed = Math.floor(rng() * 1e9);
+  const map = generateRunMap(seed);
 
+  let held: BoonInstance[] = [];
+  const charms: string[] = [];
+  let acorns = 0;
   let netWood = -embarkCost(mult);
   let pendingWood = 0;
+  let roomsCleared = 0;
 
-  for (let stage = 1 as Stage; stage <= 5; stage = (stage + 1) as Stage) {
-    if (stage > 1) netWood -= continueFee(mult, stage);
-    const enemies = buildEnemy(scn.world, stage);
-    const totalReward = enemies.reduce((sum, e) => sum + e.woodReward, 0);
-    const outcome = runOneBattle(party, inventory, scn.world, stage, scn.policy, boons, flags, rng);
+  const statsNow = () =>
+    deriveRunStats({ party, inventory, prestigeLevel: 0, boonList: held, charms, world: scn.world });
 
-    if (outcome === "loss") {
-      return { cleared: false, netWood: netWood + Math.floor(pendingWood * 0.5) };
+  let room = map.slots[0][0];
+  for (let guard = 0; guard < TOTAL_ROOMS * 2 && roomsCleared < TOTAL_ROOMS; guard++) {
+    const stats = statsNow();
+
+    if (room.kind === "fight" || room.kind === "elite" || room.kind === "boss") {
+      // Elites fight with their affix here too, or the balance numbers are
+      // measured against a run that is easier than the one that ships.
+      const enemies = buildEnemy(scn.world, roomTier(roomsCleared), room.affix as never);
+      const totalReward = enemies.reduce((sum, e) => sum + e.woodReward, 0);
+      const outcome = runOneBattle(party, inventory, scn.world, roomTier(roomsCleared), scn.policy, {}, flags, rng, stats, room.affix);
+      if (outcome === "loss") {
+        return { cleared: false, netWood: netWood + Math.floor(pendingWood * 0.5), roomsCleared, boons: held, acorns };
+      }
+      pendingWood += Math.round(totalReward * (1 + stats.values.expeditionPct) * stats.values.woodMult);
+      acorns += Math.round(roomAcorns(depthOf(roomsCleared), room.kind, rng) * stats.values.acornMult);
+      for (const m of party) grantXp(m, stageXpReward(roomTier(roomsCleared), scn.world), inventory, 0);
+      if (room.kind === "boss") {
+        netWood += chestReward(scn.world, isFinalRoom(roomsCleared) ? 5 : 3).wood;
+      }
+    } else if (room.kind === "fountain") {
+      // Mirrors Game.resolveSimpleRoom — see the note there on why 35%.
+      for (const m of party) {
+        if (m.currentHp > 0) m.currentHp = Math.min(m.maxHp, m.currentHp + Math.round(m.maxHp * 0.35));
+      }
+    } else if (room.kind === "shop") {
+      // The stall MUST be shopped here, not skipped.
+      //
+      // Leaving it out made the harness structurally blind to the entire
+      // economy layer: acorns accumulated and were never converted into
+      // anything, so Lumen — the patron whose whole identity is earning more —
+      // measured as strictly worse than every other build. That was a defect in
+      // the measurement being read as a defect in the design, and it survived
+      // several rounds of tuning aimed at the wrong thing.
+      const shop = rollShop(
+        { held, prestigeLevel: 0, rarityLuck: stats.values.rarityLuck },
+        depthOf(roomsCleared),
+        (seed + roomsCleared * 7919) >>> 0,
+        charms,
+      );
+      for (const entry of shop.stock) {
+        if (!canBuy(entry, acorns, charms, held)) continue;
+        acorns -= entry.cost;
+        entry.sold = true;
+        if (entry.kind === "charm") charms.push(entry.refId);
+        else if (entry.kind === "boon" && entry.card) held = applyOfferCard(held, entry.card, roomsCleared);
+        else if (entry.kind === "consumable" && entry.refId === "salve") {
+          for (const m of party) {
+            if (m.currentHp > 0) m.currentHp = Math.min(m.maxHp, m.currentHp + Math.round(m.maxHp * 0.4));
+          }
+        }
+      }
     }
 
-    pendingWood += Math.round(totalReward * (1 + expeditionBonus) * boonWoodMult(boons));
-    // Battle XP mid-run, mirroring Game.finalizeBattleOutcome: stage wins
-    // level the party up for the run's remaining stages.
-    const xpReward = stageXpReward(stage, scn.world);
-    for (const m of party) grantXp(m, xpReward, inventory, 0);
-    if (stage === 3 || stage === 5) {
-      netWood += chestReward(scn.world, stage).wood;
+    // The room's reward.
+    if (room.reward === "boon" || room.reward === "rank" || room.kind === "elite" || room.kind === "boss") {
+      const offer = drawOffer(
+        { held, prestigeLevel: 0, rarityLuck: stats.values.rarityLuck, extraCards: stats.values.extraOfferCount },
+        (seed + roomsCleared * 104729) >>> 0,
+        3,
+      );
+      // Elites and bosses pay at least Epic — the wager the door is asking the
+      // player to take. Mirrors Game.drawRoomOffer.
+      if (room.kind === "elite" || room.kind === "boss") {
+        for (const c of offer.cards) {
+          const def = BOON_DEFS_BY_ID[c.boonId];
+          if (def && (c.rarity === "common" || c.rarity === "rare")) {
+            c.rarity = def.rarities.includes("epic") ? "epic" : def.rarities[def.rarities.length - 1];
+          }
+        }
+      }
+      const card = choosePolicyCard(offer.cards, scn.boonPolicy);
+      if (card) {
+        const def = BOON_DEFS_BY_ID[card.boonId];
+        if (def?.slot !== "instant") held = applyOfferCard(held, card, roomsCleared);
+      }
     }
-    if (stage === 5) break;
 
-    const offer = drawBoonOffer(party, inventory, flags.abilityUsed, rng);
-    if (offer.length > 0) applyBoon(offer[0], boons, party, flags);
+    roomsCleared++;
+    if (isFinalRoom(roomsCleared - 1)) break;
+
+    // Descent toll at the two Depth boundaries — the only fees after embark.
+    const exits = exitsAfter(map, roomsCleared - 1);
+    if (!exits || exits.length === 0) break;
+    if (isDepthBoundary(roomsCleared - 1)) netWood -= descentToll(mult, exits[0].depth);
+    room = choosePolicyDoor(exits, scn.boonPolicy, acorns);
   }
 
-  return { cleared: true, netWood: netWood + pendingWood };
+  const cleared = roomsCleared >= TOTAL_ROOMS;
+  return { cleared, netWood: netWood + pendingWood, roomsCleared, boons: held, acorns };
 }
 
-// --- Gacha invariants ------------------------------------------------------
+/** Which card a policy takes. `patron-loyal:*` is how the dominance check
+ * builds five genuinely different runs out of one harness. */
+function choosePolicyCard(cards: OfferCard[], policy: string): OfferCard | undefined {
+  if (cards.length === 0) return undefined;
+  if (policy.startsWith("patron-loyal:")) {
+    // Loyal but not stupid: prefer the patron, then take that patron's BEST
+    // card rather than whichever happened to be dealt first. Taking the first
+    // match models a player who cannot read, and measuring a patron by how it
+    // performs in the hands of someone not paying attention tells you nothing
+    // about whether the patron is viable.
+    const want = policy.slice("patron-loyal:".length);
+    const mine = cards.filter((c) => BOON_DEFS_BY_ID[c.boonId]?.patron === want);
+    const pool = mine.length > 0 ? mine : cards;
+    return [...pool].sort(
+      (a, b) => boonMagnitude({ rarity: b.rarity, rank: 1 }) - boonMagnitude({ rarity: a.rarity, rank: 1 }),
+    )[0];
+  }
+  const rank = (c: OfferCard): number => {
+    const def = BOON_DEFS_BY_ID[c.boonId];
+    if (!def) return 0;
+    const mag = boonMagnitude({ rarity: c.rarity, rank: 1 });
+    const has = (k: string) => def.effects.some((e) => e.kind === "stat" && e.key === k);
+    if (policy === "greedy-atk") return (has("atkMult") || has("critChance") || has("critMult") ? 10 : 1) * mag;
+    if (policy === "greedy-defense") return (has("armorPct") || has("reflectPct") || has("regenPerRoundPct") ? 10 : 1) * mag;
+    if (policy === "worst") return -mag;
+    return mag;
+  };
+  if (policy === "random") return cards[0];
+  return [...cards].sort((a, b) => rank(b) - rank(a))[0];
+}
+
+/** Which door a policy takes. Everything except an explicitly cautious policy
+ * chases the build, which is what makes the "build route is mostly fighting"
+ * property real rather than theoretical. */
+function choosePolicyDoor(exits: RoomSpec[], policy: string, acorns: number): RoomSpec {
+  // Money burning a hole in your pocket beats another card, and every policy
+  // behaves this way because every player does. Without it the route never
+  // visits a stall, the economy layer is never exercised, and the patron built
+  // around earning measures as though earning did nothing.
+  if (acorns >= 30) {
+    const stall = exits.find((r) => r.kind === "shop");
+    if (stall) return stall;
+  }
+  if (policy === "greedy-defense") {
+    return exits.find((r) => r.reward === "heal") ?? exits[0];
+  }
+  // Someone has to walk the dangerous route, or elites are content the balance
+  // numbers never see. This policy takes every elite it is offered, which is
+  // the wager at its most extreme — it should be survivable, not a death
+  // sentence, or the door is a trap dressed as a choice.
+  if (policy === "elite-seeker") {
+    return exits.find((r) => r.kind === "elite") ?? exits.find((r) => r.reward === "boon" || r.reward === "rank") ?? exits[0];
+  }
+  return exits.find((r) => r.reward === "boon" || r.reward === "rank") ?? exits[0];
+}
+
+// --- Gacha invariants ---// --- Gacha invariants ------------------------------------------------------
 
 /** Minimal GameSave-shaped object for the pure gacha resolvers — built here
  * instead of importing game-state's defaultSave() so the sim never touches a
@@ -425,6 +674,1234 @@ function makeSave(): GameSave {
       woodFromAdventures: 0,
     },
   };
+}
+
+// --- Build dominance -------------------------------------------------------
+//
+// THE check this rework exists to pass.
+//
+// The old boon set had one correct answer — take the biggest number — so every
+// run converged on the same build and the choice was decoration. Five patrons
+// only fix that if committing to any of them actually works. If Cinder clears
+// at 80% and Sap at 20%, the door sigils stop being a decision within about
+// three runs and the whole system collapses back into "take the good one".
+//
+// So: run the same party, at the same gear, through the same twelve rooms,
+// with the pick policy locked to each patron in turn. Every path has to land
+// above a floor, and the SPREAD between them has to stay narrow. A wide spread
+// here is not a tuning nit — it means one of the five is a trap.
+
+function buildDominanceChecks(): void {
+  const cfg = moves.boonPaths;
+  if (!cfg) return;
+  console.log("\nBuild dominance (no patron is a trap):");
+  const base = moves.runs.find((r) => r.name === cfg.scenario);
+  if (!base) {
+    check("dominance scenario resolves", false, `unknown scenario ${cfg.scenario}`);
+    return;
+  }
+
+  const results: { policy: string; clearPct: number; rooms: number; wood: number }[] = [];
+  for (const policy of cfg.policies) {
+    const rng = scenarioRng(`dominance-${policy}`);
+    let clears = 0;
+    let rooms = 0;
+    let wood = 0;
+    for (let t = 0; t < cfg.trials; t++) {
+      const out = runFullDelve({ ...base, boonPolicy: policy, trials: cfg.trials }, rng);
+      if (out.cleared) clears++;
+      rooms += out.roomsCleared;
+      wood += out.netWood;
+    }
+    results.push({
+      policy,
+      clearPct: (100 * clears) / cfg.trials,
+      rooms: rooms / cfg.trials,
+      wood: wood / cfg.trials,
+    });
+  }
+
+  for (const r of results) {
+    check(
+      `  ${r.policy}`,
+      r.clearPct >= cfg.minClearPct,
+      `clears ${r.clearPct.toFixed(1)}%, room ${r.rooms.toFixed(1)}/${TOTAL_ROOMS}, ${Math.round(r.wood)} wood`,
+    );
+  }
+
+  // THE REAL QUESTION, and it is not "does every path clear equally".
+  //
+  // Lumen is the greed patron: it trades combat power for payout, and holding
+  // it to the same clear rate as Bramble would erase the only thing that makes
+  // it a distinct choice. A path is a TRAP only if it is worse at everything.
+  //
+  // So the test is a Pareto one: for every path, at least one of "clears more"
+  // or "earns more" must beat the field average. A path that loses on both is
+  // a patron nobody should ever pick, which is exactly what this exists to
+  // catch — and is exactly what Lumen was before the defensive Auras landed.
+  const avgClear = results.reduce((sum, r) => sum + r.clearPct, 0) / results.length;
+  const avgWood = results.reduce((sum, r) => sum + r.wood, 0) / results.length;
+  const dominated = results.filter((r) => r.clearPct < avgClear * 0.75 && r.wood < avgWood);
+  check(
+    "no build path is worse at everything",
+    dominated.length === 0,
+    dominated.length === 0
+      ? `field avg ${avgClear.toFixed(0)}% clear / ${Math.round(avgWood)} wood`
+      : dominated.map((r) => `${r.policy} (${r.clearPct.toFixed(0)}%, ${Math.round(r.wood)}w)`).join("; "),
+  );
+
+  const spread = Math.max(...results.map((r) => r.clearPct)) - Math.min(...results.map((r) => r.clearPct));
+  const best = results.reduce((a, b) => (a.clearPct > b.clearPct ? a : b));
+  const worst = results.reduce((a, b) => (a.clearPct < b.clearPct ? a : b));
+  check(
+    "clear rates stay within a playable spread",
+    spread <= cfg.maxSpreadPct,
+    `spread ${spread.toFixed(1)}% (best ${best.policy} ${best.clearPct.toFixed(1)}%, worst ${worst.policy} ${worst.clearPct.toFixed(1)}%)`,
+  );
+
+  // A delve must always terminate. An infinite fight — two units that cannot
+  // hurt each other, a regen build out-healing its own damage — would hang the
+  // real game with no way out but killing the app.
+  {
+    const rng = scenarioRng("delve-terminates");
+    let stuck = 0;
+    for (let t = 0; t < 60; t++) {
+      const out = runFullDelve({ ...base, boonPolicy: "greedy-defense", trials: 60 }, rng);
+      if (out.roomsCleared === 0 && !out.cleared) stuck++;
+    }
+    check("every delve terminates", stuck === 0, `${stuck} stalled of 60`);
+  }
+
+  // A cleared run must leave the player with a real build, not a pile of
+  // whatever came up. If a full clear ends with two boons, the offer cadence is
+  // wrong and the run never had a chance to become anything.
+  {
+    const rng = scenarioRng("delve-build-size");
+    let sum = 0;
+    let runs = 0;
+    let maxHeld = 0;
+    for (let t = 0; t < 80; t++) {
+      const out = runFullDelve({ ...base, boonPolicy: "greedy-atk", trials: 80 }, rng);
+      if (!out.cleared) continue;
+      runs++;
+      sum += out.boons.length;
+      maxHeld = Math.max(maxHeld, out.boons.length);
+    }
+    const avg = runs > 0 ? sum / runs : 0;
+    check("a cleared run ends with a real build", runs > 0 && avg >= 4, `${avg.toFixed(1)} boons held on average, peak ${maxHeld}`);
+    // And never an illegal one: Aura and Fortune have hard caps, and a run that
+    // quietly exceeded them would make the slot budget meaningless.
+    check("held builds never exceed their slot caps", maxHeld <= AURA_CAP + FORTUNE_CAP + 3, `peak ${maxHeld} vs ceiling ${AURA_CAP + FORTUNE_CAP + 3}`);
+  }
+
+  // Acorn income has to cover roughly two purchases across a run, or the shop
+  // is a room the player walks through rather than uses.
+  {
+    const rng = scenarioRng("delve-acorns");
+    let sum = 0;
+    let n = 0;
+    for (let t = 0; t < 80; t++) {
+      const out = runFullDelve({ ...base, boonPolicy: "greedy-atk", trials: 80 }, rng);
+      if (!out.cleared) continue;
+      sum += out.acorns;
+      n++;
+    }
+    const avg = n > 0 ? sum / n : 0;
+    check("a full run affords about two purchases", avg >= 40 && avg <= 400, `${avg.toFixed(0)} acorns earned`);
+  }
+}
+
+// --- Pact of the Grove -----------------------------------------------------
+//
+// Opt-in difficulty only works as a wager if BOTH halves are real: the run has
+// to get measurably harder, and the payout has to rise enough that taking the
+// pact is a defensible choice rather than a self-imposed handicap. Either half
+// missing turns the whole feature into a difficulty slider nobody touches.
+
+function pactChecks(): void {
+  console.log("\nPact of the Grove:");
+
+  check(
+    "no pact is worth no bonus",
+    groveRank([]) === 0 && grovePayoutMult(0) === 1,
+    `rank ${groveRank([])}, x${grovePayoutMult(0)}`,
+  );
+
+  // Every modifier has to be worth something, or it is a free rank.
+  {
+    const worthless = PACT_DEFS.filter((m) => m.rank <= 0);
+    check("every modifier carries a rank", worthless.length === 0, worthless.map((m) => m.id).join(", ") || `${PACT_DEFS.length} modifiers`);
+  }
+
+  // Payout must rise with rank and stay bounded — an unbounded multiplier would
+  // eventually make Adventure a better wood source than actually chopping,
+  // which is the one thing this mode must not become.
+  {
+    const full = groveRank(PACT_DEFS.map((m) => m.id));
+    const steps = [0, 1, 3, 5, full].map(grovePayoutMult);
+    const rising = steps.every((v, i) => i === 0 || v > steps[i - 1]);
+    check("payout rises with every rank", rising, steps.map((v) => `x${v.toFixed(2)}`).join(" -> "));
+    check("payout stays bounded", grovePayoutMult(100) <= 4, `x${grovePayoutMult(100)} at absurd rank`);
+    check(
+      "a full pact is a serious commitment",
+      full >= 8 && grovePayoutMult(full) >= 2,
+      `rank ${full}, x${grovePayoutMult(full).toFixed(2)} payout`,
+    );
+  }
+
+  // And the difficulty half: the scaling modifiers must genuinely reach the
+  // enemies. This was dead code on the first pass — the modifiers were listed,
+  // the rank was computed, the payout applied, and nothing ever got harder.
+  {
+    const plain = buildEnemy(0, 5)[0];
+    const hard = buildEnemy(0, 5, undefined, pactEnemyScaling(["thickerHide", "sharpTeeth"]))[0];
+    check(
+      "Thicker Hide reaches the enemy",
+      hard.hp > plain.hp,
+      `${plain.hp} hp -> ${hard.hp}`,
+    );
+    check(
+      "Sharp Teeth reaches the enemy",
+      hard.atk > plain.atk,
+      `${plain.atk} atk -> ${hard.atk}`,
+    );
+    const none = buildEnemy(0, 5, undefined, pactEnemyScaling([]))[0];
+    check(
+      "an empty pact changes nothing",
+      none.hp === plain.hp && none.atk === plain.atk,
+      `${none.hp}/${none.atk} vs ${plain.hp}/${plain.atk}`,
+    );
+  }
+
+  // Dry Wells promises no fountains. It is a MAP property, so the check is on
+  // the generated map rather than on what happens when one is entered.
+  {
+    const wet = Array.from({ length: 200 }, (_, i) => generateRunMap(hashString(`dry-${i}`)));
+    const dry = Array.from({ length: 200 }, (_, i) =>
+      generateRunMap(hashString(`dry-${i}`), { noFountains: true }),
+    );
+    const countHeals = (maps: typeof wet) =>
+      maps.reduce((n, m) => n + m.slots.flat().filter((r) => r.reward === "heal").length, 0);
+    check(
+      "Dry Wells removes every spring",
+      countHeals(dry) === 0 && countHeals(wet) > 0,
+      `${countHeals(wet)} springs normally, ${countHeals(dry)} under the pact`,
+    );
+  }
+
+  // Death Rattle promises the boss fights on. Checked by actually killing one.
+  {
+    const spec = buildEnemy(0, 5, undefined, pactEnemyScaling(["deathRattle"]))[0];
+    check("Death Rattle marks the boss", spec.revives === true, `revives=${spec.revives}`);
+    const plainSpec = buildEnemy(0, 5)[0];
+    check("and only under the pact", !plainSpec.revives, `revives=${plainSpec.revives}`);
+
+    const { party, inventory } = buildParty([
+      { defId: "birch", level: 10, items: { adventuring: "w0-adventuring-legendary" } },
+      { defId: "hazel", level: 10, items: { adventuring: "w0-adventuring-legendary" } },
+      { defId: "thorne", level: 10, items: { adventuring: "w0-adventuring-legendary" } },
+    ]);
+    const rng = scenarioRng("death-rattle");
+    const battle = startBattle(
+      party,
+      buildEnemy(0, 5, undefined, pactEnemyScaling(["deathRattle"])),
+      inventory,
+      { stats: baseRunStats() },
+    );
+    let rose = false;
+    let guard = 0;
+    while (!battle.outcome && guard++ < MAX_TURNS) {
+      const actorId = battle.turnOrder[battle.turnIndex];
+      if (!actorId) break;
+      resolveTurn({ battle, party, memberId: actorId, action: "attack", inventory, stats: baseRunStats(), rng });
+      // It came back: every enemy was down at some point, yet the fight ran on.
+      if (!battle.outcome && battle.enemies.some((u) => u.hp > 0 && u.spec.revives === false)) rose = true;
+    }
+    check("a Death Rattle boss actually gets back up", rose, rose ? "second phase observed" : "never rose");
+    check("and only once", battle.enemies.every((u) => !u.spec.revives), "flag consumed");
+  }
+}
+
+// --- Elite affixes ---------------------------------------------------------
+//
+// An elite door promises something specific — "Armoured. Bring status damage."
+// If the affix does not actually change the fight, that promise is a lie, and
+// it is the kind of lie that is invisible from the code: the sigil renders, the
+// text reads well, and the fight plays out exactly like every other one.
+//
+// So each affix is checked for a MEASURABLE effect in the direction it claims.
+
+function affixChecks(): void {
+  console.log("\nElite affixes:");
+
+  // Two different parties, because the two questions need different signal.
+  //
+  // "Is this affix harder?" saturates on win% — a strong party wins every time
+  // and a weak one loses every time, and both read as "no effect". Measured
+  // instead on COST: how much of its health the party spends winning. That
+  // moves smoothly and is exactly what an elite is supposed to charge.
+  //
+  // "Does the affix's promise hold?" does need win%, against a contested
+  // matchup, because the claim is about whether a specific build answers it.
+  const strong = [
+    { defId: "birch", level: 8, items: { adventuring: "w0-adventuring-legendary" } },
+    { defId: "hazel", level: 8, items: { adventuring: "w0-adventuring-legendary" } },
+    { defId: "thorne", level: 8, items: { adventuring: "w0-adventuring-epic" } },
+  ];
+  const contested = [
+    { defId: "birch", level: 4, items: { adventuring: "w0-adventuring-rare" } },
+    { defId: "hazel", level: 4, items: { adventuring: "w0-adventuring-rare" } },
+  ];
+
+  const runFight = (
+    roster: typeof strong,
+    affix: string | undefined,
+    stats: RunStats,
+    label: string,
+  ): { winPct: number; hpLeft: number } => {
+    const rng = scenarioRng(`affix-${label}`);
+    let wins = 0;
+    let hpSum = 0;
+    const TRIALS = 300;
+    for (let t = 0; t < TRIALS; t++) {
+      const { party, inventory } = buildParty(roster);
+      const battle = startBattle(party, buildEnemy(0, 5, affix as never), inventory, { stats });
+      let guard = 0;
+      while (!battle.outcome && guard++ < MAX_TURNS) {
+        const actorId = battle.turnOrder[battle.turnIndex];
+        if (!actorId) break;
+        resolveTurn({ battle, party, memberId: actorId, action: "attack", inventory, stats, rng });
+      }
+      if (battle.outcome === "win") wins++;
+      const maxTotal = party.reduce((sum, m) => sum + m.maxHp, 0);
+      const left = party.reduce((sum, m) => sum + Math.max(0, m.currentHp), 0);
+      hpSum += maxTotal > 0 ? left / maxTotal : 0;
+    }
+    return { winPct: (100 * wins) / TRIALS, hpLeft: (100 * hpSum) / TRIALS };
+  };
+
+  const winPct = (affix: string | undefined, stats?: RunStats): number =>
+    runFight(contested, affix, stats ?? baseRunStats(), `${affix ?? "none"}-${stats ? "built" : "plain"}`).winPct;
+
+  const plain = runFight(strong, undefined, baseRunStats(), "cost-none");
+  for (const affix of ELITE_AFFIXES) {
+    const withAffix = runFight(strong, affix.id, baseRunStats(), `cost-${affix.id}`);
+    check(
+      `  ${affix.name} costs the party more`,
+      withAffix.hpLeft < plain.hpLeft,
+      `${plain.hpLeft.toFixed(1)}% HP left -> ${withAffix.hpLeft.toFixed(1)}%`,
+    );
+  }
+
+  // THE PROMISE. Armoured's card tells the player to bring status damage, so a
+  // burn build must genuinely fare better against it than a raw-damage build of
+  // comparable strength does. Without this, the instruction is decoration.
+  {
+    const burn = deriveRunStats({
+      party: buildParty(contested).party,
+      inventory: [],
+      boonList: [{ id: "kindle", rarity: "heroic", rank: 3 }],
+    });
+    const raw = deriveRunStats({
+      party: buildParty(contested).party,
+      inventory: [],
+      boonList: [{ id: "battleFury", rarity: "heroic", rank: 3 }],
+    });
+    const burnVsArmor = winPct("armored", burn);
+    const rawVsArmor = winPct("armored", raw);
+    check(
+      "  status damage answers Armoured better than raw damage",
+      burnVsArmor > rawVsArmor,
+      `burn ${burnVsArmor.toFixed(1)}% vs raw ${rawVsArmor.toFixed(1)}%`,
+    );
+  }
+
+  // Insulated must genuinely switch control off, or Static's counter-affix is
+  // just another stat block.
+  {
+    const control = deriveRunStats({
+      party: buildParty(contested).party,
+      inventory: [],
+      boonList: [{ id: "jitter", rarity: "heroic", rank: 3 }],
+    });
+    const vsNormal = winPct(undefined, control);
+    const vsInsulated = winPct("insulated", control);
+    check(
+      "  Insulated blunts a control build specifically",
+      vsInsulated < vsNormal,
+      `${vsNormal.toFixed(1)}% -> ${vsInsulated.toFixed(1)}%`,
+    );
+  }
+}
+
+// --- Run map ---------------------------------------------------------------
+//
+// Checked over a thousand seeds, because the failure mode of generated content
+// is not "the average run is bad" — it is "one run in forty is unplayable, and
+// the player who gets it blames the game rather than the seed". Each of these
+// corresponds to a numbered rule in run/rooms.ts's header.
+
+function runMapChecks(): void {
+  console.log("\nRun map generation:");
+  const MAPS = 1000;
+  const maps = Array.from({ length: MAPS }, (_, i) => generateRunMap(hashString(`map-${i}`)));
+
+  check(
+    "every run is twelve rooms",
+    maps.every((m) => m.slots.length === TOTAL_ROOMS),
+    `${maps[0].slots.length} slots`,
+  );
+
+  // Rule 2, and the most important one here: a run must never be denied its own
+  // premise by an unlucky draw. If a choice offered no way to advance the
+  // build, that run simply cannot become anything.
+  {
+    const bad = maps.filter((m) =>
+      m.slots.some((slot, i) => {
+        if (i === 0) return false;
+        const room = slot[0];
+        if (room.kind === "boss") return false;
+        return !slot.some((r) => r.reward === "boon" || r.reward === "rank");
+      }),
+    );
+    check("every choice offers a way to advance the build", bad.length === 0, `${bad.length} of ${MAPS} maps failed`);
+  }
+
+  // Rule 1: you earn your way into each Depth.
+  {
+    const bad = maps.filter((m) =>
+      [0, 4, 8].some((i) => m.slots[i].some((r) => r.kind !== "fight")),
+    );
+    check("every Depth opens with a fight", bad.length === 0, `${bad.length} maps failed`);
+  }
+
+  // Bosses are single doors — there is nothing to decide about facing the
+  // Depth's boss, and offering a way around it would make Depths optional.
+  {
+    const bad = maps.filter((m) => [3, 7, 11].some((i) => m.slots[i].length !== 1 || m.slots[i][0].kind !== "boss"));
+    check("each Depth ends in exactly one boss", bad.length === 0, `${bad.length} maps failed`);
+  }
+
+  // Rule 6: the pre-boss safety valve is what lets a boss be tuned to be hard.
+  {
+    const bad = maps.filter((m) => [2, 6, 10].some((i) => !m.slots[i].some((r) => r.reward === "heal")));
+    check("a fountain is always offered before each boss", bad.length === 0, `${bad.length} maps failed`);
+  }
+
+  // Rules 4 and 5: Depth I has nothing to spend and nothing to prove.
+  {
+    const bad = maps.filter((m) =>
+      m.slots.slice(0, 4).some((slot) => slot.some((r) => r.kind === "shop" || r.kind === "elite")),
+    );
+    check("Depth I has no shops and no elites", bad.length === 0, `${bad.length} maps failed`);
+  }
+  {
+    const overShopped = maps.filter((m) => {
+      for (const range of [[4, 8], [8, 12]]) {
+        const shops = m.slots.slice(range[0], range[1]).flat().filter((r) => r.kind === "shop").length;
+        if (shops > 1) return true;
+      }
+      return false;
+    });
+    check("later Depths offer at most one shop each", overShopped.length === 0, `${overShopped.length} maps failed`);
+  }
+  {
+    const overElited = maps.filter((m) => {
+      for (const range of [[4, 8], [8, 12]]) {
+        const elites = m.slots.slice(range[0], range[1]).flat().filter((r) => r.kind === "elite").length;
+        if (elites > 1) return true;
+      }
+      return false;
+    });
+    check("later Depths offer at most one elite each", overElited.length === 0, `${overElited.length} maps failed`);
+  }
+
+  // Rule 7: a first run should not open on a wall of choices whose sigils mean
+  // nothing yet.
+  {
+    const bad = maps.filter((m) =>
+      m.slots.some((slot, i) => {
+        const depth = depthOf(i);
+        const isBossOrFirst = i === 0 || i % 4 === 3;
+        if (isBossOrFirst) return slot.length !== 1;
+        return depth === 1 ? slot.length !== 2 : slot.length !== 3;
+      }),
+    );
+    check("Depth I offers two doors, later Depths three", bad.length === 0, `${bad.length} maps failed`);
+  }
+
+  // Every door id must be unique within its run, since ids are how a persisted
+  // choice is resolved back to a room after a restart. A collision would
+  // silently walk the player into the wrong room.
+  {
+    const bad = maps.filter((m) => {
+      const ids = m.slots.flat().map((r) => r.id);
+      return new Set(ids).size !== ids.length;
+    });
+    check("room ids are unique within a run", bad.length === 0, `${bad.length} maps failed`);
+  }
+
+  // Determinism: the persisted map and any regeneration from the same seed have
+  // to agree, or a resumed run shows different doors than it was showing.
+  {
+    const a = generateRunMap(4242);
+    const b = generateRunMap(4242);
+    check("the same seed builds the same map", JSON.stringify(a) === JSON.stringify(b), "byte-identical");
+    const c = generateRunMap(4243);
+    check("different seeds build different maps", JSON.stringify(a) !== JSON.stringify(c), "diverges");
+  }
+
+  // Pacing: every fight is a chance to be worn down, every breather a chance to
+  // recover. A run that is all fights is a slog; one that is mostly events is
+  // not a roguelike. Measured on the build-door route, which is the one a
+  // player chasing a build actually walks.
+  {
+    const combatCounts = maps.map((m) => m.slots.filter((s) => ["fight", "elite", "boss"].includes(s[0].kind)).length);
+    const min = Math.min(...combatCounts);
+    const max = Math.max(...combatCounts);
+    check("the build route is mostly fighting", min >= 8 && max <= TOTAL_ROOMS, `${min}-${max} combat rooms of ${TOTAL_ROOMS}`);
+  }
+
+  // Every patron must actually show up on doors, or a run could never be
+  // offered a patron it wanted to commit to.
+  {
+    const seen = new Set(maps.flatMap((m) => m.slots.flat().map((r) => r.patron).filter(Boolean)));
+    check("every patron appears on doors", seen.size === PATRON_DEFS.length, `${seen.size} of ${PATRON_DEFS.length}`);
+  }
+
+  // Every elite affix must be reachable, or it is content nobody will ever see.
+  {
+    const seen = new Set(maps.flatMap((m) => m.slots.flat().map((r) => r.affix).filter(Boolean)));
+    check("every elite affix is reachable", seen.size === ELITE_AFFIXES.length, `${seen.size} of ${ELITE_AFFIXES.length}`);
+  }
+
+  // Depth boundaries are the run's two "descend or bank" moments, and where the
+  // descent toll is charged — off by one here would charge at the wrong time.
+  {
+    const boundaries = Array.from({ length: TOTAL_ROOMS }, (_, i) => i).filter(isDepthBoundary);
+    check("depth boundaries fall after rooms 4 and 8", JSON.stringify(boundaries) === JSON.stringify([3, 7]), boundaries.join(", "));
+  }
+}
+
+// --- Boon catalog ----------------------------------------------------------
+//
+// These check the design's own rules, not its balance. Balance moves; the
+// rules are what stop the catalog from quietly turning back into "eight flat
+// percentages, but more of them", which is the failure mode the whole rework
+// exists to escape and the one that is hardest to notice from inside.
+
+function boonChecks(): void {
+  console.log("\nBoon catalog:");
+
+  check("boon ids are unique", new Set(BOON_DEFS.map((d) => d.id)).size === BOON_DEFS.length, `${BOON_DEFS.length} boons`);
+
+  // THE PATRON PROMISE. A patron's sigil over a doorway has to mean something
+  // without being read, which only works if each patron owns exactly one
+  // signature status and never borrows another's. Duo boons are the single
+  // exception — that is what makes them read as a secret rather than as more
+  // content.
+  {
+    const violations: string[] = [];
+    for (const def of BOON_DEFS) {
+      if (def.duoPatrons) continue;
+      const signature = PATRON_DEFS_BY_ID[def.patron].signature;
+      for (const effect of def.effects) {
+        if (effect.kind !== "trigger") continue;
+        // Glitch and the friendly statuses are shared vocabulary — the rule is
+        // about not borrowing another patron's SIGNATURE.
+        const otherSignatures = PATRON_DEFS.filter((p) => p.id !== def.patron)
+          .map((p) => p.signature)
+          .filter((s): s is NonNullable<typeof s> => s !== null);
+        if (effect.status !== signature && otherSignatures.includes(effect.status)) {
+          violations.push(`${def.id} (${def.patron}) applies ${effect.status}`);
+        }
+      }
+    }
+    check("no patron borrows another's signature status", violations.length === 0, violations.join("; ") || "clean");
+  }
+
+  // Rank must deepen a build without making the rarity roll cosmetic. If a
+  // rank-2 Rare beat a rank-1 Heroic, the offer screen's central moment — the
+  // Heroic drop — would stop mattering.
+  {
+    const common1 = boonMagnitude({ rarity: "common", rank: 1 });
+    const rare1 = boonMagnitude({ rarity: "rare", rank: 1 });
+    const epic1 = boonMagnitude({ rarity: "epic", rank: 1 });
+    const heroic1 = boonMagnitude({ rarity: "heroic", rank: 1 });
+    const rare2 = boonMagnitude({ rarity: "rare", rank: 2 });
+    const common5 = boonMagnitude({ rarity: "common", rank: 5 });
+    check(
+      "rarity strictly increases magnitude",
+      common1 < rare1 && rare1 < epic1 && epic1 < heroic1,
+      `${common1} < ${rare1} < ${epic1} < ${heroic1}`,
+    );
+    check("rank strictly increases magnitude", boonMagnitude({ rarity: "rare", rank: 3 }) > rare2 && rare2 > rare1, `${rare1} -> ${rare2}`);
+    check("a ranked Rare never eclipses a Heroic", rare2 < heroic1, `rank-2 rare ${rare2} vs heroic ${heroic1}`);
+    check("a fully ranked Common is worth about an Epic", Math.abs(common5 - epic1) < 0.3, `${common5} vs ${epic1}`);
+  }
+
+  // Every exclusive slot must be fillable from every patron, or committing to
+  // a patron would mean leaving a slot permanently empty — which reads as the
+  // patron being broken rather than as a build choice.
+  {
+    const missing: string[] = [];
+    for (const patron of PATRON_DEFS) {
+      for (const slot of ["strike", "guard", "rite"] as const) {
+        const has = BOON_DEFS.some((d) => d.patron === patron.id && d.slot === slot && !d.duoPatrons && !d.requiresPatronBoons);
+        if (!has) missing.push(`${patron.id}/${slot}`);
+      }
+    }
+    check("every patron can fill every exclusive slot", missing.length === 0, missing.join(", ") || "all five complete");
+  }
+
+  // A description promising a number must actually produce one. A card reading
+  // "+{n}% attack" is the single worst thing an offer screen can show.
+  {
+    const unsubstituted = BOON_DEFS.filter((d) =>
+      describeBoon(d, { rarity: "epic", rank: 2 }).includes("{n}"),
+    );
+    check("every {n} placeholder resolves", unsubstituted.length === 0, unsubstituted.map((d) => d.id).join(", ") || "all resolve");
+  }
+
+  // The number on the card has to move when the rarity does, or rarity is a
+  // colour with no meaning behind it.
+  {
+    const scaling = BOON_DEFS.filter((d) => d.description.includes("{n}"));
+    const flat = scaling.filter(
+      (d) => describeBoon(d, { rarity: "common", rank: 1 }) === describeBoon(d, { rarity: "heroic", rank: 1 }) && d.rarities.includes("heroic"),
+    );
+    check("a rarer card shows a bigger number", flat.length === 0, flat.map((d) => d.id).join(", ") || `${scaling.length} scaling descriptions`);
+  }
+
+  // Exclusive slots must actually be exclusive, and stacking slots must not be.
+  {
+    check(
+      "slot capacities match the design",
+      slotCapacity("strike") === 1 && slotCapacity("guard") === 1 && slotCapacity("rite") === 1 && slotCapacity("aura") > 1 && slotCapacity("fortune") > 1 && slotCapacity("instant") === 0,
+      `strike ${slotCapacity("strike")}, aura ${slotCapacity("aura")}, fortune ${slotCapacity("fortune")}`,
+    );
+    const held: BoonInstance[] = [{ id: "kindle", rarity: "common", rank: 1 }];
+    const replaced = boonReplaces(held, BOON_DEFS_BY_ID.thornbite);
+    const notReplaced = boonReplaces(held, BOON_DEFS_BY_ID.battleFury);
+    check(
+      "taking a Strike boon reports what it replaces",
+      replaced?.id === "kindle" && notReplaced === null,
+      `${replaced?.id ?? "none"} / ${notReplaced?.id ?? "none"}`,
+    );
+  }
+
+  // Duos are the payoff for having committed to two patrons, so they must name
+  // two DIFFERENT ones and never be rankable — a landmark with levels is not a
+  // landmark.
+  {
+    const duos = BOON_DEFS.filter((d) => d.duoPatrons);
+    const bad = duos.filter((d) => d.duoPatrons![0] === d.duoPatrons![1] || d.maxRank !== 1 || d.rarities.includes("common"));
+    check("duo boons pair two patrons, unranked and never common", bad.length === 0, `${duos.length} duos, ${bad.length} malformed`);
+    // Every patron pair worth having should be reachable, or a run that
+    // commits to two patrons may find the duo layer simply absent for it.
+    const pairs = new Set(duos.map((d) => [...d.duoPatrons!].sort().join("+")));
+    check("duos cover at least half the patron pairs", pairs.size >= 5, `${pairs.size} of 10 possible pairs`);
+  }
+
+  // Legendaries must be gated behind real commitment, or they are just very
+  // good boons and the loyalty they exist to reward stops mattering.
+  {
+    const legendaries = BOON_DEFS.filter((d) => d.requiresPatronBoons);
+    const ungated = legendaries.filter((d) => (d.requiresPatronBoons ?? 0) < 3 || !d.rarities.every((r) => r === "heroic"));
+    check("legendaries need real commitment", ungated.length === 0, `${legendaries.length} legendaries, ${ungated.length} under-gated`);
+    check("every patron has a legendary", new Set(legendaries.map((d) => d.patron)).size === PATRON_DEFS.length, `${new Set(legendaries.map((d) => d.patron)).size} of ${PATRON_DEFS.length}`);
+  }
+
+  // A custom handler is a place the data model stops being able to explain
+  // itself, so the set stays small on purpose. If this trips, the effect being
+  // added probably wants to be a stat or a trigger.
+  {
+    const customs = new Set(
+      BOON_DEFS.flatMap((d) => d.effects.filter((e) => e.kind === "custom").map((e) => (e as { handlerId: string }).handlerId)),
+    );
+    check("custom handlers stay a short list", customs.size <= 10, `${customs.size} handlers: ${[...customs].join(", ")}`);
+  }
+}
+
+// --- Offers ----------------------------------------------------------------
+//
+// The offer screen is the one the run is actually about, and it has one
+// catastrophic failure mode: an empty draw. The run gate refuses to advance
+// while an offer is pending, so an offer with no cards is a soft-lock with no
+// in-game recovery — and it is only reachable deep into a run with most slots
+// full, which is precisely where nobody is testing by hand.
+//
+// So this fuzzes rather than reasons.
+
+function offerChecks(): void {
+  console.log("\nOffers:");
+
+  const baseCtx = (held: BoonInstance[]): OfferContext => ({ held, prestigeLevel: 3 });
+  // Local ladder — economy.ts's RARITY_ORDER is the ITEM rarity scale and has
+  // no "heroic" tier, so reusing it here would silently compare against -1.
+  const BOON_RARITY_ORDER = ["common", "rare", "epic", "heroic"];
+
+  // THE SOFT-LOCK FUZZ. Random held-boon sets across the whole catalog, at
+  // every prestige level, including states with every slot saturated.
+  {
+    const rng = scenarioRng("offer-fuzz");
+    let empty = 0;
+    let worstHeld = 0;
+    for (let trial = 0; trial < 4000; trial++) {
+      const held: BoonInstance[] = [];
+      const size = Math.floor(rng() * 12);
+      for (let i = 0; i < size; i++) {
+        const def = BOON_DEFS[Math.floor(rng() * BOON_DEFS.length)];
+        if (def.slot === "instant" || held.some((h) => h.id === def.id)) continue;
+        held.push({ id: def.id, rarity: "heroic", rank: def.maxRank });
+      }
+      const ctx: OfferContext = { held, prestigeLevel: Math.floor(rng() * 4) };
+      const offer = drawOffer(ctx, Math.floor(rng() * 1e9), 3);
+      if (offer.cards.length === 0) {
+        empty++;
+        worstHeld = Math.max(worstHeld, held.length);
+      }
+    }
+    check("an offer is never empty, in 4000 fuzzed states", empty === 0, empty === 0 ? "always at least one card" : `${empty} empty (worst held ${worstHeld})`);
+  }
+
+  // The specific saturated case the fuzz is most likely to under-sample: every
+  // exclusive slot filled and every stacking slot at its cap, all at max rank
+  // and Heroic. This is a real end-of-run state, not a synthetic one.
+  {
+    const held: BoonInstance[] = [
+      { id: "kindle", rarity: "heroic", rank: 5 },
+      { id: "backdraft", rarity: "heroic", rank: 5 },
+      { id: "wildfire", rarity: "epic", rank: 3 },
+      { id: "keenReflexes", rarity: "heroic", rank: 5 },
+      { id: "overheat", rarity: "heroic", rank: 5 },
+      { id: "battleFury", rarity: "heroic", rank: 5 },
+      { id: "battleTrance", rarity: "heroic", rank: 5 },
+      { id: "emberdust", rarity: "epic", rank: 3 },
+      { id: "lumberBlessing", rarity: "heroic", rank: 5 },
+      { id: "patronsEar", rarity: "epic", rank: 2 },
+    ];
+    const offer = drawOffer(baseCtx(held), 12345, 3);
+    check("a fully saturated build still gets an offer", offer.cards.length > 0, `${offer.cards.length} card(s)`);
+  }
+
+  // Every card must be worth taking. A card for something already held at the
+  // same rarity and max rank does literally nothing, and a screen that shows
+  // one teaches the player to stop reading the screen.
+  {
+    const held: BoonInstance[] = [{ id: "battleFury", rarity: "rare", rank: 2 }];
+    let deadCards = 0;
+    for (let seed = 0; seed < 400; seed++) {
+      const offer = drawOffer(baseCtx(held), seed, 3);
+      for (const card of offer.cards) {
+        const have = held.find((h) => h.id === card.boonId);
+        if (!have) continue;
+        const improvesRarity = BOON_RARITY_ORDER.indexOf(card.rarity) > BOON_RARITY_ORDER.indexOf(have.rarity);
+        if (!card.rankUp && !improvesRarity) deadCards++;
+      }
+    }
+    check("no card is a no-op for something already held", deadCards === 0, `${deadCards} dead card(s) in 400 offers`);
+  }
+
+  // Exclusive slots are the system's whole texture, and they only work if the
+  // card says what it costs. A silent replacement would be the most
+  // frustrating moment in a run.
+  {
+    const held: BoonInstance[] = [{ id: "kindle", rarity: "rare", rank: 1 }];
+    let strikeCards = 0;
+    let labelled = 0;
+    for (let seed = 0; seed < 500; seed++) {
+      for (const card of drawOffer(baseCtx(held), seed, 3).cards) {
+        if (BOON_DEFS_BY_ID[card.boonId]?.slot !== "strike" || card.boonId === "kindle") continue;
+        strikeCards++;
+        if (card.replacesId === "kindle") labelled++;
+      }
+    }
+    check("every exclusive-slot card names what it replaces", strikeCards > 0 && strikeCards === labelled, `${labelled}/${strikeCards} labelled`);
+  }
+
+  // Gating must actually gate. A duo appearing before its patrons are held, or
+  // a legendary before the commitment it rewards, would make both categories
+  // meaningless.
+  {
+    let leaked = 0;
+    for (let seed = 0; seed < 800; seed++) {
+      for (const card of drawOffer(baseCtx([]), seed, 3).cards) {
+        const def = BOON_DEFS_BY_ID[card.boonId];
+        if (def?.duoPatrons || def?.requiresPatronBoons) leaked++;
+      }
+    }
+    check("duos and legendaries never appear to an empty build", leaked === 0, `${leaked} leaks in 800 offers`);
+  }
+  {
+    const committed: BoonInstance[] = [
+      { id: "kindle", rarity: "epic", rank: 2 },
+      { id: "keenReflexes", rarity: "epic", rank: 2 },
+      { id: "overheat", rarity: "epic", rank: 2 },
+      { id: "thornbite", rarity: "rare", rank: 1 },
+    ];
+    let sawLegendary = false;
+    let sawDuo = false;
+    for (let seed = 0; seed < 1500 && !(sawLegendary && sawDuo); seed++) {
+      for (const card of drawOffer(baseCtx(committed), seed, 3).cards) {
+        const def = BOON_DEFS_BY_ID[card.boonId];
+        if (def?.requiresPatronBoons) sawLegendary = true;
+        if (def?.duoPatrons) sawDuo = true;
+      }
+    }
+    check("commitment unlocks its legendary and its duos", sawLegendary && sawDuo, `legendary ${sawLegendary}, duo ${sawDuo}`);
+  }
+
+  // Prestige gating must not leak, the same way the worker and item pools
+  // already don't.
+  {
+    let leaked = 0;
+    for (let seed = 0; seed < 600; seed++) {
+      for (const card of drawOffer({ held: [], prestigeLevel: 0 }, seed, 3).cards) {
+        if (!isUnlocked("boon", card.boonId, 0)) leaked++;
+      }
+    }
+    check("locked boons never leak at prestige 0", leaked === 0, `${leaked} leaks`);
+  }
+
+  // Determinism, and the resume guarantee that depends on it: the same seed and
+  // state must always produce the same cards, or closing the app mid-decision
+  // becomes a way to fish for a better draw.
+  {
+    const a = drawOffer(baseCtx([]), 777, 3);
+    const b = drawOffer(baseCtx([]), 777, 3);
+    check("the same seed draws the same cards", JSON.stringify(a) === JSON.stringify(b), a.cards.map((c) => c.boonId).join(", "));
+    const r1 = rerollOffer(a, baseCtx([]), 3);
+    const r2 = rerollOffer(a, baseCtx([]), 3);
+    check("a reroll is itself reproducible", JSON.stringify(r1) === JSON.stringify(r2), r1.cards.map((c) => c.boonId).join(", "));
+    check("a reroll actually changes the cards", JSON.stringify(r1.cards) !== JSON.stringify(a.cards), "diverges");
+    check("a reroll spends exactly one charge", rerollOffer({ ...a, rerollsLeft: 2 }, baseCtx([]), 3).rerollsLeft === 1, "1 left of 2");
+    check("reroll charges never go negative", rerollOffer({ ...a, rerollsLeft: 0 }, baseCtx([]), 3).rerollsLeft === 0, "floored at 0");
+  }
+
+  // Luck must move the odds in the right direction, and rarity must stay rare
+  // enough that a Heroic is an event.
+  {
+    const countHeroic = (luck: number): number => {
+      let heroic = 0;
+      let total = 0;
+      for (let seed = 0; seed < 3000; seed++) {
+        for (const card of drawOffer({ held: [], prestigeLevel: 3, rarityLuck: luck }, seed, 3).cards) {
+          total++;
+          if (card.rarity === "heroic") heroic++;
+        }
+      }
+      return (100 * heroic) / total;
+    };
+    const plain = countHeroic(0);
+    const lucky = countHeroic(0.6);
+    check("Heroic stays a genuine event", plain > 0 && plain < 8, `${plain.toFixed(2)}% of cards`);
+    check("rarity luck raises the odds", lucky > plain, `${plain.toFixed(2)}% -> ${lucky.toFixed(2)}%`);
+  }
+
+  // The keepsake is the one sanctioned thumb on the scale — the pre-run lever
+  // that lets a build be intentional from the first room.
+  {
+    let matched = 0;
+    for (let seed = 0; seed < 400; seed++) {
+      const offer = drawOffer({ held: [], prestigeLevel: 3, keepsake: "sap" }, seed, 3);
+      if (BOON_DEFS_BY_ID[offer.cards[0]?.boonId]?.patron === "sap") matched++;
+    }
+    check("a keepsake steers the first card", matched === 400, `${matched}/400`);
+  }
+
+  // Applying a card has to do what the card said. The upgrade case is the one
+  // worth pinning: losing accumulated ranks to a rarity upgrade would make a
+  // Heroic a punishment for anyone who had already invested in that boon.
+  {
+    let held: BoonInstance[] = [];
+    held = applyOfferCard(held, { boonId: "battleFury", rarity: "rare" }, 1);
+    check("a fresh pick lands at rank 1", held.length === 1 && held[0].rank === 1 && held[0].rarity === "rare", JSON.stringify(held[0]));
+    held = applyOfferCard(held, { boonId: "battleFury", rarity: "rare", rankUp: true }, 2);
+    check("a rank-up deepens in place", held.length === 1 && held[0].rank === 2, `rank ${held[0].rank}`);
+    held = applyOfferCard(held, { boonId: "battleFury", rarity: "heroic" }, 3);
+    check("a rarity upgrade keeps the rank already earned", held[0].rarity === "heroic" && held[0].rank === 2, `${held[0].rarity} rank ${held[0].rank}`);
+    held = applyOfferCard(held, { boonId: "kindle", rarity: "rare" }, 4);
+    held = applyOfferCard(held, { boonId: "thornbite", rarity: "epic", replacesId: "kindle" }, 5);
+    check(
+      "an exclusive pick displaces the boon it named",
+      held.some((h) => h.id === "thornbite") && !held.some((h) => h.id === "kindle"),
+      held.map((h) => h.id).join(", "),
+    );
+  }
+
+  // Stacking caps must hold, or Aura stops being a budget and the exclusive
+  // slots stop mattering by comparison.
+  {
+    const full: BoonInstance[] = [
+      { id: "ironroot", rarity: "common", rank: 1 },
+      { id: "barbedHide", rarity: "common", rank: 1 },
+      { id: "deepRoots", rarity: "common", rank: 1 },
+      { id: "guardiansWard", rarity: "common", rank: 1 },
+    ];
+    let overCap = 0;
+    for (let seed = 0; seed < 500; seed++) {
+      for (const card of drawOffer(baseCtx(full), seed, 3).cards) {
+        const def = BOON_DEFS_BY_ID[card.boonId];
+        if (def?.slot === "aura" && !full.some((h) => h.id === card.boonId)) overCap++;
+      }
+    }
+    check("a full Aura budget is respected", overCap === 0, `${overCap} over-cap offers`);
+  }
+}
+
+// --- Status effects --------------------------------------------------------
+//
+// Unit-level assertions, deliberately not win-rate ones. A status bug shows up
+// in a win rate as a few points of drift that looks exactly like a balance
+// question, and by the time anyone investigates, the band has usually been
+// "fixed" by adjusting the band. Checking the arithmetic directly means a
+// regression names itself.
+//
+// The potency-snapshot case is the load-bearing one: it is the property that
+// makes a mid-fight app restart safe, and it is invisible in any aggregate.
+
+function statusChecks(): void {
+  console.log("\nStatus effects:");
+
+  const app = (over: Partial<StatusApplication> & { status: StatusApplication["status"] }): StatusApplication => ({
+    stacks: 1,
+    rounds: 1,
+    chance: 1,
+    potencyPct: 0,
+    ...over,
+  });
+
+  // Damage-over-time is front-loaded and self-terminating: intensity is also
+  // the clock, so 5 stacks at 3 damage deal 15+12+9+6+3 and then the unit is
+  // clean. Stacking has to be worth chasing without being permanent.
+  {
+    const board: StatusBoard = {};
+    applyStatus(board, "e", app({ status: "burn", stacks: 5 }), 3);
+    const perRound: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      const ticks = tickStatuses(board, ["e"]);
+      perRound.push(ticks[0]?.damage ?? 0);
+    }
+    check(
+      "burn is front-loaded and self-terminating",
+      JSON.stringify(perRound) === JSON.stringify([15, 12, 9, 6, 3, 0]),
+      `${perRound.join(", ")} (total ${perRound.reduce((a, b) => a + b, 0)})`,
+    );
+    check("burn leaves the board empty", Object.keys(board).length === 0, `${Object.keys(board).length} unit(s) left`);
+  }
+
+  // THE RESUME GUARANTEE. Potency is frozen when the status lands, so an
+  // applier who dies, levels, or has their gear swapped mid-run cannot
+  // retroactively change a burn already on the board. Without this, reloading
+  // a paused fight would re-derive different tick damage than the player saw.
+  {
+    const board: StatusBoard = {};
+    let attackerAtk = 40;
+    applyStatus(board, "e", app({ status: "burn", stacks: 2, potencyPct: 0.25 }), resolvePotency(app({ status: "burn", potencyPct: 0.25 }), attackerAtk, 999));
+    attackerAtk = 4000; // the applier levels up, or a different member acts
+    void attackerAtk;
+    const first = tickStatuses(board, ["e"])[0]?.damage ?? 0;
+    check("burn potency is frozen at apply time", first === 20, `${first} damage (expected 2 stacks x 10)`);
+  }
+
+  // Weak and Vulnerable are pure multipliers and must return EXACTLY 1.0 when
+  // absent — they are multiplied into the damage formula unconditionally, and
+  // a value that merely rounds to 1 would perturb results the seeded sim
+  // asserts to the seventeenth digit.
+  {
+    const board: StatusBoard = {};
+    check(
+      "absent statuses multiply by exactly 1",
+      statusMult(board, "e", "weak", -1) === 1 && statusMult(board, "e", "vulnerable", 1) === 1,
+      `${statusMult(board, "e", "weak", -1)} / ${statusMult(board, "e", "vulnerable", 1)}`,
+    );
+    applyStatus(board, "e", app({ status: "weak", stacks: 2, rounds: 3, potencyPct: 0.2 }), 0.2);
+    applyStatus(board, "e", app({ status: "vulnerable", stacks: 1, rounds: 2, potencyPct: 0.25 }), 0.25);
+    check("weak reduces by stacks x potency", Math.abs(statusMult(board, "e", "weak", -1) - 0.6) < 1e-9, `${statusMult(board, "e", "weak", -1)}`);
+    check("vulnerable raises by stacks x potency", Math.abs(statusMult(board, "e", "vulnerable", 1) - 1.25) < 1e-9, `${statusMult(board, "e", "vulnerable", 1)}`);
+  }
+
+  // Stacked Weak can trivialise a fight but must never make an enemy
+  // completely harmless — a 0-damage enemy removes any reason to finish
+  // killing it, which turns a won fight into busywork.
+  {
+    const board: StatusBoard = {};
+    applyStatus(board, "e", app({ status: "weak", stacks: 20, rounds: 5, potencyPct: 0.5 }), 0.5);
+    const mult = statusMult(board, "e", "weak", -1);
+    check("weak is floored above zero", mult >= 0.05 && mult < 0.2, `x${mult}`);
+  }
+
+  // Duration statuses expire on their own clock, independent of intensity.
+  {
+    const board: StatusBoard = {};
+    applyStatus(board, "m", app({ status: "regen", stacks: 3, rounds: 2 }), 4);
+    const a = tickStatuses(board, ["m"])[0]?.heal ?? 0;
+    const b = tickStatuses(board, ["m"])[0]?.heal ?? 0;
+    const c = tickStatuses(board, ["m"])[0]?.heal ?? 0;
+    check("regen heals at full strength then expires", a === 12 && b === 12 && c === 0, `${a}, ${b}, ${c}`);
+  }
+
+  // Bark soaks before HP, partially or fully, and reports the absorb
+  // separately so a fully-soaked hit can read as "blocked" rather than as a
+  // miss.
+  {
+    const board: StatusBoard = {};
+    applyStatus(board, "m", app({ status: "bark", stacks: 10 }), 1);
+    const partial = absorbShield(board, "m", 4);
+    const rest = absorbShield(board, "m", 20);
+    const gone = absorbShield(board, "m", 5);
+    check(
+      "bark soaks then breaks",
+      partial.through === 0 && partial.absorbed === 4 && rest.through === 14 && rest.absorbed === 6 && gone.absorbed === 0,
+      `${partial.absorbed} then ${rest.absorbed}, ${rest.through} through`,
+    );
+    check("a spent shield is deleted, not left at zero", board.m === undefined, JSON.stringify(board));
+  }
+
+  // Mark is "none"-decay: its consumer is the only thing that removes it, so a
+  // missing consumer would make it permanent.
+  {
+    const board: StatusBoard = {};
+    applyStatus(board, "e", app({ status: "mark", stacks: 1, potencyPct: 0.3 }), 0.3);
+    const first = consumeMark(board, "e");
+    const second = consumeMark(board, "e");
+    check("mark is consumed exactly once", Math.abs(first - 0.3) < 1e-9 && second === 0, `${first} then ${second}`);
+  }
+
+  // Stacking rule: intensity adds, duration takes the max, potency takes the
+  // max. A weak late application must never dilute a strong earlier one —
+  // that reads as "my burn got worse when I hit it again".
+  {
+    const board: StatusBoard = {};
+    applyStatus(board, "e", app({ status: "burn", stacks: 2, rounds: 5 }), 10);
+    applyStatus(board, "e", app({ status: "burn", stacks: 1, rounds: 2 }), 3);
+    const stack = board.e!.burn!;
+    check(
+      "restacking adds intensity and keeps the best potency",
+      stack.stacks === 3 && stack.potency === 10 && stack.rounds === 5,
+      `${stack.stacks} stacks at ${stack.potency}`,
+    );
+  }
+
+  // THE RNG RULE. A certain application must not consume a draw, or every
+  // seeded scenario in this file shifts by one the moment status content ships.
+  {
+    const board: StatusBoard = {};
+    let draws = 0;
+    const counting = () => {
+      draws++;
+      return 0.5;
+    };
+    applyStatus(board, "e", app({ status: "burn", stacks: 1 }), 1, undefined, counting);
+    check("a certain status consumes no rng draw", draws === 0, `${draws} draw(s)`);
+    applyStatus(board, "e", app({ status: "burn", stacks: 1, chance: 0.9 }), 1, undefined, counting);
+    check("an uncertain status consumes exactly one", draws === 1, `${draws} draw(s)`);
+  }
+
+  // Every status must be able to leave the board. A "none"-decay status with
+  // no consumer would be permanent, which no design here intends.
+  {
+    // glitch is consumed at application time (routed to skipNext), so it never
+    // reaches the board to need decay in the first place.
+    const consumed: Record<string, boolean> = { bark: true, mark: true, glitch: true };
+    const stuck = STATUS_DEFS.filter((d) => d.decay === "none" && !consumed[d.id]);
+    check("no status can become permanent", stuck.length === 0, stuck.map((d) => d.id).join(", ") || "all terminate");
+  }
+
+  // Enemy ids are POSITIONAL ("enemy-0", "enemy-1") and reassigned by every
+  // startBattle, so a stale board would hand a fresh enemy the previous one's
+  // burn. This is the same id-reuse hazard that has already produced one bug
+  // in the battle UI's enemy rows.
+  {
+    const board: StatusBoard = { "enemy-0": {}, "enemy-1": {} };
+    applyStatus(board, "enemy-0", app({ status: "burn", stacks: 4 }), 5);
+    applyStatus(board, "enemy-1", app({ status: "burn", stacks: 4 }), 5);
+    pruneStatuses(board, ["enemy-0"]);
+    check("pruning drops units that are no longer in the fight", board["enemy-1"] === undefined && board["enemy-0"] !== undefined, Object.keys(board).join(", "));
+  }
+}
+
+// --- Save migrations -------------------------------------------------------
+//
+// These could not be tested at all until migrateTo* moved out of game-state.ts
+// (which imports Tauri's `invoke` and so can never be loaded here). They are
+// the highest-consequence untested code in the project: a migration bug does
+// not throw, it produces a save that looks fine and behaves wrong, and it only
+// ever runs against data shapes that no longer exist anywhere in the tree —
+// so nobody is in a position to notice by reading.
+//
+// Each case below is a real historical shape, not a synthetic one.
+
+function migrationChecks(): void {
+  console.log("\nSave migrations:");
+
+  // v2 -> current: the pre-gacha era. A bare `ownedAxe` tier and the old
+  // global helper list, with no team/inventory at all.
+  {
+    const raw: Record<string, unknown> = {
+      version: 2,
+      wood: 4321,
+      ownedAxe: 3,
+      helpers: ["boots", "keenEdge", "gnome1", "notAThing"],
+    };
+    const out = migrateSave(raw, makeSave(), 6);
+    check("v2 save keeps its wood", out.wood === 4321, `${out.wood}`);
+    check("v2 save gains a starter member", out.team.length === 1, `${out.team.length} member(s)`);
+    check(
+      "v2 axe tier becomes an equipped item",
+      out.inventory.length === 1 &&
+        out.inventory[0].defId === "legacy-axe-3" &&
+        out.team[0].equipped.woodchopping === out.inventory[0].id,
+      out.inventory[0]?.defId ?? "none",
+    );
+    check(
+      "v2 helpers split into power-ups vs gnomes",
+      out.powerups.includes("swiftBoots") &&
+        out.powerups.includes("keenEdge") &&
+        out.helpers.length === 1 &&
+        out.helpers[0] === "gnome1",
+      `powerups=[${out.powerups.join(",")}] helpers=[${out.helpers.join(",")}]`,
+    );
+    check("v2 starter is at full HP", out.team[0].currentHp === out.team[0].maxHp, `${out.team[0].currentHp}/${out.team[0].maxHp}`);
+  }
+
+  // v4 -> current: a mid-run adventure carrying a pre-multi-enemy battle
+  // (single `enemy`, no `enemies` array). The fight must be dropped, the run
+  // and its pending rewards must NOT be.
+  {
+    const raw: Record<string, unknown> = {
+      version: 4,
+      team: [],
+      adventure: {
+        world: 0,
+        partyIds: ["m-1"],
+        stage: 2,
+        pendingWood: 180,
+        pendingAmber: 5,
+        carried: [],
+        abilityUsed: false,
+        startedAt: "sim",
+        log: [],
+        battle: { enemy: { name: "old" }, enemyHp: 7, round: 3 },
+      },
+    };
+    const out = migrateSave(raw, makeSave(), 6);
+    // v6 turned Adventure into a room graph, so a v4/v5 run has no honest
+    // translation and is dropped. What it EARNED is credited rather than
+    // confiscated — losing the rest of the delve to an update is unavoidable,
+    // losing the wood already won is not.
+    check("an un-translatable old run is dropped", out.adventure === null, `${JSON.stringify(out.adventure)}`);
+    check(
+      "its earnings are credited, not confiscated",
+      out.wood === 180 && out.amber === 5 && out.stats.woodFromAdventures === 180,
+      `${out.wood} wood, ${out.amber} amber`,
+    );
+  }
+
+  // A v6 run must pass through untouched — the migration is keyed on the
+  // presence of the room graph, so a modern save must not be mistaken for an
+  // old one and thrown away.
+  {
+    const raw: Record<string, unknown> = {
+      version: 6,
+      team: [],
+      adventure: {
+        world: 0,
+        partyIds: ["m-1"],
+        roomsCleared: 3,
+        seed: 99,
+        map: { seed: 99, slots: [] },
+        pendingWood: 400,
+        acorns: 30,
+      },
+    };
+    const out = migrateSave(raw, makeSave(), 6);
+    check("a current run survives the migration untouched", out.adventure?.roomsCleared === 3 && out.wood === 0, `roomsCleared ${out.adventure?.roomsCleared}, wood ${out.wood}`);
+  }
+
+  // The self-healing invariant: a member left marked "adventuring" with no
+  // matching run. This is the desync that used to make a worker permanently
+  // unselectable with no in-game way to recover, so it is checked in both
+  // directions — released when stranded, left alone when genuinely on the run.
+  {
+    const fresh = makeSave();
+    fresh.team = [
+      { ...createMember("rook", 1), id: "m-1", status: "adventuring", currentHp: 8 },
+      { ...createMember("rook", 2), id: "m-2", status: "adventuring", currentHp: 0 },
+      { ...createMember("rook", 3), id: "m-3", status: "adventuring", currentHp: 5 },
+    ];
+    // A CURRENT-shaped run (it has a map), so v6 leaves it alone and this
+    // isolates the reconcile pass rather than accidentally testing the drop.
+    const raw: Record<string, unknown> = {
+      version: 6,
+      team: fresh.team,
+      adventure: {
+        world: 0,
+        partyIds: ["m-3"],
+        roomsCleared: 1,
+        seed: 1,
+        map: { seed: 1, slots: [] },
+        battle: null,
+      },
+    };
+    const out = migrateSave(raw, fresh, 6);
+    const byId = new Map(out.team.map((m) => [m.id, m]));
+    check(
+      "stranded living member is released to available",
+      byId.get("m-1")?.status === "available",
+      `${byId.get("m-1")?.status}`,
+    );
+    check(
+      "stranded downed member is released to resting",
+      byId.get("m-2")?.status === "resting",
+      `${byId.get("m-2")?.status}`,
+    );
+    check(
+      "member genuinely on the run stays adventuring",
+      byId.get("m-3")?.status === "adventuring",
+      `${byId.get("m-3")?.status}`,
+    );
+  }
+
+  // Nested-object merge: a save predating a sub-field must GAIN the default
+  // rather than have its partial object clobber the whole block. `provisions`
+  // is the sharpest case — a missing key there reads as NaN on every later
+  // arithmetic op rather than failing loudly.
+  {
+    const raw: Record<string, unknown> = {
+      version: 5,
+      provisions: { trailRations: 2 },
+      shards: { rare: 9 },
+      stats: { chops: 77 },
+    };
+    const out = migrateSave(raw, makeSave(), 6);
+    check(
+      "partial nested objects gain defaults, keep values",
+      out.provisions.trailRations === 2 &&
+        out.provisions.fortuneCharm === 0 &&
+        out.shards.rare === 9 &&
+        out.shards.common === 0 &&
+        out.stats.chops === 77 &&
+        out.stats.treesFelled === 0,
+      `rations ${out.provisions.trailRations}, charms ${out.provisions.fortuneCharm}`,
+    );
+    check("version is always stamped forward", out.version === 6, `${out.version}`);
+  }
+
+  // Idempotence: re-running the whole transform on an already-migrated save
+  // must be a no-op. Every migration is version-gated except reconcile, and a
+  // migration that is not idempotent corrupts on the second load, not the
+  // first — which is exactly the kind of bug that ships.
+  {
+    const once = migrateSave({ version: 2, ownedAxe: 1, helpers: ["boots"] }, makeSave(), 6);
+    const twice = migrateSave(JSON.parse(JSON.stringify(once)) as Record<string, unknown>, makeSave(), 6);
+    check(
+      "migrating an already-migrated save is a no-op",
+      JSON.stringify(once) === JSON.stringify(twice),
+      `${twice.team.length} member(s), ${twice.inventory.length} item(s)`,
+    );
+  }
 }
 
 function rarityAtLeast(r: Rarity, floor: Rarity): boolean {
@@ -524,7 +2001,7 @@ function unlockChecks(): void {
   console.log("\nPrestige-unlock invariants:");
 
   const gatedWorkers = UNLOCKS.filter((u) => u.kind === "worker").map((u) => u.refId);
-  const gatedBoons = UNLOCKS.filter((u) => u.kind === "boon").map((u) => u.refId) as BoonId[];
+  const gatedBoons = UNLOCKS.filter((u) => u.kind === "boon").map((u) => u.refId);
   const maxPrestige = Math.max(...UNLOCKS.map((u) => u.prestige));
 
   // Locked pools never leak: a prestige-0 save can't pull gated workers; a
@@ -565,14 +2042,12 @@ function unlockChecks(): void {
   // seed + prestige level.
   {
     const drawMany = (prestigeLevel: number) => {
-      const { party, inventory } = buildParty([
-        { defId: "rook", level: 1 },
-        { defId: "finch", level: 1 },
-      ]);
       const rng = scenarioRng("unlock-boon-pool");
       const seen = new Set<string>();
       for (let i = 0; i < 500; i++) {
-        for (const id of drawBoonOffer(party, inventory, false, rng, prestigeLevel)) seen.add(id);
+        for (const card of drawOffer({ held: [], prestigeLevel }, Math.floor(rng() * 1e9), 3).cards) {
+          seen.add(card.boonId);
+        }
       }
       return seen;
     };
@@ -1679,6 +3154,8 @@ function contrastChecks(): void {
     ["rarity-rare", "bg-panel", "rarity text"],
     ["rarity-epic", "bg-panel", "rarity text"],
     ["rarity-legendary", "bg-panel", "rarity text"],
+    ["curse", "bg-panel", "curse text, and the \"replaces X\" line on an offer card"],
+    ["accent-gold", "bg-panel", "rank-up tags on shrine and offer cards"],
   ];
 
   for (const [fg, bg, where] of PAIRS) {
@@ -1706,6 +3183,7 @@ function main(): void {
   for (const scn of moves.battles) {
     const winPct = battleWinPct(scn);
     winPctByName.set(scn.name, winPct);
+    recordIdentity(scn.name, "win", winPct);
     check(
       scn.name,
       inBand(winPct, scn.expect.winPct),
@@ -1734,12 +3212,14 @@ function main(): void {
     let clears = 0;
     let netSum = 0;
     for (let t = 0; t < scn.trials; t++) {
-      const { cleared, netWood } = runFullRun(scn, rng);
+      const { cleared, netWood } = runFullDelve(scn, rng);
       if (cleared) clears++;
       netSum += netWood;
     }
     const clearPct = (100 * clears) / scn.trials;
     const avgNet = netSum / scn.trials;
+    recordIdentity(scn.name, "clear", clearPct);
+    recordIdentity(scn.name, "net", avgNet);
     check(
       `${scn.name} clear%`,
       inBand(clearPct, scn.expect.clearPct),
@@ -1752,13 +3232,22 @@ function main(): void {
     );
   }
 
+  buildDominanceChecks();
   economyChecks();
+  pactChecks();
+  affixChecks();
+  runMapChecks();
+  boonChecks();
+  offerChecks();
+  statusChecks();
+  migrationChecks();
   gachaChecks();
   unlockChecks();
   xpChecks();
   featureChecks();
   npcChecks();
   contrastChecks();
+  reportIdentity();
 
   console.log(failures === 0 ? "\nAll sim checks passed." : `\n${failures} sim check(s) FAILED.`);
   process.exit(failures === 0 ? 0 : 1);

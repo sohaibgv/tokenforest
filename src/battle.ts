@@ -4,9 +4,51 @@
 // off: nothing here runs off a wall clock, only explicit submitted turns.
 // Replaces the old single-shot resolveEncounter statistical race with real,
 // individually-visualizable turn events.
+//
+// ---------------------------------------------------------------------------
+// THE RNG RULE
+// ---------------------------------------------------------------------------
+//
+// sim/sim.ts is a SEEDED STREAM test, not a behaviour test. Each scenario
+// replays one mulberry32 stream across all of its trials, and every expected
+// win-rate band in sim/moves.json is a function of which draw index each roll
+// lands on. `w0-stage1-solo-fresh` is asserted at exactly [100,100] on the
+// strength of a hand-traced proof in adventure.ts that a 1-ATK attacker always
+// deals exactly 1 damage.
+//
+// Therefore: **rng() is called only when the stat governing that roll is
+// non-default.** A dodge roll sits behind `stats.values.dodgePct > 0`; a
+// status application with `chance === 1` must not draw at all. Content that
+// isn't in play costs no draws, which is what lets a run with no new content
+// consume a byte-identical stream — and what lets `SIM_IDENTITY=1` prove an
+// engine change was genuinely inert.
+//
+// An unconditional new rng() call shifts every subsequent draw by one and
+// re-bands scenarios that have nothing to do with the change. The failure then
+// presents as a balance problem, which is the most expensive possible way to
+// discover a refactor bug.
+//
+// The same reasoning applies to arithmetic. Floating-point multiplication is
+// not associative, so the damage expressions below keep their factors in their
+// original ORDER and positions; the RunStats refactor was a strict
+// factor-for-factor substitution (`boonAtkMult(boons)` -> `stats.values.
+// atkMult`) rather than a tidy-up. See run/stats.ts's header for why the two
+// snapshot-local factors (charmed, atkSurge) are deliberately still applied
+// here instead of being folded into the stat block.
 
 import type { EnemySpec } from "./adventure";
-import { boonAtkMult, boonCritBonus, boonReflectBonus } from "./boons";
+import { DEATH_RATTLE_HP } from "./run/pact";
+import { baseRunStats, deriveRunStats, PLAYER_CRIT_CHANCE as BASE_CRIT_CHANCE, type RunStats } from "./run/stats";
+import {
+  absorbShield,
+  applyStatus,
+  consumeMark,
+  resolvePotency,
+  statusMult,
+  tickStatuses,
+  type StatusApplication,
+  type StatusBoard,
+} from "./statuses";
 import { effectiveAtk, equippedItem, memberClass, type ItemInstance, type TeamMemberSave } from "./team";
 
 export type SkillGrade = "great" | "good" | "miss";
@@ -25,7 +67,19 @@ export interface EnemyUnit {
 }
 
 export interface TurnEvent {
-  kind: "attack" | "crit" | "miss" | "defend" | "ability" | "heal" | "enemyMove" | "battleEnd";
+  kind:
+    | "attack"
+    | "crit"
+    | "miss"
+    | "defend"
+    | "ability"
+    | "heal"
+    | "enemyMove"
+    | "battleEnd"
+    /** A status just landed on a unit — `moveId` carries the StatusId. */
+    | "status"
+    /** End-of-round damage-over-time or regeneration resolving. */
+    | "statusTick";
   // memberId for party-sourced events; for enemy-sourced attack/enemyMove
   // events, the specific EnemyUnit.id that acted (e.g. "enemy-1") so the UI
   // can show which enemy attacked. Battle-level enemy events that aren't
@@ -74,8 +128,19 @@ export interface BattleSnapshot {
    * gates the Scout class's first-strike bonus. Optional/additive like
    * atkSurge above. */
   firstAttackDone?: Record<string, boolean>;
-  /** Data Lag: memberId -> skip their next turn. */
+  /** Data Lag: memberId -> skip their next turn.
+   *
+   * This is also the Glitch mechanism — status-applying content writes here
+   * rather than introducing a parallel "stun" status, so there is exactly one
+   * way for a unit to lose a turn. */
   skipNext: Record<string, boolean>;
+  /** unitId -> active statuses. Sparse and OPTIONAL: absent on any snapshot
+   * persisted before statuses existed, and never created until something
+   * actually applies one — so a fight with no status content in play adds
+   * nothing to the save, the same additive pattern atkSurge/firstAttackDone
+   * above already use. Keys are memberIds and EnemyUnit.ids, and the latter
+   * are positional, so this must never outlive its battle. */
+  statuses?: StatusBoard;
   /** Damage dealt to the enemy per member THIS round — enemy targeting rule. */
   roundDamage: Record<string, number>;
   /** Capped at ~20, newest last — enough for the UI to resume a fresh
@@ -87,21 +152,189 @@ export interface BattleSnapshot {
 export interface BattleOpts {
   charmed?: boolean;
   roped?: boolean;
-  /** The run's current boon stacks (AdventureState.boons) — read once here
-   * for Guardian's Ward's starting reflect contribution (see
-   * boonReflectBonus), and again every turn by resolvePartyTurn for
-   * Battle Fury/Keen Reflexes. */
-  boons?: Record<string, number>;
+  /** The run's derived stat block. Optional so callers with no run in progress
+   * (previewBattle at the Muster screen) don't have to fabricate one; absent,
+   * a gear-and-class-only block is derived, which is the honest answer for a
+   * caller that has no run to hand. */
+  stats?: RunStats;
 }
 
 const EVENT_CAP = 20;
 
-/** Chance a party member's Attack lands a 1.5× critical hit — surfaced in
- * the battle HUD (see ui/battle.ts) so it isn't an invisible formula. */
-export const PLAYER_CRIT_CHANCE = 0.1;
+/** Chance a party member's Attack lands a critical hit, before any bonus.
+ *
+ * The value itself now lives in run/stats.ts as the base of the `critChance`
+ * RunStat — re-exported here because ui/battle.ts surfaces it in the HUD (so
+ * it isn't an invisible formula) and importing it from battle.ts is the shape
+ * that module already expects. Importing the other direction would make
+ * battle.ts and run/stats.ts a runtime cycle. */
+export const PLAYER_CRIT_CHANCE = BASE_CRIT_CHANCE;
 
 function livingIds(party: TeamMemberSave[]): string[] {
   return party.filter((m) => m.currentHp > 0).map((m) => m.id);
+}
+
+/** The status board, created on first write.
+ *
+ * Lazy rather than initialised in startBattle so that a fight which never
+ * touches a status persists `statuses: undefined` instead of an empty object —
+ * scheduleSave stringifies the entire save on every action, and this keeps
+ * the common case free. */
+function statusBoard(battle: BattleSnapshot): StatusBoard {
+  battle.statuses = battle.statuses ?? {};
+  return battle.statuses;
+}
+
+/** Read-only view for the multiplier lookups, which must not conjure a board
+ * into existence just by asking whether one exists. */
+const EMPTY_BOARD: StatusBoard = {};
+function readBoard(battle: BattleSnapshot): StatusBoard {
+  return battle.statuses ?? EMPTY_BOARD;
+}
+
+/**
+ * Applies a list of trigger statuses and pushes an event for each one that
+ * lands.
+ *
+ * `apps` is empty for any run with no status-bearing content, so this returns
+ * immediately without consuming a draw — which is what keeps such a run's rng
+ * stream identical to one from before statuses existed. See this file's
+ * header.
+ */
+function fireStatuses(
+  battle: BattleSnapshot,
+  apps: StatusApplication[],
+  targetId: string,
+  actorId: string,
+  attackerAtk: number,
+  targetMaxHp: number,
+  rng: () => number,
+): void {
+  if (apps.length === 0) return;
+  // Insulated elites cannot be Glitched or Weakened. Control is the strongest
+  // lever in a turn-based fight, so the affix that switches it off is the one
+  // that most changes how a fight has to be played — and it is checked here,
+  // at the single place statuses land, rather than at each of the five
+  // triggers that can reach it.
+  const insulated = battle.enemies.find((u) => u.id === targetId)?.spec.affix === "insulated";
+  for (const app of apps) {
+    if (insulated && (app.status === "glitch" || app.status === "weak")) continue;
+    // Glitch is virtual: it routes to skipNext rather than onto the board, so
+    // "loses a turn" has exactly one implementation — the one the glitchPulse
+    // enemy special has always used. See statuses.ts's StatusId comment.
+    if (app.status === "glitch") {
+      if (app.chance < 1 && rng() >= app.chance) continue;
+      battle.skipNext[targetId] = true;
+      pushEvent(battle, { kind: "status", actorId, targetId, moveId: "glitch", amount: 1 });
+      continue;
+    }
+    const potency = resolvePotency(app, attackerAtk, targetMaxHp);
+    if (applyStatus(statusBoard(battle), targetId, app, potency, actorId, rng)) {
+      pushEvent(battle, { kind: "status", actorId, targetId, moveId: app.status, amount: app.stacks });
+    }
+  }
+}
+
+/** Average party ATK, the denominator for statuses applied by the BUILD rather
+ * than by a specific attacker (round-start triggers, Rite effects). Using the
+ * party average keeps such a status scaled to the run's power without making
+ * it depend on whose turn happened to be next. */
+function partyAtk(party: TeamMemberSave[], inventory: ItemInstance[], prestigeLevel: number): number {
+  const living = party.filter((m) => m.currentHp > 0);
+  if (living.length === 0) return 1;
+  return living.reduce((sum, m) => sum + effectiveAtk(m, inventory, prestigeLevel), 0) / living.length;
+}
+
+/** Magnitudes for the Rite-slot boons, expressed as fractions so they scale
+ * with the party rather than the world tier (see run/stats.ts's rule 1). */
+const RITE_BARK_PCT = 0.25;
+const RITE_HEAL_PCT = 0.3;
+const RITE_REGEN_STACKS = 3;
+const RITE_BURN_STACKS = 8;
+
+/**
+ * Resolves the Rite-slot boon attached to the once-per-run Ability.
+ *
+ * `riteReroll` is absent here on purpose: returning a reroll charge is a RUN
+ * concern, not a battle one, and BattleSnapshot has no business knowing about
+ * the offer economy. Game reads the handler id off the same stat block after
+ * the turn resolves. That split is the reason `riteHandler` lives on RunStats
+ * rather than being passed to this function directly — one source, two
+ * consumers, neither reaching into the other's state.
+ */
+function applyRite(
+  battle: BattleSnapshot,
+  party: TeamMemberSave[],
+  stats: RunStats,
+  memberId: string,
+  inventory: ItemInstance[],
+  prestigeLevel: number,
+  rng: () => number,
+): void {
+  const mult = stats.riteMagnitude ?? 1;
+  switch (stats.riteHandler) {
+    case "riteBark": {
+      for (const m of party) {
+        if (m.currentHp <= 0) continue;
+        const shield = Math.max(1, Math.round(m.maxHp * RITE_BARK_PCT * mult));
+        applyStatus(
+          statusBoard(battle),
+          m.id,
+          { status: "bark", stacks: shield, rounds: 0, chance: 1, potencyPct: 0 },
+          1,
+          memberId,
+          rng,
+        );
+        pushEvent(battle, { kind: "status", actorId: memberId, targetId: m.id, moveId: "bark", amount: shield });
+      }
+      break;
+    }
+    case "riteBurnAll": {
+      const atk = partyAtk(party, inventory, prestigeLevel);
+      const app: StatusApplication = {
+        status: "burn",
+        stacks: Math.max(1, Math.round(RITE_BURN_STACKS * mult)),
+        rounds: 1,
+        chance: 1,
+        potencyPct: 0.3,
+      };
+      for (const unit of battle.enemies) {
+        if (unit.hp <= 0) continue;
+        fireStatuses(battle, [app], unit.id, memberId, atk, unit.spec.hp, rng);
+      }
+      break;
+    }
+    case "riteHealRegen": {
+      for (const m of party) {
+        if (m.currentHp <= 0) continue;
+        const heal = Math.max(1, Math.round(m.maxHp * RITE_HEAL_PCT * mult));
+        const before = m.currentHp;
+        m.currentHp = Math.min(m.maxHp, m.currentHp + heal);
+        if (m.currentHp > before) {
+          pushEvent(battle, { kind: "heal", actorId: memberId, targetId: m.id, amount: m.currentHp - before });
+        }
+        applyStatus(
+          statusBoard(battle),
+          m.id,
+          { status: "regen", stacks: 1, rounds: Math.max(1, Math.round(RITE_REGEN_STACKS * mult)), chance: 1, potencyPct: 0.04 },
+          Math.max(1, Math.round(m.maxHp * 0.04)),
+          memberId,
+          rng,
+        );
+      }
+      break;
+    }
+    case "riteGlitchAll": {
+      for (const unit of battle.enemies) {
+        if (unit.hp <= 0) continue;
+        battle.skipNext[unit.id] = true;
+        pushEvent(battle, { kind: "status", actorId: memberId, targetId: unit.id, moveId: "glitch", amount: 1 });
+      }
+      break;
+    }
+    default:
+      break;
+  }
 }
 
 function pushEvent(battle: BattleSnapshot, ev: TurnEvent): void {
@@ -133,23 +366,39 @@ function rollDmg(
   return { amount: Math.round(base * roll * (crit ? critMult : 1)), crit };
 }
 
+
+/** Death Rattle (Pact of the Grove): the first time every enemy is down, any
+ * unit marked `revives` gets back up at a fraction of its health, once.
+ *
+ * Returns true when the fight continues. Consuming the flag on the spec itself
+ * is safe because specs are built fresh per battle and persisted inside the
+ * snapshot, so the "already used" state survives a mid-fight app restart
+ * exactly like every other battle field. */
+function tryDeathRattle(battle: BattleSnapshot): boolean {
+  const riser = battle.enemies.find((u) => u.hp <= 0 && u.spec.revives);
+  if (!riser) return false;
+  riser.spec.revives = false;
+  riser.hp = Math.max(1, Math.round(riser.spec.hp * DEATH_RATTLE_HP));
+  pushEvent(battle, { kind: "heal", actorId: riser.id, targetId: riser.id, amount: riser.hp });
+  return true;
+}
+
 export function startBattle(
   party: TeamMemberSave[],
   enemies: EnemySpec[],
   inventory: ItemInstance[],
   opts: BattleOpts,
 ): BattleSnapshot {
-  // Passive reflect: sum of every living party member's equipped
-  // Adventuring reflectPct (epic/legendary gear only) — a collective
-  // "thorns" ward that applies to every hit the party takes, independent of
-  // who's actually defending. Capped at 0.6 so a fully epic/legendary-geared
-  // trio can't get too close to the 0.9 ceiling shared with the
-  // logSlamReflect ABILITY below, which still stacks an additional flat
-  // +0.25 on top of this passive base rather than replacing it.
-  const passiveReflect = party.reduce((sum, m) => {
-    const item = equippedItem(m, "adventuring", inventory);
-    return sum + (item?.adventuring?.reflectPct ?? 0);
-  }, 0);
+  // Reflect is BAKED here, once, and the snapshot owns it from then on (the
+  // Log Slam ability adds a further +0.25 per cast during the fight). The
+  // composition rule — gear pool capped at 0.6 on its own, Guardian's Ward
+  // stacking on top of that cap, both under a shared 0.9 ceiling — now lives
+  // in deriveRunStats so the ledger can show the same breakdown the fight
+  // uses. See run/stats.ts's rule 2 for why baking rather than re-deriving is
+  // load-bearing: a fight paused across an app restart must resume with the
+  // number it started with, not with a number recomputed from gear the player
+  // may have swapped in the meantime.
+  const stats = opts.stats ?? deriveRunStats({ party, inventory });
   return {
     enemies: enemies.map((spec, index) => ({ id: `enemy-${index}`, spec, hp: spec.hp })),
     round: 1,
@@ -157,11 +406,11 @@ export function startBattle(
     turnIndex: 0,
     phase: "party",
     guarding: {},
-    // Guardian's Ward stacks on top of the passive-gear reflect pool (itself
-    // capped at 0.6) the same way logSlamReflect's ability +0.25 does below
-    // — both share the overall 0.9 ceiling.
-    reflectBonus: Math.min(0.9, Math.min(0.6, passiveReflect) + boonReflectBonus(opts.boons)),
-    lastStandArmed: false,
+    reflectBonus: stats.values.reflectPct,
+    // Second Ring and World Tree arm the same one-time save the lastStand gear
+    // ability arms mid-fight, rather than adding a second near-identical
+    // mechanism. False at the neutral 0, exactly as before.
+    lastStandArmed: stats.values.lastStandCharges > 0,
     charmed: !!opts.charmed,
     roped: !!opts.roped,
     narrowEscape: false,
@@ -208,7 +457,14 @@ function pickEnemyTarget(party: TeamMemberSave[], roundDamage: Record<string, nu
  * takes this round, no matter how many enemies land one. If the party wipes
  * partway through (an earlier enemy's hit kills the last living member),
  * remaining enemies simply have no one left to swing at. */
-function applyEnemyTurn(battle: BattleSnapshot, party: TeamMemberSave[], rng: () => number): void {
+function applyEnemyTurn(
+  battle: BattleSnapshot,
+  party: TeamMemberSave[],
+  stats: RunStats,
+  inventory: ItemInstance[],
+  prestigeLevel: number,
+  rng: () => number,
+): void {
   battle.phase = "enemy";
   battle.enemyTurnCount += 1;
 
@@ -223,10 +479,14 @@ function applyEnemyTurn(battle: BattleSnapshot, party: TeamMemberSave[], rng: ()
   // Warden class hook: a Warden's Defend lets 25% less through — each
   // defender's passthrough is scaled by their class before taking the
   // round's best.
+  // guardBonus (from Guard-slot boons and charms) scales every defender's
+  // passthrough down before the round's best is taken — at its neutral 0 this
+  // multiplies by exactly 1, which is why substituting it here cannot perturb
+  // a run that has no such content.
   const passthroughs = Object.entries(battle.guarding).map(([memberId, grade]) => {
     const defender = party.find((m) => m.id === memberId);
     const wardenMult = defender && memberClass(defender) === "warden" ? 0.75 : 1;
-    return mitigationFor(grade) * wardenMult;
+    return mitigationFor(grade) * wardenMult * (1 - stats.values.guardBonus);
   });
   const guardPassthrough = passthroughs.length > 0 ? Math.min(...passthroughs) : 1;
 
@@ -234,6 +494,15 @@ function applyEnemyTurn(battle: BattleSnapshot, party: TeamMemberSave[], rng: ()
     if (unit.hp <= 0) continue;
     const living = party.filter((m) => m.currentHp > 0);
     if (living.length === 0) break;
+
+    // Glitched enemies lose their turn. Nothing writes skipNext for an enemy
+    // id unless status content is in play, so this branch is unreachable — and
+    // therefore free — on a run without it.
+    if (battle.skipNext[unit.id]) {
+      battle.skipNext[unit.id] = false;
+      pushEvent(battle, { kind: "miss", actorId: unit.id, moveId: "glitch" });
+      continue;
+    }
 
     const special = unit.spec.special;
     const isSpecialTurn = !!special && battle.enemyTurnCount % special.everyNth === 0;
@@ -243,31 +512,182 @@ function applyEnemyTurn(battle: BattleSnapshot, party: TeamMemberSave[], rng: ()
       : pickEnemyTarget(party, battle.roundDamage);
     if (!target) continue;
 
-    const base = isSpecialTurn && special ? unit.spec.atk * special.dmgMult : unit.spec.atk;
+    // Weak reduces what the AFFLICTED ENEMY deals. statusMult returns exactly
+    // 1.0 with no stacks, so this factor is a true no-op on a fight with no
+    // status content — multiplying by exact 1 cannot perturb a float.
+    const rawAtk = isSpecialTurn && special ? unit.spec.atk * special.dmgMult : unit.spec.atk;
+    const base = rawAtk * statusMult(readBoard(battle), unit.id, "weak", -1);
     const { amount } = rollDmg(base, rng);
     const mitigated = amount * guardPassthrough;
-    const final = Math.max(0, Math.round(mitigated * (1 - battle.reflectBonus)));
+    let final = Math.max(0, Math.round(mitigated * (1 - battle.reflectBonus)));
+
+    // Armour, dodge and Bark all apply to the ALREADY-ROUNDED value, and each
+    // is skipped outright at its neutral setting — so the base pipeline still
+    // rounds bit-for-bit as it always did, and the dodge roll in particular
+    // consumes no draw unless something actually granted dodge.
+    if (stats.values.armorPct > 0) {
+      final = Math.round(final * (1 - stats.values.armorPct));
+    }
+    const dodged = stats.values.dodgePct > 0 && rng() < stats.values.dodgePct;
+    if (dodged) final = 0;
+    let absorbed = 0;
+    if (!dodged && final > 0 && battle.statuses) {
+      const soak = absorbShield(battle.statuses, target.id, final);
+      final = soak.through;
+      absorbed = soak.absorbed;
+    }
+
     target.currentHp = Math.max(0, target.currentHp - final);
 
-    if (isSpecialTurn && special) {
+    if (dodged) {
+      // Reported as a miss so the existing "attack that did nothing" visual
+      // covers it, rather than a 0-damage hit that reads as a rendering bug.
+      pushEvent(battle, { kind: "miss", actorId: unit.id, targetId: target.id });
+    } else if (isSpecialTurn && special) {
       pushEvent(battle, { kind: "enemyMove", actorId: unit.id, targetId: target.id, amount: final, moveId: special.id });
       if (rng() < special.skipChance) battle.skipNext[target.id] = true;
     } else {
       pushEvent(battle, { kind: "attack", actorId: unit.id, targetId: target.id, amount: final });
     }
+    if (absorbed > 0) {
+      pushEvent(battle, { kind: "status", actorId: target.id, targetId: target.id, moveId: "bark", amount: absorbed });
+    }
   }
+
+  resolveRoundEnd(battle, party, stats, inventory, prestigeLevel, rng);
 
   battle.guarding = {};
   battle.roundDamage = {};
 }
 
 /**
- * Resolves one living party member's turn. If this was the last living
- * member to act this round, also resolves the enemy's reply and opens the
- * next round. Returns every TurnEvent produced (this turn, and possibly the
- * enemy's reply + next-round opening) for the UI to animate in sequence —
- * mutates `battle`/`party` in place, so a caller re-rendering from the
- * already-updated state never needs to poll across frames.
+ * End-of-round upkeep: damage-over-time, regeneration, and stack decay.
+ *
+ * Runs after every living enemy has acted and before the round-scoped guard
+ * and damage maps are cleared, so a Defend still covers the whole round and a
+ * DoT tick lands in the round that applied it.
+ *
+ * Iteration order is fixed — party in turn order, then enemies by array index
+ * — rather than left to object key order, because a seeded run has to be
+ * reproducible and key order is not a language guarantee worth betting a
+ * balance harness on.
+ *
+ * Party deaths from a tick fall through to resolveTurn's existing wipe check,
+ * so lastStand and the Emergency Rope cover a death-by-burn for free. Enemy
+ * deaths need an extra win check at the call site — see resolveTurn.
+ */
+function resolveRoundEnd(
+  battle: BattleSnapshot,
+  party: TeamMemberSave[],
+  stats: RunStats,
+  inventory: ItemInstance[],
+  prestigeLevel: number,
+  rng: () => number,
+): void {
+  // Round-start triggers fire here rather than at the top of the next round:
+  // this is the same instant, and doing it here means a status applied by the
+  // build ticks on the same schedule as one applied by an attack, instead of
+  // getting a free round of grace.
+  if (stats.onRoundStart.length > 0) {
+    const atk = partyAtk(party, inventory, prestigeLevel);
+    for (const unit of battle.enemies) {
+      if (unit.hp <= 0) continue;
+      fireStatuses(battle, stats.onRoundStart, unit.id, "party", atk, unit.spec.hp, rng);
+    }
+  }
+  resolveTicks(battle, party, stats);
+}
+
+function resolveTicks(battle: BattleSnapshot, party: TeamMemberSave[], stats: RunStats): void {
+  const board = battle.statuses;
+  if (board && Object.keys(board).length > 0) {
+    const order = [...battle.turnOrder, ...battle.enemies.map((u) => u.id)];
+    for (const tick of tickStatuses(board, order)) {
+      const member = party.find((m) => m.id === tick.unitId);
+      const enemy = battle.enemies.find((u) => u.id === tick.unitId);
+      if (member) {
+        if (member.currentHp <= 0) continue;
+        if (tick.damage > 0) member.currentHp = Math.max(0, member.currentHp - tick.damage);
+        if (tick.heal > 0) member.currentHp = Math.min(member.maxHp, member.currentHp + tick.heal);
+      } else if (enemy) {
+        if (enemy.hp <= 0) continue;
+        if (tick.damage > 0) enemy.hp = Math.max(0, enemy.hp - tick.damage);
+      } else {
+        continue;
+      }
+      pushEvent(battle, {
+        kind: "statusTick",
+        actorId: tick.unitId,
+        targetId: tick.unitId,
+        amount: tick.damage > 0 ? tick.damage : tick.heal,
+        moveId: tick.damage > 0 ? "dot" : "regen",
+      });
+    }
+  }
+
+  // Regrowing elites mend at round end. Applied AFTER the party's damage-over-
+  // time has ticked, so a burn build races the regeneration rather than being
+  // silently cancelled by it before its own numbers land.
+  for (const unit of battle.enemies) {
+    if (unit.hp <= 0 || unit.spec.affix !== "regrowing") continue;
+    const mend = Math.max(1, Math.round(unit.spec.hp * 0.08));
+    const before = unit.hp;
+    unit.hp = Math.min(unit.spec.hp, unit.hp + mend);
+    if (unit.hp > before) {
+      pushEvent(battle, { kind: "heal", actorId: unit.id, targetId: unit.id, amount: unit.hp - before });
+    }
+  }
+
+  // Flat-rate party regeneration from the build itself (Sap's Verdant Pulse
+  // and friends), as distinct from a Regen status somebody applied. Skipped
+  // entirely at its neutral 0.
+  if (stats.values.regenPerRoundPct > 0) {
+    for (const m of party) {
+      if (m.currentHp <= 0 || m.currentHp >= m.maxHp) continue;
+      const heal = Math.max(1, Math.round(m.maxHp * stats.values.regenPerRoundPct));
+      m.currentHp = Math.min(m.maxHp, m.currentHp + heal);
+      pushEvent(battle, { kind: "heal", actorId: m.id, targetId: m.id, amount: heal });
+    }
+  }
+}
+
+/** Everything one party turn needs. Object form because the positional
+ * signature below had already reached twelve parameters, half of them
+ * optional — adding a thirteenth for the stat block would have been the point
+ * where call sites started passing `undefined` placeholders to reach the
+ * argument they cared about. New parameters go here; the positional function
+ * is frozen. */
+export interface TurnRequest {
+  battle: BattleSnapshot;
+  party: TeamMemberSave[];
+  memberId: string;
+  action: BattleAction;
+  inventory: ItemInstance[];
+  /** The run's derived build. Callers that run many turns (previewBattle, the
+   * sim) should derive this ONCE and reuse it — it is immutable for the
+   * duration of a fight. */
+  stats: RunStats;
+  defendGrade?: SkillGrade;
+  /** Result of the Attack timing minigame (ui/battle.ts's floating-bubble
+   * flow) — "great" forces a guaranteed crit, "miss" forces no crit,
+   * "good"/omitted leaves the normal random crit-chance roll untouched. */
+  attackGrade?: SkillGrade;
+  /** Which EnemyUnit.id an "attack" should hit. Omitted (or pointing at an
+   * already-defeated unit) falls back to the lowest-index living enemy. */
+  targetEnemyId?: string;
+  prestigeLevel?: number;
+  rng?: () => number;
+}
+
+/**
+ * Positional shim over `resolveTurn`, kept at exactly its original twelve
+ * parameters in their original order.
+ *
+ * Two callers pass positionally (Game.applyTurnAction and the sim's turn
+ * driver) and both are load-bearing for the seeded balance harness, so this
+ * signature does not move. It derives a RunStats from `boons` on each call,
+ * which is the wasteful-but-correct path; anything running turns in bulk
+ * should call `resolveTurn` with a hoisted block instead.
  */
 export function resolvePartyTurn(
   battle: BattleSnapshot,
@@ -278,24 +698,51 @@ export function resolvePartyTurn(
   inventory: ItemInstance[],
   prestigeLevel = 0,
   rng: () => number = Math.random,
-  /** The run's current boon stacks — see BattleOpts.boons. Defaults to
-   * empty so previewBattle's pre-embark simulation (no run/boons exist yet)
-   * doesn't need to pass anything. */
-  boons: Record<string, number> = {},
-  /** Which EnemyUnit.id an "attack" should hit. Omitted (or pointing at an
-   * already-defeated unit) falls back to the lowest-index living enemy —
-   * keeps single-enemy callers (previewBattle, any not-yet-updated caller)
-   * working exactly as before without having to know about targeting. */
+  /** Unused. Held as a positional placeholder so the two callers that pass
+   * this signature positionally — Game.applyTurnAction and the sim's turn
+   * driver — keep working without edits; both are load-bearing for the seeded
+   * balance harness. New parameters go on TurnRequest instead. */
+  _legacyBoons: Record<string, number> = {},
   targetEnemyId?: string,
-  /** Result of the Attack timing minigame (ui/battle.ts's floating-bubble
-   * flow) — "great" forces a guaranteed crit, "miss" forces no crit,
-   * "good"/omitted leaves the normal random crit-chance roll untouched.
-   * Every existing caller (including the sim, which never plays a timing
-   * minigame) omits this, so behavior is byte-for-byte unchanged for them —
-   * this is a pure bonus layered on top of, not a replacement for, the base
-   * crit-chance math. */
   attackGrade?: SkillGrade,
 ): TurnEvent[] {
+  return resolveTurn({
+    battle,
+    party,
+    memberId,
+    action,
+    defendGrade,
+    inventory,
+    prestigeLevel,
+    rng,
+    stats: deriveRunStats({ party, inventory, prestigeLevel }),
+    targetEnemyId,
+    attackGrade,
+  });
+}
+
+/**
+ * Resolves one living party member's turn. If this was the last living
+ * member to act this round, also resolves the enemy's reply and opens the
+ * next round. Returns every TurnEvent produced (this turn, and possibly the
+ * enemy's reply + next-round opening) for the UI to animate in sequence —
+ * mutates `battle`/`party` in place, so a caller re-rendering from the
+ * already-updated state never needs to poll across frames.
+ */
+export function resolveTurn(req: TurnRequest): TurnEvent[] {
+  const {
+    battle,
+    party,
+    memberId,
+    action,
+    defendGrade,
+    inventory,
+    stats,
+    targetEnemyId,
+    attackGrade,
+    prestigeLevel = 0,
+    rng = Math.random,
+  } = req;
   if (battle.outcome) return [];
   if (battle.turnOrder[battle.turnIndex] !== memberId) return []; // not this member's turn
   const before = battle.events.length;
@@ -314,30 +761,118 @@ export function resolvePartyTurn(
       // attack of the battle hits +50%; Bruiser crits are ×2 not ×1.5.
       const cls = memberClass(actor);
       battle.firstAttackDone = battle.firstAttackDone ?? {};
-      const firstStrike = cls === "scout" && !battle.firstAttackDone[memberId] ? 1.5 : 1;
+      const firstStrike =
+        cls === "scout" && !battle.firstAttackDone[memberId] ? stats.values.firstStrikeMult : 1;
       battle.firstAttackDone[memberId] = true;
+      // FACTOR ORDER IS LOAD-BEARING — see this file's header. `charmed` and
+      // `atkSurge` stay as snapshot reads in their original positions rather
+      // than being folded into stats.values.atkMult, both because the snapshot
+      // is authoritative for them across a resume and because collapsing the
+      // product would change float association and move seeded sim results.
+      const board = readBoard(battle);
+      const ownAtk = effectiveAtk(actor, inventory, prestigeLevel);
       const base =
-        effectiveAtk(actor, inventory, prestigeLevel) *
+        ownAtk *
         (battle.charmed ? 1.1 : 1) *
-        boonAtkMult(boons) *
+        stats.values.atkMult *
         (1 + (battle.atkSurge ?? 0)) *
-        firstStrike;
+        firstStrike *
+        // Both return exactly 1 with no stacks: Fervor is the attacker's own
+        // temporary buff, Vulnerable is the target's damage-taken debuff.
+        statusMult(board, memberId, "fervor", 1) *
+        statusMult(board, targetUnit.id, "vulnerable", 1);
       const forcedCrit =
         attackGrade === "great" ? true : attackGrade === "miss" ? false : undefined;
+      // Mark is read (not yet consumed) so it can raise the odds of the very
+      // roll it is about to be spent on.
+      const markBonus = board[targetUnit.id]?.mark
+        ? board[targetUnit.id]!.mark!.stacks * board[targetUnit.id]!.mark!.potency
+        : 0;
       const { amount, crit } = rollDmg(
         base,
         rng,
-        PLAYER_CRIT_CHANCE + boonCritBonus(boons),
-        cls === "bruiser" ? 2 : 1.5,
+        stats.values.critChance + markBonus,
+        // Bruiser's x2 stays a literal: it REPLACES the stat rather than
+        // adding to it, and turning it into `critMult + 0.5` would be a real
+        // balance change dressed up as a refactor.
+        cls === "bruiser" ? 2 : stats.values.critMult,
         forcedCrit,
       );
-      targetUnit.hp = Math.max(0, targetUnit.hp - amount);
-      battle.roundDamage[memberId] = (battle.roundDamage[memberId] ?? 0) + amount;
-      pushEvent(battle, { kind: crit ? "crit" : "attack", actorId: memberId, targetId: targetUnit.id, amount });
+      // Armoured shrugs off direct hits — but NOT status ticks, which resolve
+      // in resolveTicks without passing through here. That asymmetry is the
+      // whole affix: the door tells you to bring status damage, and bringing
+      // it genuinely answers the fight.
+      const dealt =
+        targetUnit.spec.affix === "armored" ? Math.max(1, Math.round(amount * 0.6)) : amount;
+      targetUnit.hp = Math.max(0, targetUnit.hp - dealt);
+      // Execute: anything left below the threshold simply goes out. Checked
+      // AFTER the hit lands so it reads as a finisher rather than as a
+      // pre-emptive deletion, and skipped entirely at its neutral 0.
+      if (
+        stats.values.executePct > 0 &&
+        targetUnit.hp > 0 &&
+        targetUnit.hp / targetUnit.spec.hp < stats.values.executePct
+      ) {
+        targetUnit.hp = 0;
+      }
+      battle.roundDamage[memberId] = (battle.roundDamage[memberId] ?? 0) + dealt;
+      pushEvent(battle, { kind: crit ? "crit" : "attack", actorId: memberId, targetId: targetUnit.id, amount: dealt });
+      if (markBonus > 0) consumeMark(statusBoard(battle), targetUnit.id);
+
+      // Lifesteal, then on-hit statuses, then on-kill statuses — in that order
+      // so a killing blow still heals, and so an on-kill trigger can't land a
+      // status on a unit the on-hit trigger just removed from play.
+      if (stats.values.lifestealPct > 0 && actor.currentHp > 0) {
+        const heal = Math.max(1, Math.round(dealt * stats.values.lifestealPct));
+        const before = actor.currentHp;
+        actor.currentHp = Math.min(actor.maxHp, actor.currentHp + heal);
+        if (actor.currentHp > before) {
+          pushEvent(battle, { kind: "heal", actorId: memberId, targetId: memberId, amount: actor.currentHp - before });
+        }
+      }
+      if (targetUnit.hp > 0) {
+        fireStatuses(battle, stats.onPartyAttack, targetUnit.id, memberId, ownAtk, targetUnit.spec.hp, rng);
+      } else if (stats.onPartyKill.length > 0) {
+        for (const other of battle.enemies) {
+          if (other.hp <= 0) continue;
+          fireStatuses(battle, stats.onPartyKill, other.id, memberId, ownAtk, other.spec.hp, rng);
+        }
+      }
     }
   } else if (action === "defend" && defendGrade) {
     battle.guarding[memberId] = defendGrade;
     pushEvent(battle, { kind: "defend", actorId: memberId, grade: defendGrade });
+    // Bark from Guard-slot boons: a shield sized as a fraction of the
+    // defender's own max HP, so it scales with the party rather than with the
+    // world tier. Skipped entirely at its neutral 0.
+    if (stats.values.shieldOnGuardPct > 0) {
+      const shield = Math.max(1, Math.round(actor.maxHp * stats.values.shieldOnGuardPct));
+      applyStatus(
+        statusBoard(battle),
+        memberId,
+        { status: "bark", stacks: shield, rounds: 0, chance: 1, potencyPct: 0 },
+        1,
+        memberId,
+        rng,
+      );
+      pushEvent(battle, { kind: "status", actorId: memberId, targetId: memberId, moveId: "bark", amount: shield });
+    }
+    // Guard-triggered statuses land on every living enemy — the fiction is a
+    // retaliatory ward, not a counterattack aimed at one unit.
+    if (stats.onPartyGuard.length > 0) {
+      for (const unit of battle.enemies) {
+        if (unit.hp <= 0) continue;
+        fireStatuses(
+          battle,
+          stats.onPartyGuard,
+          unit.id,
+          memberId,
+          effectiveAtk(actor, inventory, prestigeLevel),
+          unit.spec.hp,
+          rng,
+        );
+      }
+    }
   } else if (action === "ability") {
     const effect = equippedItem(actor, "adventuring", inventory)?.effectId;
     if (effect === "logSlamReflect") {
@@ -370,12 +905,21 @@ export function resolvePartyTurn(
       // final-boss stage, not partway through an earlier one.
       for (const u of battle.enemies) u.hp = 0;
       pushEvent(battle, { kind: "ability", actorId: memberId, moveId: effect });
-    } else {
+    } else if (!stats.riteHandler) {
       pushEvent(battle, { kind: "miss", actorId: memberId }); // no ability equipped
+    }
+    // Rite-slot boons ride ALONGSIDE the equipped item's effect rather than
+    // replacing it — the fiction is that a patron blesses the Ability you
+    // already have. That also means a Rite boon is worth taking even with no
+    // Adventuring gear equipped, which matters early on when the party has
+    // none: without this, the whole slot would read as dead weight for the
+    // first several runs.
+    if (stats.riteHandler) {
+      applyRite(battle, party, stats, memberId, inventory, prestigeLevel, rng);
     }
   }
 
-  if (battle.enemies.every((u) => u.hp <= 0)) {
+  if (battle.enemies.every((u) => u.hp <= 0) && !tryDeathRattle(battle)) {
     battle.outcome = "win";
     battle.phase = "done";
     pushEvent(battle, { kind: "battleEnd", actorId: "enemy", outcome: "win" });
@@ -395,7 +939,20 @@ export function resolvePartyTurn(
   }
 
   // Last living member acted this round — the enemy replies.
-  applyEnemyTurn(battle, party, rng);
+  applyEnemyTurn(battle, party, stats, inventory, prestigeLevel, rng);
+
+  // Second win check. The one above runs BEFORE the enemy phase, so without
+  // this a damage-over-time tick that kills the last enemy at round end would
+  // go unnoticed until somebody took another turn — and if the same tick also
+  // wiped the party, the fight would be scored as a loss the party had already
+  // won. Unreachable when nothing is applying DoT, which is why it doesn't
+  // perturb a status-free run.
+  if (battle.enemies.every((u) => u.hp <= 0) && !tryDeathRattle(battle)) {
+    battle.outcome = "win";
+    battle.phase = "done";
+    pushEvent(battle, { kind: "battleEnd", actorId: "enemy", outcome: "win" });
+    return battle.events.slice(before);
+  }
 
   if (party.every((m) => m.currentHp <= 0)) {
     if (battle.lastStandArmed) {
@@ -433,22 +990,36 @@ export function previewBattle(
   inventory: ItemInstance[],
   prestigeLevel = 0,
   trials = 200,
+  /** The run's build, if there is one. Defaults to a neutral block, which is
+   * the honest answer at the Muster screen: this preview runs BEFORE embark,
+   * so no boons, charms or curses exist yet. */
+  stats: RunStats = baseRunStats(),
 ): { winPct: number; avgWoodOnWin: number } {
   let wins = 0;
   let woodSum = 0;
   const totalWoodReward = enemies.reduce((sum, e) => sum + e.woodReward, 0);
   for (let i = 0; i < trials; i++) {
     const clone = party.map((m) => ({ ...m, equipped: { ...m.equipped } }));
-    const battle = startBattle(clone, enemies, inventory, {});
+    const battle = startBattle(clone, enemies, inventory, { stats });
     let guard = 0;
     while (!battle.outcome && guard < 200) {
       guard++;
       const actorId = battle.turnOrder[battle.turnIndex];
       if (!actorId) break;
       // No explicit targetEnemyId — defaults to focus-firing the lowest-
-      // index living enemy (see resolvePartyTurn), same sequential-kill
-      // behavior a single-enemy preview always had.
-      resolvePartyTurn(battle, clone, actorId, "attack", undefined, inventory, prestigeLevel);
+      // index living enemy (see resolveTurn), same sequential-kill behaviour
+      // a single-enemy preview always had. Calls resolveTurn rather than the
+      // positional shim specifically so the stat block is derived once, above
+      // this loop, instead of 200 x N times inside it.
+      resolveTurn({
+        battle,
+        party: clone,
+        memberId: actorId,
+        action: "attack",
+        inventory,
+        stats,
+        prestigeLevel,
+      });
     }
     if (battle.outcome === "win") {
       wins++;

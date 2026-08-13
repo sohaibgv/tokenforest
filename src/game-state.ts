@@ -3,11 +3,18 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type { BattleSnapshot } from "./battle";
-import type { BoonId } from "./boons";
+import type { BoonInstance } from "./run/boons";
+import type { RunCurse } from "./run/charms";
+import type { RunOffer } from "./run/offers";
+import type { PactId } from "./run/pact";
+import type { PatronId } from "./run/patrons";
+import type { RunMap } from "./run/rooms";
+import type { ShopState } from "./run/shop";
 import { getWorld, type CosmeticId, type HelperId, type PowerupId, type ProvisionId, type Rarity } from "./economy";
-import { createMember, syncHp, type ItemInstance, type TeamMemberSave } from "./team";
+import { migrateSave } from "./save-migrations";
+import { createMember, type ItemInstance, type TeamMemberSave } from "./team";
 
-export const SAVE_VERSION = 5;
+export const SAVE_VERSION = 6;
 
 export interface AdventureLogEntry {
   stage: number;
@@ -25,8 +32,64 @@ export interface AdventureState {
   world: number;
   /** 1-3 roster member ids, snapshotted at embark. */
   partyIds: string[];
-  /** 0 = about to attempt stage 1; N = stages 1..N cleared. */
-  stage: number;
+  /** How many rooms have been CLEARED. Also the index of the room currently
+   * being fought, since `map.slots[n]` is entered after clearing n rooms.
+   *
+   * Replaces the old `stage: 0..5`. The rename is deliberate rather than
+   * cosmetic: `stage` implied a fixed ladder, and every read site that still
+   * thinks in stages is a read site that has not been updated for the room
+   * graph. Letting the compiler find them all was worth the churn. */
+  roomsCleared: number;
+  /** The run's RNG seed. Everything generated during the run — the map, every
+   * offer, every stall — derives from this, so a run is reproducible from a
+   * single number. */
+  seed: number;
+  /** The full room graph, generated once at embark and persisted VERBATIM,
+   * including the doors that will never be taken.
+   *
+   * Regenerating from the seed on load would be smaller, but it would mean a
+   * player's doors could silently change the moment anyone touched the order of
+   * an rng call in generateRunMap — a bug that only ever appears in the field,
+   * on someone's saved run. 1.5 KB is a cheap price for that not being
+   * possible. */
+  map: RunMap;
+  /** The room the party is standing in. Null only between clearing a room and
+   * picking a door. */
+  currentRoomId: string | null;
+  /** Doors awaiting a choice — RoomSpec ids into `map`, never fresh rolls.
+   * Persisted so a pause-and-resume shows the same doors, the same rule the
+   * boon offer has always followed. */
+  pendingExits: string[] | null;
+  /** A non-combat room mid-resolution (a stall part-shopped, a chaos gate
+   * unanswered). The Dialogue object itself is never persisted — it is rebuilt
+   * from this on resume, exactly as the boon panel is rebuilt from its offer. */
+  pendingRoom: { roomId: string; kind: string } | null;
+  /** The run-local currency. Deleted with the run — that is the whole point:
+   * an acorn not spent is an acorn wasted. */
+  acorns: number;
+  /** Held boons, at their rolled rarity and earned rank. */
+  boonList: BoonInstance[];
+  /** Charms bought or found this run — upside and downside both. */
+  charms: string[];
+  /** Live curses from chaos gates, counting down. */
+  curses: RunCurse[];
+  /** Bark shields carried BETWEEN rooms (memberId -> remaining shield). The
+   * only status that outlives a battle, which is why it lives here rather than
+   * on the snapshot. */
+  bark: Record<string, number>;
+  /** Reroll charges in hand. */
+  rerollsLeft: number;
+  /** The trader's stall, if the party is standing in one. */
+  shop: ShopState | null;
+  /** Patron token chosen at Muster — steers the first card of each offer. */
+  keepsake: PatronId | null;
+  /** Grove Rank this run was embarked at, snapshotted so changing the pact
+   * mid-run cannot retroactively change what this run pays out. */
+  groveRank: number;
+  /** The pact modifiers this run embarked under — snapshotted for the same
+   * reason as `groveRank`, and separately from it because the enemy scaling
+   * needs to know WHICH modifiers, not just what they were worth. */
+  pact?: PactId[];
   pendingWood: number;
   pendingAmber: number;
   carried: ProvisionId[];
@@ -39,25 +102,10 @@ export interface AdventureState {
    * so pausing back to wood-chopping (or an app restart) resumes exactly
    * where it left off. Null between stages / before a fight starts. */
   battle: BattleSnapshot | null;
-  /** Boon id -> stack count. Temporary, run-only power-ups picked after
-   * stage wins (see src/boons.ts) — read every turn by battle.ts's
-   * resolvePartyTurn/startBattle for the stacking-passive boons, applied
-   * once directly to member HP for Iron Skin/Second Wind. Lives and dies
-   * with the run exactly like pendingWood/log/stage: cleared by
-   * Game.bankAdventure (full clear, loss, or explicit retreat), untouched
-   * by simply closing/reopening the battle view mid-run. Optional/absent on
-   * saves from before this field existed — every read site treats a
-   * missing entry as 0 (same additive pattern as AdventureLogEntry.
-   * amberGained above), so no migration is required. */
-  boons?: Record<string, number>;
-  /** Exactly 3 boon ids offered after the most recent stage win, awaiting a
-   * pick — null once nothing is pending. Persisted (never re-rolled) so a
-   * pause-then-resume of an in-progress pick — even across an app restart —
-   * shows the exact same 3 options the player was originally offered,
-   * rather than a fresh random draw (see Game.finalizeBattleOutcome/
-   * pickBoon). Optional/absent on old saves reads as "nothing pending",
-   * same additive pattern as `boons` above. */
-  pendingBoonOffer?: BoonId[] | null;
+  /** The offer awaiting a pick, if any. Drawn once and persisted VERBATIM —
+   * never re-rolled on resume, so closing the app mid-decision can never
+   * become a way to fish for better cards. */
+  pendingOffer: RunOffer | null;
   /** A "Team Down" revive offer, awaiting a decision — set either when a
    * stage win (1-4) leaves 1+ party members at <=0 HP without wiping the
    * whole party, OR when a stage is lost outright (a genuine full party
@@ -152,6 +200,19 @@ export interface GameSave {
   /** Purchased-and-carried provision counts (Trail Rations is instant-use,
    * never stored here — see Game.useTrailRations). */
   provisions: Record<ProvisionId, number>;
+  /** Per-patron favour, earned by picking that patron's boons and clearing
+   * Depths with them. Raises its rarity odds and opens its later boons — the
+   * between-runs reason to commit to a patron rather than taking whatever is
+   * in front of you. Optional/additive: absent reads as no favour anywhere. */
+  patronFavor?: Partial<Record<PatronId, number>>;
+  /** Keepsakes earned at favour milestones and available to equip at Muster. */
+  keepsakes?: PatronId[];
+  /** Pact of the Grove modifiers currently switched on — opt-in difficulty for
+   * a proportionally better payout. Optional/additive. */
+  pact?: PactId[];
+  /** Every boon, charm and curse the player has ever been shown, for the Fated
+   * List. Discovery is permanent; seeing a thing once is the reward. */
+  codex?: string[];
   /** Times the wood-chopping world ladder has been reset via Game.prestige().
    * Each level grants a permanent +10% wood yield / +10% party ATK+HP. */
   prestigeLevel: number;
@@ -210,6 +271,10 @@ export function defaultSave(): GameSave {
     provisions: { trailRations: 0, fortuneCharm: 0, emergencyRope: 0 },
     prestigeLevel: 0,
     adventureWorldUnlocked: 0,
+    patronFavor: {},
+    keepsakes: [],
+    pact: [],
+    codex: [],
     stats: {
       treesFelled: 0,
       eldersFelled: 0,
@@ -229,89 +294,9 @@ export function defaultSave(): GameSave {
   return save;
 }
 
-/** v3 migration: old saves have no `team`/`inventory`/gacha fields at all —
- * convert the old global axe tier into a starter Woodchopping item (no
- * chop-power loss), and split old global helpers into Power-ups (boots/
- * keenEdge) vs. the still-global gnome system (unchanged). */
-function migrateToV3(save: GameSave, rawParsed: Record<string, unknown>): void {
-  if (!Array.isArray(rawParsed.team) || rawParsed.team.length === 0) {
-    if (save.team.length === 0) {
-      save.team.push(createMember("rook", save.nextMemberSeq++));
-    }
-    const starter = save.team[0];
-    if (typeof rawParsed.ownedAxe === "number") {
-      const legacyDefId = `legacy-axe-${rawParsed.ownedAxe}`;
-      const inst: ItemInstance = { id: `i-${save.nextItemSeq++}`, defId: legacyDefId };
-      save.inventory.push(inst);
-      starter.equipped.woodchopping = inst.id;
-      syncHp(starter, save.inventory, save.prestigeLevel);
-      starter.currentHp = starter.maxHp;
-    }
-  }
-
-  const legacyHelpers = Array.isArray(rawParsed.helpers) ? (rawParsed.helpers as unknown[]) : [];
-  if (legacyHelpers.length > 0) {
-    if (legacyHelpers.includes("boots") && !(save.powerups as string[]).includes("swiftBoots")) {
-      save.powerups.push("swiftBoots");
-    }
-    if (legacyHelpers.includes("keenEdge") && !(save.powerups as string[]).includes("keenEdge")) {
-      save.powerups.push("keenEdge");
-    }
-    save.helpers = legacyHelpers.filter(
-      (h): h is HelperId => h === "gnome1" || h === "gnome2" || h === "gnomeHaste",
-    );
-  }
-}
-
-/** v4 migration: `AdventureState` gained `battle` (the in-progress
- * turn-based fight, replacing the old instant whole-stage roll) — old saves
- * with a mid-run adventure just have no fight in progress after upgrading;
- * their stage/pendingWood/party are untouched, "Push On" starts the first
- * turn-based fight for whatever stage they were on.
- *
- * `prestigeLevel`/`adventureWorldUnlocked` (added alongside `battle` in this
- * same v4 bump) need no explicit migration step here — they're flat scalar
- * fields, and `loadSave`'s top-level `{...d, ...parsed}` spread already
- * defaults any field absent from an old save to `defaultSave()`'s value. */
-function migrateToV4(save: GameSave): void {
-  if (save.adventure && save.adventure.battle === undefined) {
-    save.adventure.battle = null;
-  }
-}
-
-/** v5 migration: `BattleSnapshot` moved from a single `enemy`/`enemyHp` pair
- * to `enemies: EnemyUnit[]` (multi-enemy battles). An in-progress battle
- * persisted under the old shape has no `enemies` array at all, and the new
- * rendering/turn-resolution code can't do anything useful with it (this is
- * exactly what left players "stuck in adventure... empty text area... cannot
- * do anything" after resuming a pre-upgrade battle) — same situation as the
- * v4 bump's own `battle` migration, so the fix is the same: drop the
- * incompatible in-progress fight. `stage`/`pendingWood`/`partyIds` are
- * untouched, "Push On" starts a fresh (now multi-enemy-capable) battle for
- * whatever stage the player was on. */
-function migrateToV5(save: GameSave): void {
-  const battle = save.adventure?.battle as unknown as { enemies?: unknown } | null | undefined;
-  if (save.adventure && battle && !Array.isArray(battle.enemies)) {
-    save.adventure.battle = null;
-  }
-}
-
-/** Self-healing invariant check, run on every load (not version-gated): a
- * team member should only ever be "adventuring" while genuinely part of the
- * current `adventure.partyIds` — if that's ever out of sync (e.g. an earlier
- * bug cleared `adventure` through a path that skipped the status-release
- * loop in `Game.bankAdventure`), the member would be permanently unselectable
- * for a new adventure with no in-game way to recover. Reconciling here
- * repairs any save left in that state and makes the desync structurally
- * impossible to get stuck in going forward, regardless of how it happened. */
-function reconcileTeamStatus(save: GameSave): void {
-  const partyIds = new Set(save.adventure?.partyIds ?? []);
-  for (const member of save.team) {
-    if (member.status === "adventuring" && !partyIds.has(member.id)) {
-      member.status = member.currentHp > 0 ? "available" : "resting";
-    }
-  }
-}
+// Migrations live in src/save-migrations.ts — pure, so sim/sim.ts can test
+// them (this module can't be imported headlessly: it pulls in Tauri's
+// `invoke` below).
 
 // --- 3-slot persistence ----------------------------------------------------
 //
@@ -409,37 +394,10 @@ export async function loadSave(slot: number): Promise<GameSave> {
     const raw = await invoke<string | null>("load_game", { slot });
     if (!raw) return defaultSave();
     const rawParsed = JSON.parse(raw) as Record<string, unknown>;
-    const parsed = rawParsed as Partial<GameSave>;
-    // Spread-merge is shallow: nested objects need their own merge so old
-    // saves gain new fields instead of clobbering the defaults.
-    const d = defaultSave();
-    const merged: GameSave = {
-      ...d,
-      ...parsed,
-      stats: { ...d.stats, ...parsed.stats },
-      shards: { ...d.shards, ...parsed.shards },
-      provisions: { ...d.provisions, ...parsed.provisions },
-      pity: {
-        worker: parsed.pity?.worker ?? d.pity.worker,
-        item: parsed.pity?.item ?? d.pity.item,
-        powerup: parsed.pity?.powerup ?? d.pity.powerup,
-      },
-      version: SAVE_VERSION,
-    };
-
-    const prevVersion = typeof rawParsed.version === "number" ? rawParsed.version : 0;
-    if (prevVersion < 3) {
-      migrateToV3(merged, rawParsed);
-    }
-    if (prevVersion < 4) {
-      migrateToV4(merged);
-    }
-    if (prevVersion < 5) {
-      migrateToV5(merged);
-    }
-    reconcileTeamStatus(merged);
-
-    return merged;
+    // Everything after the parse is pure and lives in save-migrations.ts —
+    // `defaultSave()` is handed in rather than imported there so that module
+    // never takes a value dependency back on this one.
+    return migrateSave(rawParsed, defaultSave(), SAVE_VERSION);
   } catch {
     return defaultSave();
   }

@@ -7,8 +7,18 @@
       "stage": 1,
       "trials": 300,
       "policy": "attack",
-      "party": [{ "defId": "rook", "level": 1 }],
-      "expect": { "winPct": [100, 100] }
+      "party": [
+        {
+          "defId": "rook",
+          "level": 1
+        }
+      ],
+      "expect": {
+        "winPct": [
+          100,
+          100
+        ]
+      }
     },
     {
       "name": "w0-stage2-solo-fresh",
@@ -16,8 +26,18 @@
       "stage": 2,
       "trials": 300,
       "policy": "attack",
-      "party": [{ "defId": "rook", "level": 1 }],
-      "expect": { "winPct": [0, 1] }
+      "party": [
+        {
+          "defId": "rook",
+          "level": 1
+        }
+      ],
+      "expect": {
+        "winPct": [
+          0,
+          1
+        ]
+      }
     },
     {
       "name": "w0-stage1-trio-fresh",
@@ -26,11 +46,25 @@
       "trials": 300,
       "policy": "attack",
       "party": [
-        { "defId": "rook", "level": 1 },
-        { "defId": "finch", "level": 1 },
-        { "defId": "marl", "level": 1 }
+        {
+          "defId": "rook",
+          "level": 1
+        },
+        {
+          "defId": "finch",
+          "level": 1
+        },
+        {
+          "defId": "marl",
+          "level": 1
+        }
       ],
-      "expect": { "winPct": [100, 100] }
+      "expect": {
+        "winPct": [
+          100,
+          100
+        ]
+      }
     },
     {
       "name": "w0-stage2-trio-fresh",
@@ -39,11 +73,25 @@
       "trials": 300,
       "policy": "attack",
       "party": [
-        { "defId": "rook", "level": 1 },
-        { "defId": "finch", "level": 1 },
-        { "defId": "marl", "level": 1 }
+        {
+          "defId": "rook",
+          "level": 1
+        },
+        {
+          "defId": "finch",
+          "level": 1
+        },
+        {
+          "defId": "marl",
+          "level": 1
+        }
       ],
-      "expect": { "winPct": [95, 100] }
+      "expect": {
+        "winPct": [
+          95,
+          100
+        ]
+      }
     },
     {
       "name": "w0-stage3-trio-rare-geared",
@@ -52,11 +100,34 @@
       "trials": 300,
       "policy": "attack",
       "party": [
-        { "defId": "rook", "level": 3, "items": { "adventuring": "w0-adventuring-rare" } },
-        { "defId": "finch", "level": 3, "items": { "adventuring": "w0-adventuring-rare" } },
-        { "defId": "birch", "level": 3, "items": { "adventuring": "w0-adventuring-common" } }
+        {
+          "defId": "rook",
+          "level": 3,
+          "items": {
+            "adventuring": "w0-adventuring-rare"
+          }
+        },
+        {
+          "defId": "finch",
+          "level": 3,
+          "items": {
+            "adventuring": "w0-adventuring-rare"
+          }
+        },
+        {
+          "defId": "birch",
+          "level": 3,
+          "items": {
+            "adventuring": "w0-adventuring-common"
+          }
+        }
       ],
-      "expect": { "winPct": [55, 90] }
+      "expect": {
+        "winPct": [
+          55,
+          90
+        ]
+      }
     },
     {
       "name": "w0-stage3-trio-rare-geared-guarding",
@@ -65,11 +136,34 @@
       "trials": 300,
       "policy": "guard-low",
       "party": [
-        { "defId": "rook", "level": 3, "items": { "adventuring": "w0-adventuring-rare" } },
-        { "defId": "finch", "level": 3, "items": { "adventuring": "w0-adventuring-rare" } },
-        { "defId": "birch", "level": 3, "items": { "adventuring": "w0-adventuring-common" } }
+        {
+          "defId": "rook",
+          "level": 3,
+          "items": {
+            "adventuring": "w0-adventuring-rare"
+          }
+        },
+        {
+          "defId": "finch",
+          "level": 3,
+          "items": {
+            "adventuring": "w0-adventuring-rare"
+          }
+        },
+        {
+          "defId": "birch",
+          "level": 3,
+          "items": {
+            "adventuring": "w0-adventuring-common"
+          }
+        }
       ],
-      "expect": { "winPct": [55, 98] }
+      "expect": {
+        "winPct": [
+          55,
+          98
+        ]
+      }
     },
     {
       "name": "w0-stage5-trio-epic-geared",
@@ -78,11 +172,34 @@
       "trials": 300,
       "policy": "attack",
       "party": [
-        { "defId": "birch", "level": 6, "items": { "adventuring": "w0-adventuring-epic" } },
-        { "defId": "hazel", "level": 6, "items": { "adventuring": "w0-adventuring-epic" } },
-        { "defId": "thorne", "level": 6, "items": { "adventuring": "w0-adventuring-rare" } }
+        {
+          "defId": "birch",
+          "level": 6,
+          "items": {
+            "adventuring": "w0-adventuring-epic"
+          }
+        },
+        {
+          "defId": "hazel",
+          "level": 6,
+          "items": {
+            "adventuring": "w0-adventuring-epic"
+          }
+        },
+        {
+          "defId": "thorne",
+          "level": 6,
+          "items": {
+            "adventuring": "w0-adventuring-rare"
+          }
+        }
       ],
-      "expect": { "winPct": [60, 95] }
+      "expect": {
+        "winPct": [
+          60,
+          95
+        ]
+      }
     },
     {
       "name": "parity-w1-stage3-trio-rare-geared",
@@ -91,11 +208,34 @@
       "trials": 300,
       "policy": "attack",
       "party": [
-        { "defId": "rook", "level": 3, "items": { "adventuring": "w1-adventuring-rare" } },
-        { "defId": "finch", "level": 3, "items": { "adventuring": "w1-adventuring-rare" } },
-        { "defId": "birch", "level": 3, "items": { "adventuring": "w1-adventuring-common" } }
+        {
+          "defId": "rook",
+          "level": 3,
+          "items": {
+            "adventuring": "w1-adventuring-rare"
+          }
+        },
+        {
+          "defId": "finch",
+          "level": 3,
+          "items": {
+            "adventuring": "w1-adventuring-rare"
+          }
+        },
+        {
+          "defId": "birch",
+          "level": 3,
+          "items": {
+            "adventuring": "w1-adventuring-common"
+          }
+        }
       ],
-      "expect": { "winPct": [55, 95] }
+      "expect": {
+        "winPct": [
+          55,
+          95
+        ]
+      }
     },
     {
       "name": "parity-w3-stage3-trio-rare-geared",
@@ -104,11 +244,34 @@
       "trials": 300,
       "policy": "attack",
       "party": [
-        { "defId": "rook", "level": 3, "items": { "adventuring": "w3-adventuring-rare" } },
-        { "defId": "finch", "level": 3, "items": { "adventuring": "w3-adventuring-rare" } },
-        { "defId": "birch", "level": 3, "items": { "adventuring": "w3-adventuring-common" } }
+        {
+          "defId": "rook",
+          "level": 3,
+          "items": {
+            "adventuring": "w3-adventuring-rare"
+          }
+        },
+        {
+          "defId": "finch",
+          "level": 3,
+          "items": {
+            "adventuring": "w3-adventuring-rare"
+          }
+        },
+        {
+          "defId": "birch",
+          "level": 3,
+          "items": {
+            "adventuring": "w3-adventuring-common"
+          }
+        }
       ],
-      "expect": { "winPct": [55, 95] }
+      "expect": {
+        "winPct": [
+          55,
+          95
+        ]
+      }
     }
   ],
   "parityGroups": [
@@ -128,31 +291,92 @@
       "world": 0,
       "trials": 200,
       "policy": "attack",
-      "boonPolicy": "first",
+      "boonPolicy": "greedy-atk",
       "party": [
-        { "defId": "rook", "level": 1 },
-        { "defId": "finch", "level": 1 },
-        { "defId": "marl", "level": 1 }
+        {
+          "defId": "rook",
+          "level": 1
+        },
+        {
+          "defId": "finch",
+          "level": 1
+        },
+        {
+          "defId": "marl",
+          "level": 1
+        }
       ],
-      "expect": { "clearPct": [0, 20], "avgNetWood": [-60, 120] }
+      "expect": {
+        "clearPct": [
+          0,
+          20
+        ],
+        "avgNetWood": [
+          -60,
+          300
+        ]
+      }
     },
     {
       "name": "w0-full-run-geared-trio",
       "world": 0,
       "trials": 200,
       "policy": "smart",
-      "boonPolicy": "first",
+      "boonPolicy": "greedy-atk",
       "party": [
-        { "defId": "birch", "level": 5, "items": { "adventuring": "w0-adventuring-epic" } },
-        { "defId": "hazel", "level": 5, "items": { "adventuring": "w0-adventuring-rare" } },
-        { "defId": "thorne", "level": 5, "items": { "adventuring": "w0-adventuring-rare" } }
+        {
+          "defId": "birch",
+          "level": 5,
+          "items": {
+            "adventuring": "w0-adventuring-epic"
+          }
+        },
+        {
+          "defId": "hazel",
+          "level": 5,
+          "items": {
+            "adventuring": "w0-adventuring-rare"
+          }
+        },
+        {
+          "defId": "thorne",
+          "level": 5,
+          "items": {
+            "adventuring": "w0-adventuring-rare"
+          }
+        }
       ],
-      "expect": { "clearPct": [55, 95], "avgNetWood": [400, 1200] }
+      "expect": {
+        "clearPct": [
+          35,
+          85
+        ],
+        "avgNetWood": [
+          700,
+          2600
+        ]
+      }
     }
   ],
   "gacha": {
     "workerPulls": 3000,
     "itemPulls": 3000,
     "powerupPulls": 3000
+  },
+  "boonPaths": {
+    "scenario": "w0-full-run-geared-trio",
+    "policies": [
+      "patron-loyal:bramble",
+      "patron-loyal:cinder",
+      "patron-loyal:sap",
+      "patron-loyal:static",
+      "patron-loyal:lumen",
+      "greedy-atk",
+      "greedy-defense",
+      "elite-seeker"
+    ],
+    "trials": 400,
+    "maxSpreadPct": 20,
+    "minClearPct": 55
   }
 }
