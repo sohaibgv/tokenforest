@@ -55,11 +55,27 @@ export async function playFusion(
     return;
   }
 
-  let skipped = false;
+  // A skip has to CUT the wait, not merely shorten what comes after it.
+  // Checking a flag between phases still made a player who tapped at 120ms sit
+  // through the rest of the 620ms charge — so the waits race against the skip
+  // instead of asking it for permission afterwards.
+  let release = (): void => {};
+  const skipped = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let didSkip = false;
   const skip = (): void => {
-    skipped = true;
+    didSkip = true;
+    release();
   };
-  panel.addEventListener("click", skip, { once: true });
+  const wait = (ms: number): Promise<unknown> => Promise.race([sleep(ms), skipped]);
+
+  // Armed on the NEXT task, not now. The Merge button lives inside `panel`, so
+  // at this moment the very click that started the merge is still bubbling up
+  // toward it — and a listener added to an ancestor before the event reaches
+  // it does get invoked. Registering synchronously means the opening click
+  // skips the animation it just asked for.
+  const armSkip = setTimeout(() => panel.addEventListener("click", skip, { once: true }), 0);
   panel.classList.add("fusing");
 
   const origin = pedestal.getBoundingClientRect();
@@ -96,7 +112,7 @@ export async function playFusion(
     }
   }
 
-  if (!skipped) await sleep(CHARGE_MS);
+  await wait(CHARGE_MS);
 
   // Impact. Commit here so the save is written at the beat the player reads
   // as "it happened".
@@ -105,8 +121,11 @@ export async function playFusion(
   target.classList.add("flash-pulse", "fusion-impact");
   panel.classList.add("fusion-shake");
 
-  if (!skipped) await sleep(IMPACT_MS);
+  // Even a skipped merge gets a beat on the impact, or the upgraded worker
+  // appears with no acknowledgement at all.
+  await (didSkip ? sleep(90) : wait(IMPACT_MS));
 
+  clearTimeout(armSkip);
   panel.removeEventListener("click", skip);
   panel.classList.remove("fusing", "fusion-shake");
   layer.remove();
