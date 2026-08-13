@@ -90,6 +90,13 @@
                               still pairs fine with --accent-gold-light on the
                               deliberately-dark --btn-gold-bg buttons below. */
   --accent-gold-rgb: 129, 92, 7;
+  /* Legendary's SHINE. --rarity-legendary (#815c07) cannot be brightened: it
+     is text on a cream panel and the contrast gate holds it to AA, where a
+     real gold lands around 1.3:1 and is unreadable. So the dark gold stays for
+     text and this carries the metal on borders, glows and the star sweep,
+     none of which have to be read. */
+  --rarity-legendary-shine: #f2c94c;
+  --rarity-legendary-shine-rgb: 242, 201, 76;
   --accent-gold-light: #ffe9a8; /* cream-gold text for the DARK --btn-gold-bg
                                     buttons (#update/#prestige-btn) only — matches
                                     canvas TOKEN_COLOR. Do not use on light-panel
@@ -1882,7 +1889,54 @@ body.shop-takeover #shop {
   border-color: var(--accent-green);
 }
 
-/* Fusion Altar ---------------------------------------------------------- */
+/* Legendary should look like metal, not like mud. The stars keep the dark
+   gold as their base — so they never stop being legible — and a highlight
+   sweeps across them on a slow loop. The gradient IS the text colour here
+   (background-clip: text), so at rest it is exactly the AA-safe colour the
+   contrast gate checks, and only the travelling band is bright. */
+@keyframes legendary-shimmer {
+  0% {
+    background-position: 220% 0;
+  }
+  100% {
+    background-position: -80% 0;
+  }
+}
+
+.team-stars.rarity-legendary {
+  background: linear-gradient(
+    100deg,
+    var(--rarity-legendary) 0%,
+    var(--rarity-legendary) 34%,
+    var(--rarity-legendary-shine) 44%,
+    #fff6d8 50%,
+    var(--rarity-legendary-shine) 56%,
+    var(--rarity-legendary) 66%,
+    var(--rarity-legendary) 100%
+  );
+  background-size: 260% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: legendary-shimmer 3.4s linear infinite;
+}
+
+/* Borders and glows have no legibility duty, so they take the bright gold
+   outright. */
+.team-row.rarity-border-legendary {
+  border-left-color: var(--rarity-legendary-shine);
+  box-shadow: inset 1px 0 6px -2px rgba(var(--rarity-legendary-shine-rgb), 0.55);
+}
+
+.team-card-legendary {
+  border-left-color: var(--rarity-legendary-shine);
+}
+
+.team-card-legendary .team-card-head > div:first-child {
+  text-shadow: 0 0 7px rgba(var(--rarity-legendary-shine-rgb), 0.75);
+}
+
+/* Fusion Altar ---------------------------------------------------------- *//* Fusion Altar ---------------------------------------------------------- */
 
 .fusion-altar {
   flex: 1;

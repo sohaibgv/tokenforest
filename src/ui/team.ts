@@ -506,12 +506,16 @@ export function createTeamPanel(game: Game): TeamPanel {
           stack.members.every((m) => m.id === altarTarget || altarFodder.includes(m.id));
         if (spent) continue;
       }
+      // Piles ONLY in the altar. There, copies are interchangeable fodder and
+      // collapsing them is the whole point. In the roster they are not
+      // interchangeable at all — each one carries its own gear and its own
+      // level — and hiding four Rooks behind one row meant only the front
+      // Rook could ever be handed a weapon. The rest were reachable solely
+      // through a small count badge nothing told you to press.
+      const collapsible = !!altarWants && stack.members.length > 1;
       const isOpen = expanded.has(stack.key);
-      // A stack of one is just a row. A stack of many shows its best copy and
-      // a count; opening it lists the copies, which matters once you are
-      // choosing which of four Rooks to keep.
-      if (stack.members.length === 1 || isOpen) {
-        for (const m of stack.members) roster.append(rosterRow(m, stack, altarWants, stack.members.length > 1));
+      if (!collapsible || isOpen) {
+        for (const m of stack.members) roster.append(rosterRow(m, stack, altarWants, collapsible));
       } else {
         // A collapsed row STANDS FOR THE WHOLE STACK, not for copy #1. Seating
         // it used to seat that one member and then go inert: the row showed as
@@ -597,7 +601,9 @@ export function createTeamPanel(game: Game): TeamPanel {
 
     // The count badge is its own control: tapping it opens the stack, tapping
     // the row selects the worker. Two jobs, two targets, both full-height.
-    if (count > 1 && !inExpandedStack) {
+    // The badge only means something where piles exist. In the roster every
+    // copy already has its own row, so a "x2" there points at nothing.
+    if (altarWants && count > 1 && !inExpandedStack) {
       const badge = document.createElement("button");
       badge.className = "team-row-count";
       badge.textContent = altarWants && seated.length > 0 ? `${seated.length}/${count}` : `×${count}`;
@@ -612,7 +618,7 @@ export function createTeamPanel(game: Game): TeamPanel {
         repaint();
       });
       row.append(badge);
-    } else if (inExpandedStack) {
+    } else if (altarWants && inExpandedStack) {
       const collapse = document.createElement("button");
       collapse.className = "team-row-count";
       collapse.textContent = "×";
