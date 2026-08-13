@@ -2110,6 +2110,22 @@ body.shop-takeover #shop {
   padding: 2px 2px 6px;
 }
 
+/* Horizontal-only strips hide their bar entirely. A bar under a 90px card row
+   costs vertical space this window does not have, and the affordance is
+   already there without it: the next card is clipped by the edge, which reads
+   as "there is more" the way a scrollbar does. Vertical panels keep their
+   thumb — there the content boundary is off-screen, so the bar is the only
+   thing that says how far down you are. */
+.adv-tray,
+#build-slots {
+  scrollbar-width: none;
+}
+
+.adv-tray::-webkit-scrollbar,
+#build-slots::-webkit-scrollbar {
+  display: none;
+}
+
 .adv-tray.hidden {
   display: none;
 }
