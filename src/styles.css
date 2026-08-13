@@ -4157,3 +4157,60 @@ button:active:not(:disabled) {
 .adv-codex::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+/* --- "There is something better in your bag" -----------------------------
+ *
+ * The Team screen could tell you what a member was wearing but never that
+ * something better was sitting unused, so finding upgrades meant opening every
+ * slot on every member and comparing names against stats you could not see.
+ * These are the three places that answer it: the roster tile (which members),
+ * the slot chip (which slot), and the picker row (which item).
+ *
+ * Green, matching the accent the rest of the app already uses for "this is
+ * available to you" — deliberately not gold, which is reserved for rarity. */
+/* NO border treatment on the tile.
+   `.team-tile.selected` already colours its border with --accent-green, so
+   marking upgrades the same way made "this member is selected" and "this
+   member has gear waiting" the same visual — and with a fresh roster, where
+   everyone has an upgrade, the whole column lit up and the selection was
+   impossible to find. The pip carries the meaning instead. */
+
+.team-tile-upgrade {
+  position: absolute;
+  /* Bottom-left is the tile's one free corner: the level badge holds
+     top-left, the priority arrows top-right, the status dot bottom-right.
+     The first attempt put this top-right, underneath the arrows. */
+  bottom: 2px;
+  left: 2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent-green);
+  /* A ring against the tile so the pip stays visible on the epic/legendary
+     tiles, which already carry their own coloured chrome. */
+  box-shadow: 0 0 0 1px var(--bg-panel);
+  pointer-events: none;
+}
+
+.team-slots button.has-upgrade {
+  border-color: var(--accent-green);
+}
+
+.team-slot-upgrade {
+  margin-left: 2px;
+  font-size: 8px;
+  line-height: 1;
+  color: var(--accent-green);
+}
+
+/* Picker rows are sorted best-first, so the upgrades cluster at the top and
+   this tag confirms why they are there. */
+.item-picker-upgrade-tag {
+  color: var(--accent-green);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.item-picker button.item-row-upgrade {
+  border-left: 2px solid var(--accent-green);
+}

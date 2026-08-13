@@ -185,6 +185,101 @@ export function syncHp(member: TeamMemberSave, inventory: ItemInstance[], presti
   member.currentHp = Math.max(0, Math.min(member.currentHp, maxHp));
 }
 
+// --- Item comparison -------------------------------------------------------
+//
+// One scoring function per slot, shared by everything that has to rank gear:
+// the auto-equip pass, the "there is something better in your bag" badges, and
+// the item picker's ordering. They were previously three separate inline
+// expressions, which is how a picker ends up disagreeing with the optimiser
+// about which sword is the good one.
+
+export function itemScore(def: ItemDef): number {
+  if (def.slot === "woodchopping") return def.woodchopping?.atk ?? 0;
+  if (def.slot === "adventuring") {
+    // hp is 5x atk on every generated item (see economy.ts's buildItemDef), so
+    // dividing by five weighs the two stats evenly rather than letting hp
+    // dominate the ranking purely by being numerically larger.
+    return (def.adventuring?.atk ?? 0) + (def.adventuring?.hp ?? 0) / 5;
+  }
+  return def.utility?.magnitude ?? 0;
+}
+
+/** Item instance ids that some member is currently wearing. */
+export function equippedInstanceIds(members: TeamMemberSave[]): Set<string> {
+  const used = new Set<string>();
+  for (const m of members) {
+    for (const id of [m.equipped.woodchopping, m.equipped.adventuring, m.equipped.utility, m.equipped.utility2]) {
+      if (id) used.add(id);
+    }
+  }
+  return used;
+}
+
+/**
+ * The best UNEQUIPPED item that would beat what this member has in `slot`, or
+ * null if nothing in the bag is an improvement.
+ *
+ * Deliberately ignores items other members are wearing. "You could take Rook's
+ * axe" is true but useless as a badge — it would light up half the roster
+ * permanently and mean nothing. This answers the question the player is
+ * actually asking: is there something sitting unused that I should put on?
+ */
+export function bestUpgradeFor(
+  member: TeamMemberSave,
+  slot: ItemSlot | "utility2",
+  inventory: ItemInstance[],
+  members: TeamMemberSave[],
+): ItemDef | null {
+  const baseSlot: ItemSlot = slot === "utility2" ? "utility" : slot;
+  const currentDef = equippedItem(member, slot, inventory);
+  const currentScore = currentDef ? itemScore(currentDef) : 0;
+  const used = equippedInstanceIds(members);
+
+  let best: ItemDef | null = null;
+  let bestScore = currentScore;
+  for (const inst of inventory) {
+    if (used.has(inst.id)) continue;
+    const def = itemDefById(inst.defId);
+    if (!def || def.slot !== baseSlot) continue;
+    const score = itemScore(def);
+    if (score > bestScore) {
+      bestScore = score;
+      best = def;
+    }
+  }
+  return best;
+}
+
+/** How strong a member is overall, for ranking the roster.
+ *
+ * Attack and health folded into one number the same way item scoring folds
+ * them, so "strongest" means the same thing in both places. */
+export function memberPower(
+  member: TeamMemberSave,
+  inventory: ItemInstance[],
+  prestigeLevel = 0,
+): number {
+  return effectiveAtk(member, inventory, prestigeLevel) + effectiveMaxHp(member, inventory, prestigeLevel) / 5;
+}
+
+/**
+ * Sorts the roster strongest-first, IN PLACE.
+ *
+ * Roster order is not cosmetic: index 0 is the first member assigned to a live
+ * chopping session, and it is the priority order optimizeEquipment hands gear
+ * out in. Before this the order was whatever sequence members happened to be
+ * pulled in, so auto-equipping could hand a legendary axe to the weakest
+ * member on the list — the helper looked like it had done something and had in
+ * fact made things worse.
+ */
+export function sortRosterByPower(
+  members: TeamMemberSave[],
+  inventory: ItemInstance[],
+  prestigeLevel = 0,
+): void {
+  members.sort((a, b) => memberPower(b, inventory, prestigeLevel) - memberPower(a, inventory, prestigeLevel));
+}
+
 // --- Optimize Gear (QoL) ---------------------------------------------------
 
 /** Greedy whole-roster re-equip, by roster priority order (index 0 first —
@@ -211,9 +306,12 @@ export function optimizeEquipment(
       .sort((a, b) => score(defs.get(b.id)!) - score(defs.get(a.id)!))
       .map((i) => i.id);
 
-  const woodPool = ranked((d) => d.woodchopping?.atk ?? 0, "woodchopping");
-  const advPool = ranked((d) => (d.adventuring?.atk ?? 0) + (d.adventuring?.hp ?? 0) / 5, "adventuring");
-  const utilPool = ranked((d) => d.utility?.magnitude ?? 0, "utility");
+  // itemScore, not three separate inline expressions — the upgrade badges rank
+  // gear with the same function, and a picker that disagrees with the
+  // optimiser about which sword is better is worse than having neither.
+  const woodPool = ranked(itemScore, "woodchopping");
+  const advPool = ranked(itemScore, "adventuring");
+  const utilPool = ranked(itemScore, "utility");
 
   for (const member of members) {
     member.equipped.woodchopping = woodPool.shift() ?? null;

@@ -186,6 +186,7 @@ import {
   levelUpCost,
   MAX_LEVEL,
   optimizeEquipment,
+  sortRosterByPower,
   stageXpReward,
   syncHp,
   type TeamMemberSave,
@@ -5474,10 +5475,23 @@ export class Game {
     return true;
   }
 
-  /** One-click greedy re-equip of the whole roster by priority order —
-   * see team.ts's optimizeEquipment. */
+  /**
+   * The one-button answer to a growing roster and a growing bag: rank the team
+   * strongest-first, then hand out the best gear in that order.
+   *
+   * The two halves have to happen together. Optimising alone distributes gear
+   * by ROSTER ORDER, which is just the sequence members were pulled in — so it
+   * would cheerfully give the best axe to whoever happened to be first,
+   * including a level-1 common sitting above a legendary. Sorting alone leaves
+   * the gear where it was. Doing both is the only version that reliably ends
+   * with your best equipment on your best members.
+   *
+   * Sorting is also not merely cosmetic: index 0 is the first member assigned
+   * to a live chopping session.
+   */
   optimizeGear(): boolean {
     const s = this.save;
+    sortRosterByPower(s.team, s.inventory, s.prestigeLevel);
     optimizeEquipment(s.team, s.inventory, this.hasPowerup("extraUtility"));
     for (const member of s.team) {
       syncHp(member, s.inventory, s.prestigeLevel);

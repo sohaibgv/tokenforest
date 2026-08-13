@@ -95,6 +95,7 @@ import {
   unlockedSwatches,
   WORKER_PITY_THRESHOLD,
   type Rarity,
+  itemDefsForWorld,
 } from "../src/economy";
 import { pullItem, pullPowerup, pullWorker } from "../src/gacha";
 import type { GameSave } from "../src/game-state";
@@ -148,7 +149,13 @@ import {
 } from "../src/statuses";
 import { isUnlocked, UNLOCKS } from "../src/unlocks";
 import {
+  bestUpgradeFor,
   createMember,
+  equippedInstanceIds,
+  itemScore,
+  memberPower,
+  sortRosterByPower,
+  type ItemSlot,
   effectiveAtk,
   effectiveMaxHp,
   equippedItem,
@@ -864,6 +871,108 @@ function buildDominanceChecks(): void {
     }
     const avg = n > 0 ? sum / n : 0;
     check("a full run affords about two purchases", avg >= 40 && avg <= 400, `${avg.toFixed(0)} acorns earned`);
+  }
+}
+
+// --- Gear helpers ----------------------------------------------------------
+//
+// The Team screen tells the player two things it has to be right about: which
+// members have a better item sitting unused, and what "Auto-equip" will do.
+// Both answers come from itemScore, and the failure that matters is the two
+// DISAGREEING — a badge promising an upgrade that the optimiser then declines
+// to make is worse than no badge, because it sends the player looking for
+// something that is not there.
+
+function gearHelperChecks(): void {
+  console.log("\nTeam gear helpers:");
+
+  const defs = itemDefsForWorld(0);
+  const build = () => {
+    const inventory: ItemInstance[] = defs.map((d, i) => ({ id: `i-${i}`, defId: d.defId }));
+    const members = ["rook", "finch", "birch", "thorne", "ironbark"].map((id, i) => {
+      const m = createMember(id, i + 1);
+      m.level = 1 + i * 3;
+      syncHp(m, inventory, 0);
+      m.currentHp = m.maxHp;
+      return m;
+    });
+    return { members, inventory };
+  };
+
+  // Scoring must be a strict ranking, or "best" is whatever the sort happened
+  // to leave on top.
+  {
+    const wood = defs.filter((d) => d.slot === "woodchopping");
+    const scores = wood.map(itemScore);
+    check("every item scores above zero", scores.every((v) => v > 0), `${scores.length} woodchopping items`);
+    const byRarity = ["common", "rare", "epic", "legendary"].map(
+      (r) => wood.filter((d) => d.rarity === r).map(itemScore)[0] ?? 0,
+    );
+    check(
+      "rarer gear scores higher",
+      byRarity.every((v, i) => i === 0 || v > byRarity[i - 1]),
+      byRarity.map((v) => v.toFixed(0)).join(" < "),
+    );
+  }
+
+  // THE AGREEMENT. After Auto-equip there must be no upgrade badges left: if
+  // the optimiser is done, every badge must have gone quiet.
+  {
+    const { members, inventory } = build();
+    sortRosterByPower(members, inventory, 0);
+    optimizeEquipment(members, inventory, false);
+    const slots: (ItemSlot | "utility2")[] = ["woodchopping", "adventuring", "utility"];
+    const stragglers = members.flatMap((m) =>
+      slots.filter((slot) => bestUpgradeFor(m, slot, inventory, members) !== null).map((slot) => `${m.id}/${slot}`),
+    );
+    check(
+      "no upgrade badge survives Auto-equip",
+      stragglers.length === 0,
+      stragglers.join(", ") || `${members.length} members clean`,
+    );
+  }
+
+  // And the sort has to actually rank: strongest first, every time.
+  {
+    const { members, inventory } = build();
+    sortRosterByPower(members, inventory, 0);
+    const powers = members.map((m) => memberPower(m, inventory, 0));
+    check(
+      "the roster sorts strongest-first",
+      powers.every((v, i) => i === 0 || powers[i - 1] >= v),
+      powers.map((v) => Math.round(v)).join(" >= "),
+    );
+  }
+
+  // A badge must never point at an item somebody is already wearing — that
+  // would light up permanently and mean nothing.
+  {
+    const { members, inventory } = build();
+    optimizeEquipment(members, inventory, false);
+    const worn = equippedInstanceIds(members);
+    const wornDefIds = new Set(
+      inventory.filter((i) => worn.has(i.id)).map((i) => i.defId),
+    );
+    const pointsAtWorn = members.some((m) => {
+      const up = bestUpgradeFor(m, "woodchopping", inventory, members);
+      if (!up) return false;
+      // Legal only if an UNWORN copy of that def exists.
+      const unwornCopy = inventory.some((i) => i.defId === up.defId && !worn.has(i.id));
+      return !unwornCopy && wornDefIds.has(up.defId);
+    });
+    check("upgrade badges never point at worn items", !pointsAtWorn, "bag only");
+  }
+
+  // Nothing to upgrade to is not an upgrade.
+  {
+    const inventory: ItemInstance[] = [];
+    const m = createMember("rook", 1);
+    syncHp(m, inventory, 0);
+    check(
+      "an empty bag offers no upgrades",
+      bestUpgradeFor(m, "woodchopping", inventory, [m]) === null,
+      "null",
+    );
   }
 }
 
@@ -3882,6 +3991,7 @@ function main(): void {
 
   buildDominanceChecks();
   economyChecks();
+  gearHelperChecks();
   wiringChecks();
   boonValueSweep();
   stateDependenceChecks();

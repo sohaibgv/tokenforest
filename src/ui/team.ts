@@ -35,6 +35,8 @@ import {
   MAX_LEVEL,
   memberClass,
   xpToNext,
+  bestUpgradeFor,
+  itemScore,
   type ItemSlot,
   type Rarity,
   type TeamMemberSave,
@@ -334,9 +336,13 @@ export function createTeamPanel(game: Game): TeamPanel {
     // priority order (see team.ts's optimizeEquipment) — the QoL answer to
     // hand-shuffling items across a growing roster.
     const optBtn = document.createElement("button");
-    optBtn.textContent = "Optimize gear";
+    optBtn.textContent = "Auto-equip";
+    // The label used to say "Optimize gear", which described half of what it
+    // does and none of what it costs — it also REORDERS the roster, and roster
+    // order decides who gets assigned to a live chopping session. Worth saying
+    // out loud before someone presses it.
     optBtn.title =
-      "Re-equip the whole roster automatically: best items go to your highest-priority members";
+      "Sort the roster strongest-first, then hand out your best items in that order. Also changes who chops first.";
     optBtn.addEventListener("click", () => {
       game.optimizeGear();
       if (mounted) render(mounted);
@@ -352,6 +358,16 @@ export function createTeamPanel(game: Game): TeamPanel {
    * straight from the tile, no selection required first — same
    * game.reorderTeam(member.id, ...) call the old inline card buttons
    * made, just relocated. */
+  /** Does this member have an unused upgrade for any slot? Drives the roster
+   * tile's marker, so the player can see WHICH members need attention without
+   * selecting each one in turn. */
+  function memberHasUpgrade(member: TeamMemberSave): boolean {
+    const s = game.save;
+    const slots: (ItemSlot | "utility2")[] = ["woodchopping", "adventuring", "utility"];
+    if (game.hasPowerup("extraUtility")) slots.push("utility2");
+    return slots.some((slot) => bestUpgradeFor(member, slot, s.inventory, s.team) !== null);
+  }
+
   function renderRosterTile(member: TeamMemberSave, index: number, total: number, selected: boolean): HTMLElement {
     const s = game.save;
     const def = WORKER_DEFS_BY_ID[member.defId];
@@ -363,7 +379,19 @@ export function createTeamPanel(game: Game): TeamPanel {
     if (rarity === "epic") tile.classList.add("team-tile-epic");
     else if (rarity === "legendary") tile.classList.add("team-tile-legendary");
     tile.classList.toggle("selected", selected);
-    tile.title = `${def?.name ?? member.defId} · Lv${member.level}`;
+    // A dot in the corner for "this one has better gear waiting", so the
+    // roster answers "who needs attention" at a glance rather than requiring
+    // the player to click through every member to find out.
+    const hasUpgrade = memberHasUpgrade(member);
+    tile.classList.toggle("has-upgrade", hasUpgrade);
+    if (hasUpgrade) {
+      const pip = document.createElement("span");
+      pip.className = "team-tile-upgrade";
+      tile.append(pip);
+    }
+    tile.title = hasUpgrade
+      ? `${def?.name ?? member.defId} · Lv${member.level} — better gear available`
+      : `${def?.name ?? member.defId} · Lv${member.level}`;
 
     // Woodchopping always shows a weapon (defaults to common-tier if
     // nothing's equipped) — matches the on-canvas resolution rule in
@@ -563,7 +591,23 @@ export function createTeamPanel(game: Game): TeamPanel {
         dot.style.marginRight = "0";
         btn.append(dot);
       }
-      btn.title = `${SLOT_LABEL[slot]}: ${equippedDef ? equippedDef.name : "empty"}`;
+      // "There is something better in your bag for this slot."
+      //
+      // Without this the only way to find out was to open every slot on every
+      // member and compare names against a list of stats you cannot see. The
+      // badge answers the question the player is actually asking, and the
+      // tooltip names the item so they can decide without opening anything.
+      const upgrade = bestUpgradeFor(member, slot, s.inventory, s.team);
+      if (upgrade) {
+        const mark = document.createElement("span");
+        mark.className = "team-slot-upgrade";
+        mark.textContent = "▲";
+        btn.append(mark);
+      }
+      btn.classList.toggle("has-upgrade", !!upgrade);
+      btn.title = upgrade
+        ? `${SLOT_LABEL[slot]}: ${equippedDef ? equippedDef.name : "empty"} — ${upgrade.name} is better and unused`
+        : `${SLOT_LABEL[slot]}: ${equippedDef ? equippedDef.name : "empty"}`;
       btn.classList.toggle("active", openSlot.get(member.id) === slot);
       btn.addEventListener("click", () => {
         openSlot.set(member.id, openSlot.get(member.id) === slot ? null : slot);
@@ -653,10 +697,29 @@ export function createTeamPanel(game: Game): TeamPanel {
       picker.append(empty);
     }
 
+    // Best first. The list was in whatever order the items happened to be
+    // pulled in, so choosing well meant reading every row and holding a
+    // comparison in your head — with no stats shown to compare against.
+    const equippedDefForSlot = equippedItem(member, slot, s.inventory);
+    const equippedScore = equippedDefForSlot ? itemScore(equippedDefForSlot) : 0;
+    owned.sort((a, b) => {
+      const da = itemDefById(a.defId);
+      const db = itemDefById(b.defId);
+      return (db ? itemScore(db) : 0) - (da ? itemScore(da) : 0);
+    });
+
     for (const inst of owned) {
       const d = itemDefById(inst.defId);
       if (!d) continue;
       const itemBtn = document.createElement("button");
+      // Two facts the row could not previously convey: whether this is an
+      // upgrade on what is worn, and whether taking it strips a teammate.
+      // Both are decisions the player was being asked to make blind.
+      // "Worn by X" is already surfaced below; this is the other half of the
+      // decision the row was asking the player to make blind — is this
+      // actually better than what they have on?
+      const isUpgrade = itemScore(d) > equippedScore;
+      if (isUpgrade) itemBtn.classList.add("item-row-upgrade");
       // Weapon/charm preview so the picker row shows what the item actually
       // looks like, not just its name — woodchopping/adventuring weapons
       // only carry a `.held.idle` pose (no standalone `.icon`), while
@@ -677,6 +740,12 @@ export function createTeamPanel(game: Game): TeamPanel {
       dot.className = `rarity-dot rarity-${d.rarity}`;
       const stats = itemStatSummary(d);
       itemBtn.append(dot, document.createTextNode(`${d.name} (${d.rarity})${stats ? ` — ${stats}` : ""}`));
+      if (isUpgrade) {
+        const up = document.createElement("span");
+        up.className = "item-picker-upgrade-tag";
+        up.textContent = " ▲ upgrade";
+        itemBtn.append(up);
+      }
       const wornBy = equippedElsewhere(inst.id, member.id);
       if (wornBy) {
         const wornDef = WORKER_DEFS_BY_ID[wornBy.defId];
