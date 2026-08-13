@@ -36,6 +36,10 @@ import {
 } from "../src/adventure";
 import {
   isBattleOver,
+  previewRun,
+  readinessBand,
+  READINESS_GREEN_AT,
+  READINESS_RED_BELOW,
   resolveTurn,
   startBattle,
   type BattleSnapshot,
@@ -3711,6 +3715,113 @@ function contrastChecks(): void {
   }
 }
 
+/** Gates on the Muster screen's red/amber/green readiness verdict.
+ *
+ * The verdict replaced a row of world-picker buttons, so it now carries the
+ * whole "should I be here" decision on its own — which makes its failure
+ * modes worse than the row's ever were. A stuck indicator that reads green
+ * everywhere sends players into worlds that wipe them; one that reads red
+ * everywhere tells them to grind gear they do not need. Neither throws, and
+ * neither is visible without measuring, so all four properties below are
+ * checked rather than assumed. */
+function readinessChecks(): void {
+  console.log("\nMuster readiness verdict:");
+
+  const tiersFor = (w: number) =>
+    Array.from({ length: TOTAL_ROOMS }, (_, i) => buildEnemy(w, roomTier(i)));
+
+  /** A 3-worker party in `rarity` adventuring gear sourced from world
+   * `gearWorld`, sized up against world `world`. */
+  function depthAt(world: number, gearWorld: number, rarity: string): number {
+    const { party, inventory } = buildParty(
+      [0, 1, 2].map(() => ({
+        defId: "rook",
+        level: 10,
+        items: { adventuring: `w${gearWorld}-adventuring-${rarity}` },
+      })),
+    );
+    return previewRun(party, tiersFor(world), inventory, 0, 30).avgRoomsCleared;
+  }
+
+  // 1. All three bands are reachable with gear a player can actually hold.
+  //    A three-colour indicator that only ever shows two colours is a bug
+  //    that looks exactly like a working indicator.
+  const seen = new Set<string>();
+  const bandGrid: string[] = [];
+  for (const rarity of ["common", "rare", "epic", "legendary"]) {
+    for (const world of [0, 1, 2]) {
+      const d = depthAt(world, world, rarity);
+      const band = readinessBand(d, TOTAL_ROOMS);
+      seen.add(band);
+      bandGrid.push(`w${world}/${rarity[0]}:${band[0]}`);
+    }
+  }
+  check(
+    "readiness: all three bands reachable",
+    seen.size === 3,
+    `saw ${[...seen].sort().join("/")} — ${bandGrid.join(" ")}`,
+  );
+
+  // 2. Monotone in gear at a fixed world. If better gear did not read better,
+  //    "upgrade your gear" would be advice the indicator itself contradicts.
+  const byRarity = ["common", "rare", "epic", "legendary"].map((r) => depthAt(1, 1, r));
+  check(
+    "readiness: better gear reads deeper",
+    byRarity.every((d, i) => i === 0 || d >= byRarity[i - 1] - 0.01),
+    byRarity.map((d, i) => `${["c", "r", "e", "l"][i]}=${d.toFixed(1)}`).join(" "),
+  );
+
+  // 3. Monotone in world at fixed gear, and — the actionable half — a party
+  //    that reads red somewhere gets strictly further one world back. This is
+  //    what makes `betterWorld`'s "run <world> instead" a real instruction
+  //    rather than a guess.
+  let dropBackHelps = true;
+  const dropDetail: string[] = [];
+  for (const rarity of ["common", "rare", "epic"]) {
+    for (let world = 3; world >= 1; world--) {
+      const here = depthAt(world, world - 1, rarity);
+      if (readinessBand(here, TOTAL_ROOMS) !== "red") continue;
+      const back = depthAt(world - 1, world - 1, rarity);
+      if (!(back > here)) dropBackHelps = false;
+      dropDetail.push(`${rarity[0]} w${world}:${here.toFixed(1)}->w${world - 1}:${back.toFixed(1)}`);
+    }
+  }
+  check(
+    "readiness: dropping a world always goes deeper when red",
+    dropBackHelps && dropDetail.length > 0,
+    dropDetail.length > 0 ? dropDetail.join(" ") : "VACUOUS — no red case was produced",
+  );
+
+  // 4. The estimate is a genuine FLOOR, which is the claim previewRun's doc
+  //    comment makes and the reason it is safe to show: it strips boons,
+  //    fountains, provisions and every non-Attack action, so a real delve by
+  //    the same party must get at least as deep. Measured against the sim's
+  //    own full-run model rather than against a hand-written expectation.
+  for (const scn of moves.runs) {
+    const rng = scenarioRng(`${scn.name}-readiness`);
+    let realRooms = 0;
+    const trials = Math.min(scn.trials, 40);
+    for (let t = 0; t < trials; t++) realRooms += runFullDelve(scn, rng).roomsCleared;
+    realRooms /= trials;
+    const { party, inventory } = buildParty(scn.party);
+    const floor = previewRun(party, tiersFor(scn.world), inventory, 0, 30).avgRoomsCleared;
+    check(
+      `readiness floor <= real run (${scn.name})`,
+      floor <= realRooms + 0.5,
+      `floor ${floor.toFixed(1)} vs real ${realRooms.toFixed(1)} rooms`,
+    );
+  }
+
+  // 5. Non-vacuity of the thresholds themselves: the two constants must sit
+  //    strictly inside 0..1 and in order, or readinessBand degenerates to a
+  //    constant function and every check above still passes trivially.
+  check(
+    "readiness: thresholds are ordered and non-degenerate",
+    READINESS_RED_BELOW > 0 && READINESS_RED_BELOW < READINESS_GREEN_AT && READINESS_GREEN_AT < 1,
+    `red<${READINESS_RED_BELOW.toFixed(2)} green>=${READINESS_GREEN_AT.toFixed(2)}`,
+  );
+}
+
 // --- Drivers ---------------------------------------------------------------
 
 function main(): void {
@@ -3786,6 +3897,7 @@ function main(): void {
   xpChecks();
   featureChecks();
   npcChecks();
+  readinessChecks();
   contrastChecks();
   reportIdentity();
 

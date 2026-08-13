@@ -20,7 +20,7 @@ import { CHARM_DEFS, CURSE_DEFS } from "../run/charms";
 import { groveRank, grovePayoutMult, PACT_DEFS, type PactId } from "../run/pact";
 import { PATRON_DEFS, PATRON_DEFS_BY_ID, type PatronId } from "../run/patrons";
 import { DEPTH_NAMES, doorLabel, TOTAL_ROOMS } from "../run/rooms";
-import { CURATED_WORLD_THEMES, getWorld, PROVISIONS, WORKER_DEFS_BY_ID, type ProvisionId } from "../economy";
+import { getWorld, PROVISIONS, WORKER_DEFS_BY_ID, type ProvisionId } from "../economy";
 import { abbrev, hpBarClass } from "../scene/floating-text";
 import type { Game } from "../scene/game";
 import type { WorkerRarity } from "../scene/sprites";
@@ -139,21 +139,37 @@ export function initAdventure(game: Game): void {
   const musterEl = document.createElement("div");
   musterEl.className = "adv-muster";
 
-  const worldRow = document.createElement("div");
-  worldRow.className = "adv-world-row";
-  const worldBtns = new Map<number, HTMLButtonElement>();
-  CURATED_WORLD_THEMES.forEach((w, i) => {
-    const btn = document.createElement("button");
-    const mult = getWorld(i).mult;
-    btn.textContent = mult > 1 ? `${w.name} (×${abbrev(mult)})` : w.name;
-    btn.addEventListener("click", () => {
-      selectedWorld = i;
-      renderMuster();
-    });
-    worldBtns.set(i, btn);
-    worldRow.append(btn);
-  });
-  musterEl.append(worldRow);
+  // The destination, stated rather than chosen.
+  //
+  // This was a row of buttons, one per unlocked world, each labelled with its
+  // wood multiplier. It put a decision on the player that the screen gave
+  // them nothing to decide it WITH: the multiplier says what a world pays,
+  // never whether this party can survive it, and the only other number
+  // present was a stage-1 win% that stays high in worlds that are hopeless
+  // four rooms in. In practice there was one right answer anyway — the
+  // current world, since lower ones pay strictly less for the same fight —
+  // so the row's real function was to let players accidentally farm a world
+  // beneath them, or to sit unused.
+  //
+  // Now the run goes where the player already is, and the screen spends that
+  // space answering the question the buttons couldn't: a red/amber/green
+  // readiness verdict from previewWorldReadiness, and — when the verdict is
+  // red — which world to drop back to instead.
+  const worldCard = document.createElement("div");
+  worldCard.className = "adv-world-card";
+  const worldTitle = document.createElement("div");
+  worldTitle.className = "adv-world-name";
+  const verdictEl = document.createElement("div");
+  verdictEl.className = "adv-verdict";
+  const verdictDot = document.createElement("span");
+  verdictDot.className = "adv-verdict-dot";
+  const verdictText = document.createElement("span");
+  verdictText.className = "adv-verdict-text";
+  verdictEl.append(verdictDot, verdictText);
+  const verdictHint = document.createElement("div");
+  verdictHint.className = "adv-verdict-hint";
+  worldCard.append(worldTitle, verdictEl, verdictHint);
+  musterEl.append(worldCard);
 
   const rosterEmpty = document.createElement("div");
   rosterEmpty.className = "shop-sub";
@@ -733,17 +749,74 @@ export function initAdventure(game: Game): void {
     dom.nameEl.textContent = member ? `${def?.name ?? member.defId} · Lv${member.level}` : SLOT_LABEL[key];
   }
 
+  const VERDICT_COPY: Record<"red" | "amber" | "green", string> = {
+    red: "Outmatched here",
+    amber: "Risky — a real chance either way",
+    green: "Well equipped for this world",
+  };
+
+  // The verdict is a 40-trial, twelve-room simulation — roughly 500 auto-
+  // battles. renderMuster runs on a 1s interval while the screen is open (and
+  // again on every drag, click and slot change), so recomputing it per render
+  // would burn that much work every second to redraw the same sentence.
+  //
+  // The key is everything the estimate actually depends on: the world, who is
+  // mustered, what they are carrying into the fight, and the prestige level
+  // that scales them. Equipment is included because swapping gear via the 🎒
+  // backpack shortcut is the single most likely thing a player does in
+  // response to a red verdict — a cache that missed it would show them the
+  // old answer to the exact question they just acted on.
+  let verdictKey = "";
+  function renderVerdict(partyIds: string[]): void {
+    const s = game.save;
+    if (partyIds.length === 0) {
+      verdictKey = "";
+      worldCard.classList.remove("verdict-red", "verdict-amber", "verdict-green");
+      verdictText.textContent = "Muster a party to size up the run";
+      verdictHint.textContent = "";
+      return;
+    }
+    const key = [
+      s.worldIndex,
+      s.prestigeLevel,
+      ...partyIds.map((id) => {
+        const m = s.team.find((t) => t.id === id);
+        return m ? `${id}:${m.currentHp}/${m.maxHp}:${Object.values(m.equipped).join(",")}` : id;
+      }),
+    ].join("|");
+    if (key === verdictKey) return;
+    verdictKey = key;
+
+    const r = game.previewWorldReadiness(partyIds);
+    if (!r) return;
+    worldCard.classList.remove("verdict-red", "verdict-amber", "verdict-green");
+    worldCard.classList.add(`verdict-${r.band}`);
+    verdictText.textContent = VERDICT_COPY[r.band];
+    // Always show the depth estimate that produced the verdict, so the colour
+    // is backed by a number the player can watch move as they re-gear.
+    const depth = `Reaches about room ${Math.round(r.avgRoomsCleared)} of ${r.roomsTotal}`;
+    verdictHint.textContent =
+      r.band === "red"
+        ? r.betterWorld !== null
+          ? `${depth}. Upgrade your gear, or run ${getWorld(r.betterWorld).name} instead.`
+          : `${depth}. Upgrade your team's gear before embarking.`
+        : r.band === "amber"
+          ? `${depth}. Boons and fountains found on the way can close the gap.`
+          : `${depth} with no boons at all — the run's own upgrades should carry you the rest.`;
+  }
+
   function renderMuster(): void {
     const s = game.save;
     // Gated on the higher of worldIndex (resettable by Prestige) and
     // adventureWorldUnlocked (never reset) — adventure access survives a
     // prestige reset even though the wood-chopping ladder drops back to 0.
     const adventureWorldCeiling = Math.max(s.worldIndex, s.adventureWorldUnlocked);
-    for (const [i, btn] of worldBtns) {
-      const visible = i <= adventureWorldCeiling;
-      btn.classList.toggle("hidden", !visible);
-      if (visible) btn.classList.toggle("active", i === selectedWorld);
-    }
+    selectedWorld = Math.min(s.worldIndex, adventureWorldCeiling);
+    const worldMult = getWorld(selectedWorld).mult;
+    worldTitle.textContent =
+      worldMult > 1
+        ? `${getWorld(selectedWorld).name} · ×${abbrev(worldMult)} wood`
+        : getWorld(selectedWorld).name;
 
     rosterEmpty.classList.toggle("hidden", s.team.length > 0);
     formationWrap.classList.toggle("hidden", s.team.length === 0);
@@ -843,9 +916,10 @@ export function initAdventure(game: Game): void {
       previewEl.textContent = "No team members available to muster — heal your roster above to continue.";
     } else {
       previewEl.textContent = p
-        ? `Embark: ${abbrev(p.cost)} wood · est. ${p.winPct}% win (stage 1, Attack-only estimate) · ~${abbrev(p.avgWoodOnWin)} wood on win`
+        ? `Embark: ${abbrev(p.cost)} wood · est. ${p.winPct}% win (first room) · ~${abbrev(p.avgWoodOnWin)} wood on win`
         : "Assign up to 3 available team members to the formation slots below.";
     }
+    renderVerdict(partyIds);
     embarkBtn.disabled = !p || s.wood < p.cost;
   }
 

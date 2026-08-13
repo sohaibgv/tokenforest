@@ -117,6 +117,7 @@
   --danger: #d64545; /* matches canvas danger red (budget critical, battle MISS/KO) */
   --danger-rgb: 214, 69, 69;
   --warning: #e6a23c; /* matches canvas budget-bar amber state */
+  --warning-rgb: 230, 162, 60;
   --status-adventuring: #4a90c2; /* team roster "away/exploring" status dot */
 
   /* Rarity (one canonical hex per tier, used everywhere that tier appears).
@@ -665,18 +666,35 @@ body.shop-takeover #shop {
   margin-left: 4px;
 }
 
-#shop-foot button {
-  background: var(--btn-bg);
-  border: none;
+/* Close sits in the header, not the footer.
+   It was previously the only button in #shop-foot, which put the way out of
+   the panel at the far bottom-right — below a scrolling list, so its position
+   drifted with the tab you were on and you had to travel the whole panel to
+   leave. Every other takeover (#pov-exit, #battle-exit, #adventure-close) puts
+   its exit top-right, so the shop was also the odd one out. Moving it up
+   leaves #shop-foot as a pure currency readout and makes the header the
+   consistent "✕ [+ short label]" exit corner. */
+#shop-close {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid rgba(var(--text-bright-rgb), 0.35);
   border-radius: var(--radius-sm);
+  background: var(--btn-bg);
   color: var(--text-bright);
   font: inherit;
-  padding: var(--pad-btn);
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-#shop-foot button:hover {
+#shop-close:hover {
   background: var(--btn-bg-hover);
+  border-color: var(--accent-green);
 }
 
 /* Settings, re-skinned as the board nailed to the Crossroads Signpost: a
@@ -1521,14 +1539,89 @@ body.shop-takeover #shop {
   gap: var(--gap-md);
 }
 
-.adv-world-row,
+/* Destination + readiness verdict — the muster screen's first block, in
+   place of the old row of per-world buttons (see ui/adventure.ts's worldCard
+   comment for why the choice went away).
+
+   The colour is the point: it has to read as a traffic light from across the
+   room, before any of the text is parsed. So the band paints a left rail and
+   tints the whole card rather than only colouring the dot — but state is
+   never carried by colour ALONE, since that fails for the ~8% of players with
+   red/green deficiency: the verdict sentence ("Outmatched here" / "Risky" /
+   "Well equipped") states the same thing in words, and the hint line below
+   backs it with the room-depth number the estimate came from.
+
+   Uses --danger/--warning/--accent-green, the same three semantic colours the
+   canvas already uses for the budget bar and battle KO text, so a red here
+   and a red on the lake meter mean the same thing. */
+.adv-world-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border-left: 3px solid var(--border-divider);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+}
+
+.adv-world-name {
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text-primary);
+}
+
+.adv-verdict {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  font-size: 10px;
+  color: var(--text-primary);
+}
+
+.adv-verdict-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-disabled);
+}
+
+.adv-verdict-hint {
+  font-size: 9px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.adv-world-card.verdict-red {
+  border-left-color: var(--danger);
+  background: rgba(var(--danger-rgb), 0.1);
+}
+.adv-world-card.verdict-red .adv-verdict-dot {
+  background: var(--danger);
+}
+
+.adv-world-card.verdict-amber {
+  border-left-color: var(--warning);
+  background: rgba(var(--warning-rgb), 0.1);
+}
+.adv-world-card.verdict-amber .adv-verdict-dot {
+  background: var(--warning);
+}
+
+.adv-world-card.verdict-green {
+  border-left-color: var(--accent-green);
+  background: rgba(var(--accent-green-rgb), 0.1);
+}
+.adv-world-card.verdict-green .adv-verdict-dot {
+  background: var(--accent-green);
+}
+
 .adv-carry {
   display: flex;
   gap: var(--gap-sm);
   flex-wrap: wrap;
 }
 
-.adv-world-row button,
 .adv-carry button,
 .adv-muster > button,
 .adv-field > button {
@@ -1542,20 +1635,17 @@ body.shop-takeover #shop {
   cursor: pointer;
 }
 
-.adv-world-row button:hover:not(:disabled),
 .adv-carry button:hover:not(:disabled),
 .adv-muster > button:hover:not(:disabled),
 .adv-field > button:hover:not(:disabled) {
   background: var(--btn-bg-hover);
 }
 
-.adv-world-row button.active,
 .adv-carry button.active {
   background: var(--accent-green);
   color: var(--text-on-accent);
 }
 
-.adv-world-row button:disabled,
 .adv-carry button:disabled,
 .adv-muster > button:disabled {
   background: var(--bg-inset);
@@ -1573,10 +1663,6 @@ body.shop-takeover #shop {
 
 .adv-muster > button.cta:hover:not(:disabled) {
   background: var(--accent-green-hover);
-}
-
-.adv-world-row button.hidden {
-  display: none;
 }
 
 .adv-roster {

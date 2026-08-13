@@ -124,7 +124,27 @@ export function migrateToV6(save: GameSave): void {
  * without writing its own party-release loop. */
 export function reconcileTeamStatus(save: GameSave): void {
   const partyIds = new Set(save.adventure?.partyIds ?? []);
+  const VALID = new Set(["available", "resting", "adventuring"]);
   for (const member of save.team) {
+    // ANY status the game does not understand is repaired, not just the
+    // desync above.
+    //
+    // Real saves in the wild carry `"idle"` — a value from an older schema
+    // that no longer exists in TeamMemberStatus. Nothing crashes on it,
+    // which is exactly why it went unnoticed: every check in the game asks
+    // `status === "available"`, so an unrecognised status silently means
+    // "not available for anything, forever". One save had ten of twelve
+    // members in that state, leaving a full roster able to field a party of
+    // two, with no in-game way to recover and no amount of healing helping
+    // — because HP was never what was wrong.
+    //
+    // Whitelisting the three real values and repairing everything else makes
+    // the whole class self-healing, including whatever the next renamed
+    // status turns out to be.
+    if (!VALID.has(member.status)) {
+      member.status = member.currentHp > 0 ? "available" : "resting";
+      continue;
+    }
     if (member.status === "adventuring" && !partyIds.has(member.id)) {
       member.status = member.currentHp > 0 ? "available" : "resting";
     }

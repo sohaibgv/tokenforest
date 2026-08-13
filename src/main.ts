@@ -14,6 +14,8 @@ import {
 } from "./bridge";
 import { playSfx, setSfxMuted, setSfxVolume, sfxMuted, sfxVolume } from "./sfx";
 import { flushSaveNow, getCurrentSlot, loadSave, setCurrentSlot } from "./game-state";
+import { syncHp } from "./team";
+import { reconcileTeamStatus } from "./save-migrations";
 import {
   buildableById,
 } from "./economy";
@@ -72,6 +74,14 @@ async function boot(): Promise<void> {
     // gramophone (does the crank actually move volume? does the tone-arm
     // actually mute?) need a read path that isn't the DOM mirror.
     (window as unknown as { __sfx: unknown }).__sfx = { sfxVolume, sfxMuted };
+    // Save-shape helpers, for automation that has to build a believable
+    // roster before it can check anything. Equipping an item by hand and
+    // forgetting syncHp produces a member whose atk moved but whose maxHp
+    // did not — a party that reads far weaker than the same gear gives in
+    // the real game, which silently turns a UI check into a fiction.
+    // reconcileTeamStatus is here so a test can reproduce a broken save's
+    // statuses and watch the repair run, rather than trusting that it does.
+    (window as unknown as { __save: unknown }).__save = { syncHp, reconcileTeamStatus };
   }
 
   // The world renders at a fixed 2x pixel scale: a bigger window shows a

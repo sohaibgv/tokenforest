@@ -1030,3 +1030,79 @@ export function previewBattle(
     avgWoodOnWin: wins > 0 ? Math.round(woodSum / wins) : 0,
   };
 }
+
+/** How deep a run is expected to get, simulated room by room.
+ *
+ * `previewBattle` above answers "can this party win ONE fight", which is not
+ * the question the Muster screen is actually asking. A party can hold a 90%
+ * win rate against the first room of a world it has no business entering:
+ * room 1 is tier 1, and the twelve-room ladder climbs to tier 5. Reporting
+ * that 90% as the run's outlook is how a player ends up embarking into a
+ * world that eats them at room four, having been shown nothing but green.
+ *
+ * So this walks the real tier ladder (`tiers`, from roomTier) with **HP
+ * carrying over between rooms** — the single fact that makes attrition
+ * visible and that a per-room win% structurally cannot express.
+ *
+ * Deliberately pessimistic, in three named ways:
+ *   - no boons, charms or curses (`baseRunStats`) — a real run compounds
+ *     upgrades as it descends,
+ *   - no fountains, shop heals or carried provisions,
+ *   - always Attack, never Defend or an ability.
+ * It is therefore a FLOOR: the honest reading of a result is "this run goes
+ * at least this deep". A floor is the right bias for a warning indicator —
+ * over-promising is what makes an estimate worth removing.
+ */
+/** The three readiness bands, as a share of the twelve-room ladder the party
+ * is expected to clear on previewRun's pessimistic floor.
+ *
+ * Lives here, beside the model that feeds it, rather than in Game — Game
+ * imports the Tauri bridge and so cannot be imported by the sim at all, and
+ * these two numbers are exactly the kind of thing that needs a gate on it
+ * (a band set where "green" is unreachable, or where every party reads red,
+ * is a worse indicator than none). See readinessChecks in sim/sim.ts. */
+export const READINESS_RED_BELOW = 1 / 3;
+export const READINESS_GREEN_AT = 3 / 4;
+
+export function readinessBand(avgRoomsCleared: number, roomsTotal: number): "red" | "amber" | "green" {
+  const frac = roomsTotal > 0 ? avgRoomsCleared / roomsTotal : 0;
+  if (frac < READINESS_RED_BELOW) return "red";
+  return frac < READINESS_GREEN_AT ? "amber" : "green";
+}
+
+export function previewRun(
+  party: TeamMemberSave[],
+  tiers: EnemySpec[][],
+  inventory: ItemInstance[],
+  prestigeLevel = 0,
+  trials = 40,
+): { avgRoomsCleared: number; fullClearPct: number; roomsTotal: number } {
+  let roomsSum = 0;
+  let fullClears = 0;
+  for (let t = 0; t < trials; t++) {
+    // Cloned ONCE per trial, not per room — this array is the run's party,
+    // and its currentHp is what carries the attrition forward.
+    const clone = party.map((m) => ({ ...m, equipped: { ...m.equipped } }));
+    const stats = baseRunStats();
+    let cleared = 0;
+    for (const enemies of tiers) {
+      const battle = startBattle(clone, enemies, inventory, { stats });
+      let guard = 0;
+      while (!battle.outcome && guard < 200) {
+        guard++;
+        const actorId = battle.turnOrder[battle.turnIndex];
+        if (!actorId) break;
+        resolveTurn({ battle, party: clone, memberId: actorId, action: "attack", inventory, stats, prestigeLevel });
+      }
+      if (battle.outcome !== "win") break;
+      cleared++;
+    }
+    roomsSum += cleared;
+    if (cleared === tiers.length) fullClears++;
+  }
+  return {
+    avgRoomsCleared: roomsSum / trials,
+    fullClearPct: Math.round((100 * fullClears) / trials),
+    roomsTotal: tiers.length,
+  };
+}

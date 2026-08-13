@@ -18,6 +18,8 @@ import {
 import {
   isBattleOver,
   previewBattle,
+  previewRun,
+  readinessBand,
   resolvePartyTurn,
   startBattle,
   type BattleAction,
@@ -1042,6 +1044,76 @@ export class Game {
       this.save.prestigeLevel,
     );
     return { cost, winPct, avgWoodOnWin };
+  }
+
+  /** The Muster screen's go/no-go verdict for the world the player is
+   * actually standing in.
+   *
+   * This replaces a row of per-world buttons. That row asked the player a
+   * question the game is better placed to answer — it listed every unlocked
+   * world with its wood multiplier and left "is my gear good enough for this
+   * one" entirely to them, with no information on the screen that could
+   * settle it. The answer is knowable: `previewRun` walks the real twelve-
+   * room tier ladder with HP carrying over, so it can say how deep this
+   * party gets before it is worn down.
+   *
+   * Bands are set on expected rooms cleared out of twelve, calibrated
+   * against the pessimistic floor previewRun deliberately reports (no boons,
+   * no heals, always-Attack — see its doc comment):
+   *   - `red`    — under a third of the run. The party is outclassed here,
+   *                not unlucky, and the advice is to drop back a world.
+   *   - `amber`  — reaches Depth II but not the end. A real run's boons and
+   *                fountains can close a gap this size, hence "a chance".
+   *   - `green`  — clears most of the ladder before any run upgrades at all.
+   *
+   * `betterWorld` is the concrete navigation the verdict implies: the
+   * highest unlocked world this party still reads green in, or null when it
+   * is already there. Naming the destination is the difference between a
+   * warning and an instruction.
+   */
+  previewWorldReadiness(partyIds: string[]): {
+    world: number;
+    worldName: string;
+    cost: number;
+    band: "red" | "amber" | "green";
+    avgRoomsCleared: number;
+    roomsTotal: number;
+    betterWorld: number | null;
+  } | null {
+    const world = this.save.worldIndex;
+    if (partyIds.length < 1 || partyIds.length > 3) return null;
+    const party = this.partyFor(partyIds);
+    if (party.length !== partyIds.length) return null;
+
+    const bandFor = (w: number): { band: "red" | "amber" | "green"; run: ReturnType<typeof previewRun> } => {
+      const tiers = Array.from({ length: TOTAL_ROOMS }, (_, i) => buildEnemy(w, roomTier(i)));
+      const run = previewRun(party, tiers, this.save.inventory, this.save.prestigeLevel);
+      return { band: readinessBand(run.avgRoomsCleared, run.roomsTotal), run };
+    };
+
+    const here = bandFor(world);
+    // Only searched when the current world is a bad bet — an amber/green
+    // verdict needs no alternative, and each probe is a full 40-trial run
+    // simulation.
+    let betterWorld: number | null = null;
+    if (here.band === "red") {
+      for (let w = world - 1; w >= 0; w--) {
+        if (bandFor(w).band === "green") {
+          betterWorld = w;
+          break;
+        }
+      }
+    }
+
+    return {
+      world,
+      worldName: getWorld(world).name,
+      cost: embarkCost(getWorld(world).mult),
+      band: here.band,
+      avgRoomsCleared: here.run.avgRoomsCleared,
+      roomsTotal: here.run.roomsTotal,
+      betterWorld,
+    };
   }
 
   /** Deducts the embark cost and opens the interactive fight for stage 1 —
@@ -5616,8 +5688,18 @@ export class Game {
   private tickPassiveRest(dt: number): void {
     let changed = false;
     for (const member of this.save.team) {
-      if (member.status !== "resting" || member.currentHp >= member.maxHp)
+      if (member.status !== "resting") continue;
+      // Resting AND already whole: there is nothing left to wait for, so
+      // release them now. The old guard skipped this member entirely, and
+      // the only line that restores "available" sits *after* the heal — so
+      // anything that topped a resting member up without also clearing their
+      // status (a full-heal item, a maxHp change from levelling or gear)
+      // left them resting forever.
+      if (member.currentHp >= member.maxHp) {
+        member.status = "available";
+        changed = true;
         continue;
+      }
       const fast = this.memberHasUtilityPerk(member, "fastRest");
       const perMin = fast
         ? Game.FAST_REST_REGEN_PER_MIN
