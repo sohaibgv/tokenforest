@@ -989,26 +989,24 @@ export class Game {
   // to announce the deletion afterwards. All the rules live in ../fusion.ts so
   // the sim can test them without a canvas.
 
-  /** Members pinned by something transient that would break if they vanished.
-   *
-   * Today that is slotAssignment, which is never re-validated once a live
-   * chopping session picks a worker: delete the member it points at and the
-   * sprite keeps chopping forever as a common/1-atk ghost, because the slot is
-   * only ever released when the whole session ends. There is no existing guard
-   * for this anywhere, so the Altar has to be the one that refuses. */
-  private pinnedMemberIds(): Set<string> {
-    const pinned = new Set<string>();
-    for (const memberId of this.slotAssignment.values()) {
-      if (memberId) pinned.add(memberId);
+  /** Marks any woodcutter whose worker has just stopped being eligible, so the
+   * walk-off starts on the click rather than on the next backend snapshot.
+   * The snapshot pass is still the authority — this only removes the lag. */
+  private retireInvalidChoppers(): void {
+    for (const [sourceId, memberId] of this.slotAssignment) {
+      if (!memberId) continue;
+      const member = this.memberById(memberId);
+      if (member && member.status === "available") continue;
+      const wc = this.woodcutters.get(sourceId);
+      if (wc) wc.leaving = true;
     }
-    return pinned;
   }
 
   /** Whether a member can sit on the Altar's target socket, and if not, why. */
   fusionCheck(memberId: string): FusionCheck {
     const member = this.memberById(memberId);
     if (!member) return { ok: false, reason: "missing" };
-    return canFuse(member, this.pinnedMemberIds());
+    return canFuse(member);
   }
 
   /** Whether a member can be SPENT. Looser than fusionCheck — a Legendary is
@@ -1022,34 +1020,37 @@ export class Game {
   fusionSacrificeCheck(memberId: string): FusionCheck {
     const member = this.memberById(memberId);
     if (!member) return { ok: false, reason: "missing" };
-    return canSacrifice(member, this.pinnedMemberIds());
+    return canSacrifice(member);
   }
 
   /** What a merge would do, or null if the selection isn't legal yet. Called
    * on every socket change to drive the preview and the Merge button. */
   fusionPlan(targetId: string, fodderIds: string[]): FusionPlan | null {
-    return planFusion(targetId, fodderIds, this.save, this.pinnedMemberIds());
+    return planFusion(targetId, fodderIds, this.save);
   }
 
   fusionAutoFill(targetId: string): string[] {
-    return autoFillFodder(targetId, this.save, this.pinnedMemberIds());
+    return autoFillFodder(targetId, this.save);
   }
 
   fusionFodderAvailable(targetId: string): number {
-    return fodderAvailable(targetId, this.save, this.pinnedMemberIds());
+    return fodderAvailable(targetId, this.save);
   }
 
   /** Commits a merge. Re-validates inside applyFusion, so a plan that went
    * stale while the panel sat open is refused rather than deleting the wrong
    * four workers. */
   fuseMembers(plan: FusionPlan): boolean {
-    if (!applyFusion(this.save, plan, this.pinnedMemberIds())) return false;
+    if (!applyFusion(this.save, plan)) return false;
     const target = this.memberById(plan.targetId);
     if (target) syncHp(target, this.save.inventory, this.save.prestigeLevel);
     // The roster just got shorter for the first time in this game's history.
     // Tell anyone holding member ids before the next render finds out the
-    // hard way.
+    // hard way — and start the walk-off for any of them who were mid-chop, so
+    // it reads as a consequence of the merge rather than as a sprite blinking
+    // out a second later.
     this.onRosterMembersRemoved?.([...plan.fodderIds]);
+    this.retireInvalidChoppers();
     this.refreshModifiers();
     scheduleSave(this.save, true);
     return true;
@@ -1260,6 +1261,9 @@ export class Game {
 
     s.wood -= cost;
     for (const m of party) m.status = "adventuring";
+    // Anyone who was mid-chop when they embarked downs tools and walks off,
+    // and their slot goes to the next worker in roster order.
+    this.retireInvalidChoppers();
 
     // One seed for the whole run. The map, every offer and every stall derive
     // from it, so a run is reproducible from a single number — which is what
@@ -2631,6 +2635,19 @@ export class Game {
     this.extraCount = wanted.length - shown.length;
 
     const seen = new Set<string>();
+    // WHO SHOULD BE OUT THERE: the first N available members in roster order,
+    // N being the number of live slots. Anyone holding a slot who is not on
+    // this list walks off, and the slot goes to whoever the order says is
+    // next. That one rule covers every way a worker can stop belonging to
+    // their slot — merged away at the altar, sent on a run, hurt and resting,
+    // or simply overtaken when the roster was re-sorted — instead of each of
+    // those needing to know about woodcutters.
+    const desired = new Set(
+      this.save.team
+        .filter((m) => m.status === "available")
+        .slice(0, shown.length)
+        .map((m) => m.id),
+    );
     for (const src of shown) {
       seen.add(src.id);
       let wc = this.woodcutters.get(src.id);
@@ -2657,7 +2674,12 @@ export class Game {
         wc.accent = this.accentForMember(wc.memberId);
       }
       wc.activity = src.state === "waiting" ? "waiting" : "working";
-      wc.leaving = false;
+      // Retiring is just `leaving`: the sprite releases its tree and walks off
+      // under its own steam, and the despawn loop below frees the slot once it
+      // is gone — so the next pass spawns a replacement and picks the right
+      // member. A slot with nobody assigned (fewer workers than slots) is left
+      // alone rather than retired into an empty clearing.
+      wc.leaving = wc.memberId !== null && !desired.has(wc.memberId);
     }
     for (const [id, wc] of this.woodcutters) {
       if (!seen.has(id) && wc.variant !== "gnome") {

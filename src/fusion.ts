@@ -11,8 +11,9 @@
 //      current HP; only `starRank` moves. Nothing in this codebase has ever
 //      removed a TeamMemberSave from save.team, so every id that survives a
 //      merge is an id nobody has to go and re-point. The four sacrifices are
-//      the only deletions, and canFuse refuses to nominate any member that
-//      something else is currently holding by id.
+//      the only deletions, and anything still holding one of those ids —
+//      today, a live woodcutter — is told to let go rather than allowed to
+//      veto the merge.
 //
 //   2. planFusion DECIDES, applyFusion MUTATES. The UI renders a plan and then
 //      hands the same object back to commit it, so what the stat preview
@@ -47,18 +48,12 @@ export const MAX_COPIES_PER_WORKER = 5;
 
 /** Why a member cannot be used. These strings are shown to the player, so they
  * name the fix rather than the rule. */
-export type FusionBlocker =
-  | "maxed"
-  | "adventuring"
-  | "resting"
-  | "working"
-  | "missing";
+export type FusionBlocker = "maxed" | "adventuring" | "resting" | "missing";
 
 export const FUSION_BLOCKER_COPY: Record<FusionBlocker, string> = {
   maxed: "Already Legendary — there is nothing above it.",
   adventuring: "Out on a run. Bank or finish the adventure first.",
   resting: "Hurt and resting. Heal them first.",
-  working: "Currently out chopping. They'll be free when the session ends.",
   missing: "No longer on the roster.",
 };
 
@@ -98,15 +93,11 @@ export interface FusionSave {
   prestigeLevel: number;
 }
 
-/** Ids the caller knows are pinned by something transient — today, the members
- * backing live woodcutter sprites (Game.slotAssignment). That map never
- * self-heals: deleting a member it points at leaves a permanent ghost worker
- * at common/1-atk for the rest of the session, and there is no existing guard
- * anywhere for it. Passing the set in keeps this module pure while still
- * letting it refuse. */
-export type PinnedIds = ReadonlySet<string>;
-
-const EMPTY_PINS: PinnedIds = new Set();
+// A worker out chopping used to be untouchable here, because deleting the
+// member a live woodcutter pointed at left a permanent ghost swinging at one
+// damage for the rest of the session. Game now retires that sprite instead —
+// it walks off and the slot goes to the next worker in roster order — so
+// being busy is no longer a reason to refuse. Nothing is pinned any more.
 
 function isTop(member: TeamMemberSave): boolean {
   return effectiveRarity(member) === RARITY_ORDER[RARITY_ORDER.length - 1];
@@ -114,17 +105,16 @@ function isTop(member: TeamMemberSave): boolean {
 
 /** Whether a member may be consumed as fodder. Stricter than `canFuse` — a
  * Legendary is a perfectly good sacrifice, it just cannot be a target. */
-export function canSacrifice(member: TeamMemberSave, pinned: PinnedIds = EMPTY_PINS): FusionCheck {
+export function canSacrifice(member: TeamMemberSave): FusionCheck {
   if (member.status === "adventuring") return { ok: false, reason: "adventuring" };
   if (member.status === "resting") return { ok: false, reason: "resting" };
-  if (pinned.has(member.id)) return { ok: false, reason: "working" };
   return { ok: true };
 }
 
 /** Whether a member may sit on the target socket. */
-export function canFuse(member: TeamMemberSave, pinned: PinnedIds = EMPTY_PINS): FusionCheck {
+export function canFuse(member: TeamMemberSave): FusionCheck {
   if (isTop(member)) return { ok: false, reason: "maxed" };
-  return canSacrifice(member, pinned);
+  return canSacrifice(member);
 }
 
 function statLine(
@@ -158,7 +148,6 @@ export function planFusion(
   targetId: string,
   fodderIds: string[],
   save: FusionSave,
-  pinned: PinnedIds = EMPTY_PINS,
 ): FusionPlan | null {
   if (fodderIds.length !== FUSION_FODDER_COUNT) return null;
   // A member cannot be its own sacrifice, and no member may fill two sockets.
@@ -166,14 +155,14 @@ export function planFusion(
   if (unique.size !== fodderIds.length || unique.has(targetId)) return null;
 
   const target = save.team.find((m) => m.id === targetId);
-  if (!target || !canFuse(target, pinned).ok) return null;
+  if (!target || !canFuse(target).ok) return null;
 
   const fromRarity = effectiveRarity(target);
   const fodder: TeamMemberSave[] = [];
   for (const id of fodderIds) {
     const m = save.team.find((x) => x.id === id);
     if (!m) return null;
-    if (!canSacrifice(m, pinned).ok) return null;
+    if (!canSacrifice(m).ok) return null;
     // Same TIER, not same character — a merge is paid for in rank, and which
     // faces you spend is the player's call.
     if (effectiveRarity(m) !== fromRarity) return null;
@@ -207,9 +196,8 @@ export function planFusion(
 export function applyFusion(
   save: FusionSave,
   plan: FusionPlan,
-  pinned: PinnedIds = EMPTY_PINS,
 ): boolean {
-  const fresh = planFusion(plan.targetId, plan.fodderIds, save, pinned);
+  const fresh = planFusion(plan.targetId, plan.fodderIds, save);
   if (!fresh) return false;
 
   const target = save.team.find((m) => m.id === plan.targetId);
@@ -251,10 +239,9 @@ export function applyFusion(
 export function autoFillFodder(
   targetId: string,
   save: FusionSave,
-  pinned: PinnedIds = EMPTY_PINS,
 ): string[] {
   const target = save.team.find((m) => m.id === targetId);
-  if (!target || !canFuse(target, pinned).ok) return [];
+  if (!target || !canFuse(target).ok) return [];
   const tier = effectiveRarity(target);
 
   const gearCount = (m: TeamMemberSave): number =>
@@ -263,7 +250,7 @@ export function autoFillFodder(
   const seq = (m: TeamMemberSave): number => Number(m.id.replace(/^m-/, "")) || 0;
 
   return save.team
-    .filter((m) => m.id !== targetId && effectiveRarity(m) === tier && canSacrifice(m, pinned).ok)
+    .filter((m) => m.id !== targetId && effectiveRarity(m) === tier && canSacrifice(m).ok)
     .sort((a, b) => a.level - b.level || gearCount(a) - gearCount(b) || seq(a) - seq(b))
     .slice(0, FUSION_FODDER_COUNT)
     .map((m) => m.id);
@@ -275,12 +262,11 @@ export function autoFillFodder(
 export function fodderAvailable(
   targetId: string,
   save: FusionSave,
-  pinned: PinnedIds = EMPTY_PINS,
 ): number {
   const target = save.team.find((m) => m.id === targetId);
   if (!target) return 0;
   const tier = effectiveRarity(target);
   return save.team.filter(
-    (m) => m.id !== targetId && effectiveRarity(m) === tier && canSacrifice(m, pinned).ok,
+    (m) => m.id !== targetId && effectiveRarity(m) === tier && canSacrifice(m).ok,
   ).length;
 }

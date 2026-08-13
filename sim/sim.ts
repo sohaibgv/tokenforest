@@ -1018,22 +1018,27 @@ function fusionChecks(): void {
   }
 
   // DELETION SAFETY. Nothing in this codebase had ever removed a team member
-  // before the altar, so every id-holder is a hazard. A worker on a run, a
-  // worker resting, and a worker backing a live woodcutter sprite must all be
-  // untouchable — the last one has no other guard anywhere: slotAssignment is
-  // never re-validated, so deleting its member leaves a permanent ghost.
+  // before the altar, so every id-holder is a hazard. A worker on a run and a
+  // worker resting are both mid-something the merge cannot unwind, and stay
+  // untouchable.
+  //
+  // A worker out CHOPPING is deliberately not on that list any more. It used
+  // to be, because deleting the member a live woodcutter pointed at left a
+  // permanent ghost swinging at one damage; Game now retires that sprite —
+  // it walks off and the slot passes to the next worker in roster order — so
+  // being busy is no longer a veto. This check exists to keep that decision
+  // deliberate rather than letting it rot back into a refusal.
   {
     const team = commons();
     team[1].status = "adventuring";
     team[2].status = "resting";
     const save = saveWith(team);
-    const pinned = new Set([team[3].id]);
-    check("a worker on a run cannot be spent", canSacrifice(team[1], pinned).reason === "adventuring", "");
-    check("a resting worker cannot be spent", canSacrifice(team[2], pinned).reason === "resting", "");
-    check("a working worker cannot be spent", canSacrifice(team[3], pinned).reason === "working", "");
+    check("a worker on a run cannot be spent", canSacrifice(team[1]).reason === "adventuring", "");
+    check("a resting worker cannot be spent", canSacrifice(team[2]).reason === "resting", "");
+    check("an available worker can be spent while busy", canSacrifice(team[3]).ok, "");
     check(
-      "a merge naming any of them is refused",
-      planFusion("m-1", ["m-2", "m-3", "m-4", "m-5"], save, pinned) === null,
+      "a merge naming an ineligible worker is refused",
+      planFusion("m-1", ["m-2", "m-3", "m-4", "m-5"], save) === null,
       "",
     );
   }
