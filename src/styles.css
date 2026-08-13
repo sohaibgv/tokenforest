@@ -482,6 +482,14 @@ body.shop-takeover #shop {
   min-width: 0;
   flex-wrap: nowrap;
   overflow-x: auto;
+  /* No bar. This is a horizontal strip in a header, and a scrollbar under the
+     tabs sits across the row you are trying to click — the same call
+     .adv-tray and #build-slots make, for the same reason. */
+  scrollbar-width: none;
+}
+
+#shop-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 #shop-tabs button {
@@ -1865,6 +1873,15 @@ body.shop-takeover #shop {
   min-height: 0;
 }
 
+/* The Pull button wearing its Skip hat. Same element, same corner — a
+   different tint so it is obvious the click now fast-forwards rather than
+   spends another 100 wood. */
+.gacha-pull-buttons button.is-skip {
+  background: var(--bg-inset);
+  color: var(--text-bright);
+  border-color: var(--accent-green);
+}
+
 /* Fusion Altar ---------------------------------------------------------- */
 
 .fusion-altar {
@@ -2071,6 +2088,13 @@ body.shop-takeover #shop {
 
 .fusion-stat-after {
   font-weight: 700;
+}
+
+/* Why the Merge button will not light up. Amber rather than red: nothing has
+   gone wrong, something is just busy. */
+.fusion-blocked {
+  color: var(--warning);
+  font-size: 9px;
 }
 
 .fusion-refund {
@@ -2790,10 +2814,12 @@ body.shop-takeover #shop {
    thumb — there the content boundary is off-screen, so the bar is the only
    thing that says how far down you are.
 
-   These two are the ONLY places `scrollbar-width` may appear (see the
-   Scrollbars section): it opts an element out of ::-webkit-scrollbar, which is
-   ruinous when styling a bar and exactly right when removing one. Both
-   spellings are set so an engine that supports neither still hides it. */
+   `scrollbar-width` may ONLY ever be used to REMOVE a bar (see the Scrollbars
+   section): it opts an element out of ::-webkit-scrollbar, which is ruinous
+   when styling a bar and exactly right when deleting one. Every use of it in
+   this file is `none`, on a horizontal strip whose bar would sit across the
+   content: here, #shop-tabs, and the altar's reserve. Both spellings are set
+   so an engine that supports neither still hides it. */
 .adv-tray,
 #build-slots {
   scrollbar-width: none;

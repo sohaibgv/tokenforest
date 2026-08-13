@@ -157,6 +157,12 @@ export function createGachaPanel(game: Game): GachaPanel {
    * children, so the control bar's footprint stays identical between idle
    * and reveal states and the layout never jumps. */
   let currentControlBar: HTMLElement | null = null;
+  /** What the Pull button does WHILE a reveal is running. The skip control used
+   * to be a second button appended beside Pull, which meant pulling ten times
+   * was a pull here, a skip there, a pull here — the pointer travelling between
+   * two targets for every single spin. The Pull button becomes the Skip button
+   * instead, so the whole loop happens under a stationary cursor. */
+  let currentSkip: (() => void) | null = null;
 
   function row(label: string, sub: string, action: RowAction | null): HTMLElement {
     const el = document.createElement("div");
@@ -239,7 +245,10 @@ export function createGachaPanel(game: Game): GachaPanel {
     btn.disabled = !enabled;
     if (title) btn.title = title;
     btn.addEventListener("click", () => {
-      if (revealing) return;
+      if (revealing) {
+        currentSkip?.();
+        return;
+      }
       btn.classList.add("machine-lever-pulse");
       window.setTimeout(() => btn.classList.remove("machine-lever-pulse"), 150);
       onClick();
@@ -270,19 +279,36 @@ export function createGachaPanel(game: Game): GachaPanel {
   function finishReveal(listEl: HTMLElement, holdMs: number): void {
     window.setTimeout(() => {
       revealing = false;
+      currentSkip = null;
+      // render() rebuilds the control bar, which restores the button's own
+      // label and price — nothing here has to put it back by hand.
       render(listEl);
     }, holdMs);
   }
 
-  /** A "Skip ▶▶" button that snaps the given reel handle straight to its
-   * landing — lets the player fast-forward a single spin, or click through
-   * a ×10 sequence quickly instead of waiting out every reel. */
-  function skipButton(onClick: () => void): HTMLElement {
-    const btn = document.createElement("button");
-    btn.className = "case-skip-btn";
-    btn.textContent = "Skip ▶▶";
-    btn.addEventListener("click", onClick);
-    return btn;
+  /** Turns the primary Pull button into "Skip ▶▶" for the duration of a reel,
+   * pointed at that reel's own skip handle.
+   *
+   * The button element and its handler are untouched — only the label, the
+   * enabled state and `currentSkip` change, so there is nothing to tear down
+   * and no second element competing for the same corner. A ×10 sequence
+   * re-arms it per reel; the button never moves. */
+  function armSkip(listEl: HTMLElement, onSkip: () => void): void {
+    currentSkip = onSkip;
+    // BOTH pull buttons, not just the first. Arming only ×1 meant a ×10 pull
+    // still made you travel — you pressed ×10 and the skip appeared under the
+    // ×1 button beside it. Whichever one started the reveal has to be the one
+    // that ends it, and the cheapest way to guarantee that is for both to say
+    // the same thing.
+    const btns = listEl.querySelectorAll<HTMLButtonElement>(".gacha-pull-buttons button");
+    for (const btn of btns) {
+      // lockControls has just disabled every pull button; these are the way
+      // out of the animation, so they go back on.
+      btn.disabled = false;
+      btn.classList.add("is-skip");
+      btn.textContent = "Skip ▶▶";
+      btn.title = "Snap this spin to its result";
+    }
   }
 
   /** Briefly flashes .gacha-tray-glow on the current machine slot — the
@@ -315,7 +341,7 @@ export function createGachaPanel(game: Game): GachaPanel {
     lockControls(listEl);
     const target = currentMachineWindow ?? listEl;
     const handle = playCaseOpening(target, pool, result);
-    (currentControlBar ?? listEl).append(skipButton(handle.skip));
+    armSkip(listEl, handle.skip);
     void handle.finished.then(() => {
       flashTray();
       finishReveal(listEl, 900);
@@ -343,9 +369,8 @@ export function createGachaPanel(game: Game): GachaPanel {
         progress.textContent = `Pull ${i + 1}/${results.length}`;
         const target = currentMachineWindow;
         if (!target) return; // defensive — should always exist while a reveal runs
-        listEl.querySelector(".case-skip-btn")?.remove();
         const handle = playCaseOpening(target, pool, results[i]);
-        (currentControlBar ?? listEl).append(skipButton(handle.skip));
+        armSkip(listEl, handle.skip);
         await handle.finished;
         flashTray();
         await new Promise((r) => window.setTimeout(r, BETWEEN_PULLS_MS));

@@ -201,6 +201,7 @@ import {
   applyFusion,
   autoFillFodder,
   canFuse,
+  canSacrifice,
   fodderAvailable,
   planFusion,
   type FusionCheck,
@@ -1008,6 +1009,20 @@ export class Game {
     const member = this.memberById(memberId);
     if (!member) return { ok: false, reason: "missing" };
     return canFuse(member, this.pinnedMemberIds());
+  }
+
+  /** Whether a member can be SPENT. Looser than fusionCheck — a Legendary is
+   * perfectly good fodder, it just cannot be the one being raised.
+   *
+   * The altar UI must ask this rather than checking `status` itself: a worker
+   * out on a live chopping session is still `available`, and only the pinned
+   * set knows about them. Deciding eligibility any other way lets the panel
+   * offer a worker the engine will then refuse, which reads as a Merge button
+   * that simply does not work. */
+  fusionSacrificeCheck(memberId: string): FusionCheck {
+    const member = this.memberById(memberId);
+    if (!member) return { ok: false, reason: "missing" };
+    return canSacrifice(member, this.pinnedMemberIds());
   }
 
   /** What a merge would do, or null if the selection isn't legal yet. Called

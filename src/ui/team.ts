@@ -498,6 +498,14 @@ export function createTeamPanel(game: Game): TeamPanel {
         head.append(starBadge(stack.members[0]), label);
         roster.append(head);
       }
+      // A pile with nothing left to give leaves the reserve entirely. Dimming
+      // it was not enough: it still took a card's width in a strip you have to
+      // scroll, to say nothing you can act on.
+      if (altarWants) {
+        const spent =
+          stack.members.every((m) => m.id === altarTarget || altarFodder.includes(m.id));
+        if (spent) continue;
+      }
       const isOpen = expanded.has(stack.key);
       // A stack of one is just a row. A stack of many shows its best copy and
       // a count; opening it lists the copies, which matters once you are
@@ -510,7 +518,13 @@ export function createTeamPanel(game: Game): TeamPanel {
         // ineligible (its representative was now spoken for) and clicking
         // again just took them back off, so the other four Rooks behind it
         // were unreachable without expanding first.
-        roster.append(rosterRow(stack.members[0], stack, altarWants, false, true));
+        // The face of a stack row is a copy it can still GIVE. Showing
+        // members[0] meant a half-spent pile wore the portrait and level of
+        // the worker already standing on the pedestal.
+        const face = altarWants
+          ? (stack.members.find((m) => altarWants.has(m.id)) ?? stack.members[0])
+          : stack.members[0];
+        roster.append(rosterRow(face, stack, altarWants, false, true));
       }
     }
 
@@ -615,7 +629,13 @@ export function createTeamPanel(game: Game): TeamPanel {
       if (mode === "altar") {
         // Draw the next copy off the pile; when it is empty, put the last one
         // back, so the row stays a toggle rather than becoming a dead end.
-        if (free.length > 0) seatAtAltar(free[0].id);
+        //
+        // WHICH copy matters. Stacks are sorted strongest-first, which is what
+        // you want for the worker being RAISED and exactly backwards for the
+        // ones being spent — clicking a pile four times was feeding it your
+        // four best copies while Auto-Fill next to it took the cheapest. The
+        // target takes the top of the pile; fodder comes off the bottom.
+        if (free.length > 0) seatAtAltar((altarTarget ? free[free.length - 1] : free[0]).id);
         else if (seated.length > 0) seatAtAltar(seated[seated.length - 1].id);
         return;
       }
@@ -1010,7 +1030,11 @@ export function createTeamPanel(game: Game): TeamPanel {
     for (const m of s.team) {
       if (m.id === altarTarget || altarFodder.includes(m.id)) continue;
       if (effectiveRarity(m) !== tier) continue;
-      if (m.status !== "available") continue;
+      // Ask the engine, do not re-derive. A worker on a live chopping session
+      // is still `status: "available"` — only the pinned set knows about them,
+      // and offering one here filled the altar with a worker planFusion would
+      // then refuse, leaving Merge dead with all five sockets full.
+      if (!game.fusionSacrificeCheck(m.id).ok) continue;
       out.add(m.id);
     }
     return out;
@@ -1190,11 +1214,32 @@ export function createTeamPanel(game: Game): TeamPanel {
     mergeBtn.className = "btn-primary fusion-merge";
     mergeBtn.textContent = "💥 Merge";
     mergeBtn.disabled = !plan;
+    // When the sockets are full and there is still no plan, something on the
+    // altar is refusing — say which and why. "Fill all 4 sockets to merge" is
+    // the one message that must never appear while all 4 are filled.
+    let blocked = "";
+    if (!plan && target && altarFodder.length === FUSION_FODDER_COUNT) {
+      for (const id of [target.id, ...altarFodder]) {
+        const c = id === target.id ? game.fusionCheck(id) : game.fusionSacrificeCheck(id);
+        if (!c.ok) {
+          const who = WORKER_DEFS_BY_ID[s.team.find((m) => m.id === id)?.defId ?? ""]?.name ?? "Someone";
+          blocked = `${who}: ${FUSION_BLOCKER_COPY[c.reason ?? "missing"]}`;
+          break;
+        }
+      }
+      if (!blocked) blocked = "These workers are not all the same tier.";
+    }
     mergeBtn.title = plan
       ? `Spend ${FUSION_FODDER_COUNT} workers to raise this one to ${plan.toRarity}.`
       : !target
         ? "Pick a worker to raise first."
-        : `Fill all ${FUSION_FODDER_COUNT} sockets to merge.`;
+        : blocked || `Fill all ${FUSION_FODDER_COUNT} sockets to merge.`;
+    if (blocked) {
+      const why = document.createElement("div");
+      why.className = "shop-sub fusion-blocked";
+      why.textContent = blocked;
+      preview.append(why);
+    }
     mergeBtn.addEventListener("click", () => {
       if (!plan) return;
       void runFusion(panel, plan);
