@@ -34,6 +34,11 @@
    sites can do `rgba(var(--x-rgb), alpha)` for glows/hover tints without
    re-deriving the channel values by hand. */
 :root {
+  /* Canvas px-per-logical-px, published by fitCanvas (main.ts). The battle
+     UI scales off this so it stays proportionate to the pixel art at any
+     window size. 4 is the small-window value and the size these were
+     originally designed at. */
+  --ui-scale: 4;
   /* Backgrounds — warm cream/parchment family (was near-black green). Relative
      lightness ORDER is preserved from the old dark family (bg-panel was the
      darkest of the 3, bg-base the middle, bg-inset the lightest — verified,
@@ -1823,8 +1828,8 @@ body.shop-takeover #shop {
   position: absolute;
   top: -5px;
   right: -5px;
-  width: 14px;
-  height: 14px;
+  width: calc(3.5px * var(--ui-scale));
+  height: calc(3.5px * var(--ui-scale));
   align-items: center;
   justify-content: center;
   padding: 0;
@@ -2417,9 +2422,10 @@ body.shop-takeover #shop {
   flex-direction: column;
   align-items: center;
   gap: 1px;
-  min-width: 78px;
-  max-width: 140px;
-  padding: 2px 6px 3px;
+  min-width: calc(19px * var(--ui-scale));
+  max-width: calc(36px * var(--ui-scale));
+  padding: calc(0.5px * var(--ui-scale)) calc(1.5px * var(--ui-scale)) calc(0.75px * var(--ui-scale));
+  font-size: calc(2.75px * var(--ui-scale));
   /* Opaque-enough parchment for AA dark-on-light text over the green
      battlefield; the old 0.55 alpha + dark text-shadow rendered the dark
      label as an illegible olive smear (headless-verified). */
@@ -2471,7 +2477,7 @@ body.shop-takeover #shop {
    40-HP chip off a 4000-HP one, and the later worlds run into the
    thousands — the numbers are what make a hit feel measured. */
 .battle-plate-hp {
-  font-size: 10px;
+  font-size: calc(2.5px * var(--ui-scale));
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
   opacity: 0.85;
@@ -2641,8 +2647,8 @@ body.shop-takeover #shop {
      chrome dropped on top of the art; the rest of this game's interface is
      wood, brass and carved plank, so these match it — a squared token with a
      bevelled edge, grain, and a nailed-plaque feel. */
-  width: 40px;
-  height: 40px;
+  width: calc(10px * var(--ui-scale));
+  height: calc(10px * var(--ui-scale));
   padding: 0;
   border-radius: 3px;
   background:
@@ -2708,18 +2714,18 @@ body.shop-takeover #shop {
 
 .battle-bubble-key {
   position: absolute;
-  right: -3px;
-  bottom: -3px;
-  min-width: 11px;
-  height: 11px;
-  padding: 0 2px;
+  right: calc(-0.75px * var(--ui-scale));
+  bottom: calc(-0.75px * var(--ui-scale));
+  min-width: calc(2.75px * var(--ui-scale));
+  height: calc(2.75px * var(--ui-scale));
+  padding: 0 calc(0.5px * var(--ui-scale));
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
   background: var(--accent-gold);
   color: var(--text-on-accent);
-  font-size: 8px;
+  font-size: calc(2px * var(--ui-scale));
   font-weight: 700;
   line-height: 1;
   box-shadow: 0 0 0 1.5px rgba(var(--bg-panel-rgb), 0.92);

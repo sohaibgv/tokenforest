@@ -566,11 +566,25 @@ export function initBattle(game: Game): void {
   // and a 40px token at dy -50 punched straight through the plate's lower
   // edge (measured: 9px of overlap). -34 clears it with a few px to spare
   // and still keeps the whole cluster flanking the character.
+  // Offsets in LOGICAL px, converted to CSS at the canvas's live scale — the
+  // same conversion the anchor position goes through.
+  //
+  // They used to be CSS px. That was fine while the canvas rendered at ~4x,
+  // but once it targeted a constant logical width the scale went to ~7x at a
+  // 1680px window: sprites nearly doubled, the offsets did not, and the token
+  // cluster ended up sitting on top of the character it belonged to. Anything
+  // positioned against the world has to be measured in the world's units.
+  //
+  // Both rows sit ABOVE the actor's feet and well out to the sides. The
+  // constraints are tighter than they look: the front sprite is 15 logical px
+  // half-wide, so anything inside +/-20 is drawn on top of the character; and
+  // the two BACK-ROW members stand at 0.72h with their own nameplates above
+  // their heads, which a downward-hanging token row lands squarely on.
   const BUBBLE_OFFSET: Record<string, { dx: number; dy: number }> = {
-    attack: { dx: -50, dy: -34 },
-    defend: { dx: 50, dy: -34 },
-    ability: { dx: -50, dy: 34 },
-    retreat: { dx: 50, dy: 34 },
+    attack: { dx: -22, dy: -15 },
+    defend: { dx: 22, dy: -15 },
+    ability: { dx: -22, dy: -3 },
+    retreat: { dx: 22, dy: -3 },
   };
 
   /** Convert a logical-canvas-px point (what every Game screen-pos getter
@@ -596,10 +610,11 @@ export function initBattle(game: Game): void {
     if (!screen) return;
     const cx = screen.x;
     const cy = screen.y;
+    const scale = canvasEl.getBoundingClientRect().width / canvasEl.width;
     for (const { action, btn } of bubbleEls) {
       const off = BUBBLE_OFFSET[action] ?? { dx: 0, dy: 0 };
-      btn.style.left = `${Math.round(cx + off.dx)}px`;
-      btn.style.top = `${Math.round(cy + off.dy)}px`;
+      btn.style.left = `${Math.round(cx + off.dx * scale)}px`;
+      btn.style.top = `${Math.round(cy + off.dy * scale)}px`;
     }
   }
 
@@ -629,8 +644,11 @@ export function initBattle(game: Game): void {
         return;
       }
       row.classList.remove("unanchored");
+      const scale = canvasEl.getBoundingClientRect().width / canvasEl.width;
       row.style.left = `${Math.round(screen.x)}px`;
-      row.style.top = `${Math.round(screen.y - 8)}px`;
+      // 2 logical px of daylight above the head, not 8 CSS px — same reason
+      // as the token offsets above.
+      row.style.top = `${Math.round(screen.y - 2 * scale)}px`;
     };
     for (const [id, entry] of enemyRows) place(id, entry.row);
     for (const [id, entry] of partyRows) place(id, entry.row);

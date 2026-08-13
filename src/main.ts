@@ -108,6 +108,15 @@ async function boot(): Promise<void> {
       canvas.height = h;
       game.resize(w, h);
     }
+    // Publish the scale so the DOM battle UI can size itself against the
+    // world instead of against nothing.
+    //
+    // The canvas grew ~3.5x when the renderer started targeting a constant
+    // logical width, but the floating action tokens and unit nameplates are
+    // DOM nodes measured in fixed CSS px — so at a 1680px window a party
+    // sprite stands ~215px tall next to a 40px token belonging to it. They
+    // did not shrink; the world grew around them.
+    document.documentElement.style.setProperty("--ui-scale", String(scale));
     ctx.imageSmoothingEnabled = false;
   }
   window.addEventListener("resize", fitCanvas);
