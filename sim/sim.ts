@@ -84,6 +84,12 @@ import {
   SHARD_VALUE,
   TOKENS_PER_CHARGE,
   swingWeight,
+  streakMult,
+  STREAK_DECAY_PER_SEC,
+  STREAK_GAIN_PER_WEIGHT,
+  STREAK_MULT_MAX,
+  POV_CRIT_FRACTION,
+  POV_GRADE_MULT,
   SWING_CAP,
   SWING_FLOOR,
   TOKEN_REF,
@@ -3473,17 +3479,25 @@ function featureChecks(): void {
         SKILL_SPEED_BASE + SKILL_SPEED_RANGE / 2 + t * SKILL_SPEED_PER_TIER,
         SKILL_SPEED_BASE + SKILL_SPEED_RANGE + t * SKILL_SPEED_PER_TIER,    // fastest roll
       ];
-      const grades = ["great", "good", "miss"] as const;
+      const grades = ["crit", "great", "good"] as const;
       const jitters = [0, 0.5, 1]; // rand() extremes and centre
 
-      // Never free, never negative — a swing always pays something.
+      // Every swing that LANDS pays something — never free, never negative.
+      //
+      // This gate used to include "miss" and assert it paid too, back when a
+      // mistimed swing still earned 0.5x. It does not any more: a miss now
+      // whiffs completely (see POV_GRADE_MULT.miss and the early return in
+      // povYieldMult), so misses are asserted to pay exactly zero by the
+      // dedicated gate in povAndStreakChecks instead. Landing grades keep the
+      // original never-zero guarantee, which is the part that would strand a
+      // player if it broke.
       let nonPositive = 0;
       for (const t of tiers)
         for (const sp of speedsFor(t))
           for (const g of grades)
             for (const j of jitters)
               if (!(povYieldMult(g, sp, t, () => j) > 0)) nonPositive++;
-      check("every POV swing pays something", nonPositive === 0, `${nonPositive} non-positive`);
+      check("every POV swing that lands pays something", nonPositive === 0, `${nonPositive} non-positive`);
 
       // WORLD-INVARIANT. Raw sweep speed climbs with world index, so paying
       // on it directly would hand out a second world multiplier on top of
@@ -4029,6 +4043,87 @@ function swingWeightChecks(): void {
   );
 }
 
+/** Gates on the POV timing game and the sustained-work streak. */
+function povAndStreakChecks(): void {
+  console.log("\nPOV timing game + streak:");
+
+  const TIER = 0;
+  const slow = SKILL_SPEED_BASE;
+  const fast = SKILL_SPEED_BASE + SKILL_SPEED_RANGE;
+
+  // 1. A miss pays NOTHING, at every speed and every jitter roll. This is the
+  //    headline change: a timing check that pays on a miss is decoration.
+  let missPaid = 0;
+  for (const sp of [slow, fast]) {
+    for (let r = 0; r <= 20; r++) {
+      if (povYieldMult("miss", sp, TIER, () => r / 20) !== 0) missPaid++;
+    }
+  }
+  check("pov: a miss pays exactly zero", missPaid === 0, `${missPaid} paying misses across speed x jitter`);
+
+  // 2. Faster sweeps pay more — the reward for a harder target. Compared at
+  //    fixed grade and fixed jitter so only speed varies.
+  const mid = () => 0.5;
+  const slowGood = povYieldMult("good", slow, TIER, mid);
+  const fastGood = povYieldMult("good", fast, TIER, mid);
+  check(
+    "pov: a faster sweep pays more",
+    fastGood > slowGood * 1.3,
+    `slow ${slowGood.toFixed(2)} -> fast ${fastGood.toFixed(2)} (${(fastGood / slowGood).toFixed(2)}x)`,
+  );
+
+  // 3. Timing still beats luck: the WORST crit must beat the BEST great, and
+  //    the worst great must beat the best good. Otherwise a lucky roll on a
+  //    sloppy hit outscores a tighter one and the grades stop meaning
+  //    anything — the same property POV_JITTER was tightened for once before.
+  //    Compared at equal speed, since speed is the player's read, not luck.
+  const worst = () => 0;
+  const best = () => 1;
+  const pairs: [string, string][] = [["crit", "great"], ["great", "good"]];
+  let ordered = true;
+  const detail: string[] = [];
+  for (const [hi, lo] of pairs) {
+    for (const sp of [slow, fast]) {
+      const hiWorst = povYieldMult(hi as "crit" | "great", sp, TIER, worst);
+      const loBest = povYieldMult(lo as "great" | "good", sp, TIER, best);
+      if (hiWorst <= loBest) ordered = false;
+      detail.push(`${hi}>${lo}: ${hiWorst.toFixed(2)} vs ${loBest.toFixed(2)}`);
+    }
+  }
+  check("pov: an unlucky better grade still beats a lucky worse one", ordered, detail.join("  "));
+
+  // 4. The crit is worth chasing but stays a sliver. POV_CRIT_FRACTION is a
+  //    share of the great zone, which is itself 0.3 of the good zone, so the
+  //    real odds are the product — a couple of percent of the window you are
+  //    already aiming at.
+  const critShare = POV_CRIT_FRACTION * 0.3;
+  check(
+    "pov: crit is rare but real",
+    critShare > 0.02 && critShare < 0.12 && POV_GRADE_MULT.crit >= 2,
+    `crit spans ${(100 * critShare).toFixed(1)}% of the good zone, pays ${POV_GRADE_MULT.crit}x`,
+  );
+
+  // 5. Streak is bounded on both ends — it is the only deliberately
+  //    inflationary multiplier in the wood economy, so its ceiling has to be
+  //    a fixed known number rather than something that compounds.
+  check(
+    "streak: multiplier is bounded",
+    streakMult(0) === 1 && streakMult(1) === STREAK_MULT_MAX && streakMult(99) === STREAK_MULT_MAX,
+    `x${streakMult(0)} at empty, x${streakMult(1)} at full, cap x${STREAK_MULT_MAX}`,
+  );
+
+  // 6. Fill and drain times are both human-scaled: a streak you cannot build
+  //    inside a working session is decoration, and one that survives a long
+  //    break is not measuring sustained work at all.
+  const turnsToFill = 1 / STREAK_GAIN_PER_WEIGHT; // at mean weight 1.0
+  const drainSecs = 1 / STREAK_DECAY_PER_SEC;
+  check(
+    "streak: fills and drains on human timescales",
+    turnsToFill >= 8 && turnsToFill <= 30 && drainSecs >= 20 && drainSecs <= 120,
+    `~${turnsToFill.toFixed(0)} median turns to fill, ~${drainSecs.toFixed(0)}s of silence to empty`,
+  );
+}
+
 // --- Drivers ---------------------------------------------------------------
 
 function main(): void {
@@ -4107,6 +4202,7 @@ function main(): void {
   npcChecks();
   readinessChecks();
   swingWeightChecks();
+  povAndStreakChecks();
   contrastChecks();
   reportIdentity();
 

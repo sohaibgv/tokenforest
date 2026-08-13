@@ -51,7 +51,12 @@ import {
 } from "./statuses";
 import { effectiveAtk, equippedItem, memberClass, type ItemInstance, type TeamMemberSave } from "./team";
 
-export type SkillGrade = "great" | "good" | "miss";
+/** "crit" is POV-chop only — battle skill checks roll no crit zone, so it
+ * never reaches the defend/attack paths below. They still handle it rather
+ * than falling through, because a grade landing in an `else` branch fails
+ * SILENTLY and in the worst direction: mitigationFor's fallthrough is 0.9,
+ * so a crit would have become the weakest possible block. */
+export type SkillGrade = "crit" | "great" | "good" | "miss";
 export type BattleAction = "attack" | "defend" | "ability";
 
 /** One living (or just-defeated) enemy in a battle. `id` is assigned by
@@ -346,6 +351,7 @@ function pushEvent(battle: BattleSnapshot, ev: TurnEvent): void {
  * by skill-check grade — exported so the UI can show the numeric
  * equivalent of "Great/Good/Fumbled" instead of just the categorical text. */
 export function mitigationFor(grade: SkillGrade): number {
+  if (grade === "crit") return 0.15;
   return grade === "great" ? 0.3 : grade === "good" ? 0.6 : 0.9;
 }
 
@@ -781,7 +787,11 @@ export function resolveTurn(req: TurnRequest): TurnEvent[] {
         // damage-taken debuff.
         statusMult(board, targetUnit.id, "vulnerable", 1);
       const forcedCrit =
-        attackGrade === "great" ? true : attackGrade === "miss" ? false : undefined;
+        attackGrade === "great" || attackGrade === "crit"
+          ? true
+          : attackGrade === "miss"
+            ? false
+            : undefined;
       // Mark is read (not yet consumed) so it can raise the odds of the very
       // roll it is about to be spent on.
       const markBonus = board[targetUnit.id]?.mark

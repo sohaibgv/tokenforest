@@ -192,14 +192,31 @@ export const SKILL_SPEED_BASE = 55;
 export const SKILL_SPEED_RANGE = 40;
 export const SKILL_SPEED_PER_TIER = 8;
 
-export const POV_GRADE_MULT: Record<"great" | "good" | "miss", number> = {
+export const POV_GRADE_MULT: Record<"crit" | "great" | "good" | "miss", number> = {
+  // A red sliver at the centre of the great zone. Rare enough to feel like a
+  // find rather than a rotation, big enough to be worth going for.
+  crit: 3,
   great: 1.5,
   good: 1.15,
-  miss: 0.5,
+  // A miss pays NOTHING and lands nothing — the swing whiffs entirely (see
+  // resolveManualPovChop). It used to pay 0.5x, which made mistiming a swing
+  // cost about as much as a bad-but-fine one, so the timing bar was a
+  // formality: you could click at random and still earn. A skill check that
+  // cannot be failed is not a skill check.
+  miss: 0,
 };
-/** Multiplier at the slowest and fastest sweep a tier can roll. */
-export const POV_SPEED_MULT_MIN = 0.8;
-export const POV_SPEED_MULT_MAX = 1.3;
+/** Multiplier at the slowest and fastest sweep a tier can roll.
+ *
+ * Widened from 0.8..1.3. The old spread was 1.6x end to end, which is inside
+ * the noise of a single grade step (good -> great is 1.3x on its own), so
+ * "the needle is fast this time" was information the player could not act on
+ * and could barely perceive. At 0.7..1.9 a fast sweep is worth going for. */
+export const POV_SPEED_MULT_MIN = 0.7;
+export const POV_SPEED_MULT_MAX = 1.9;
+/** The crit sliver, as a fraction of the great zone it sits inside. Small on
+ * purpose: at 0.18 of a great zone that is itself 0.3 of the good zone, it is
+ * roughly 5% of the window you are already aiming at. */
+export const POV_CRIT_FRACTION = 0.18;
 /** Plus or minus this fraction, uniformly.
  *
  * Bounded by the grade gap, not chosen for feel. The tightest gap is
@@ -221,11 +238,16 @@ export function povSpeedNorm(speed: number, tier: number): number {
 /** Wood multiplier for one POV swing. `rand` is injected so the sim can
  * sweep the jitter deterministically instead of sampling it. */
 export function povYieldMult(
-  grade: "great" | "good" | "miss",
+  grade: "crit" | "great" | "good" | "miss",
   speed: number,
   tier: number,
   rand: () => number = Math.random,
 ): number {
+  // A miss is zero and must stay zero: multiplying it by speed and jitter
+  // would be a no-op today only because POV_GRADE_MULT.miss happens to be 0.
+  // Returning early says so, so a future non-zero miss value cannot quietly
+  // reintroduce "mistiming still pays".
+  if (grade === "miss") return 0;
   const norm = povSpeedNorm(speed, tier);
   const speedMult = POV_SPEED_MULT_MIN + (POV_SPEED_MULT_MAX - POV_SPEED_MULT_MIN) * norm;
   const jitter = 1 + (rand() * 2 - 1) * POV_JITTER;
@@ -400,6 +422,36 @@ export const SWING_FLOOR = 0.25;
 /** Caps the outlier tail. At 8, a ~115k-token turn is already maxed — enough
  * to stagger an elder (30 HP) but never to erase a plot in one event. */
 export const SWING_CAP = 8;
+
+// --- Streak: the reward for sustained work ---------------------------------
+//
+// swingWeight makes a single big turn matter. This makes a SESSION matter:
+// volume feeds a charge that multiplies wood while you keep working and
+// drains once you stop, so a long stretch of real work pays better than the
+// same tokens dribbled across an afternoon.
+//
+// Unlike swingWeight, this is deliberately NOT economy-neutral — it is a
+// bonus, and it inflates wood during active use by design. It is bounded on
+// both axes so the size of that inflation is a known number rather than an
+// emergent one: the charge is clamped to 0..1 and the bonus it buys is capped
+// at STREAK_MAX_BONUS, making STREAK_MULT_MAX the hard ceiling on any wood
+// payout. The sim gates the ceiling and the fill/drain times.
+//
+// It is intentionally not persisted. A streak describes what you are doing
+// right now; restoring a x1.8 from a session that ended yesterday would pay
+// out for work that is long over, and would make the meter lie on launch.
+export const STREAK_GAIN_PER_WEIGHT = 0.06;
+/** Charge lost per second. At 0.02 a full bar drains in ~50s of silence —
+ * long enough to survive thinking time and a slow tool call, short enough
+ * that walking away visibly ends the run. */
+export const STREAK_DECAY_PER_SEC = 0.02;
+export const STREAK_MAX_BONUS = 0.8;
+export const STREAK_MULT_MAX = 1 + STREAK_MAX_BONUS;
+
+/** Wood multiplier for a given 0..1 streak charge. */
+export function streakMult(charge: number): number {
+  return 1 + STREAK_MAX_BONUS * Math.max(0, Math.min(1, charge));
+}
 
 export function swingWeight(tokens: number): number {
   if (tokens <= 0) return 0;

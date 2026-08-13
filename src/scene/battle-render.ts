@@ -400,13 +400,21 @@ export function renderBattleScene(ctx: CanvasRenderingContext2D, v: BattleRender
   if (v.battleFlash) {
     const grade = v.battleFlash.grade;
     const label =
-      grade === "great" ? "GREAT" : grade === "good" ? "GOOD" : "MISS";
+      grade === "crit"
+        ? "CRITICAL"
+        : grade === "great"
+          ? "GREAT"
+          : grade === "good"
+            ? "GOOD"
+            : "MISS";
     const color =
-      grade === "great"
-        ? "#ffd75e"
-        : grade === "good"
-          ? "#6fb7ff"
-          : "#d64545";
+      grade === "crit"
+        ? "#e03b3b"
+        : grade === "great"
+          ? "#ffd75e"
+          : grade === "good"
+            ? "#6fb7ff"
+            : "#d64545";
     drawText(
       ctx,
       label,
@@ -457,6 +465,18 @@ export function renderSkillCheckTrack(
   const gw = Math.max(1, Math.round((sc.greatWidth / 100) * trackW));
   ctx.fillStyle = "#ffd75e";
   ctx.fillRect(gx, trackY, gw, trackH);
+
+  // The crit sliver, dead centre of the great zone (POV chops only — battle
+  // checks roll no crit zone, so this branch never fires there). Drawn last
+  // so it paints over the gold, and given a minimum width of 1px because at
+  // ~5% of an already-narrow zone it would otherwise round away to nothing
+  // on a small window and be invisible right up until it fired.
+  if (sc.critStart !== undefined && sc.critWidth !== undefined) {
+    const cx = trackX + Math.round((sc.critStart / 100) * trackW);
+    const cw = Math.max(1, Math.round((sc.critWidth / 100) * trackW));
+    ctx.fillStyle = "#e03b3b";
+    ctx.fillRect(cx, trackY, cw, trackH);
+  }
 
   const nx =
     trackX + Math.min(trackW - 1, Math.round((sc.pos / 100) * trackW));

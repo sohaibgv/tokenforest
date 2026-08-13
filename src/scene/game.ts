@@ -92,6 +92,7 @@ import {
   dyedPalette,
   travelAmberCost,
   travelSweatWoodCost,
+  POV_CRIT_FRACTION,
   POV_GRADE_MULT,
   povYieldMult,
   SKILL_SPEED_BASE,
@@ -114,6 +115,9 @@ import {
   sapPressBuildCost,
   sapPressCost,
   TOKENS_PER_CHARGE,
+  streakMult,
+  STREAK_DECAY_PER_SEC,
+  STREAK_GAIN_PER_WEIGHT,
   swingWeight,
   unlockedSwatches,
   WOOD_YIELD,
@@ -271,7 +275,10 @@ import type { ManualChop, PendingChop } from "./woodcutter";
 import { Tree } from "./forest";
 import { Woodcutter } from "./woodcutter";
 
-export type SkillGrade = "great" | "good" | "miss";
+/** Mirrors battle.ts's SkillGrade (game's grades flow into resolvePartyTurn,
+ * so the two unions must stay compatible). "crit" is reachable only from the
+ * POV chop check, which is the only check that rolls a crit sliver. */
+export type SkillGrade = "crit" | "great" | "good" | "miss";
 
 export interface SkillCheck {
   pos: number; // 0..100, current needle position
@@ -281,6 +288,11 @@ export interface SkillCheck {
   zoneWidth: number; // percentage points
   greatStart: number; // subset of the zone, centered
   greatWidth: number;
+  /** The red crit sliver at the centre of the great zone. Present only on
+   * POV chop checks — battle's Defend check rolls without one, which is what
+   * keeps "crit" from ever reaching the combat grade paths. */
+  critStart?: number;
+  critWidth?: number;
 }
 
 /** Simplified stand-ins for the tree behind a POV close-up — the real
@@ -378,6 +390,9 @@ export class Game {
   private slotAssignment = new Map<string, string | null>();
   private floats: FloatingText[] = [];
   private buffers = new Map<string, ChopBuffer>();
+  /** 0..1 sustained-work charge; see streakMult. Runtime only, never saved —
+   * a streak is about what is happening now, not what happened yesterday. */
+  private streakCharge = 0;
   private extraCount = 0;
   private hasData = false;
   private gnomeTimer = 0;
@@ -2560,6 +2575,9 @@ export class Game {
   applyChop(e: ChopEvent): void {
     const buf = this.buffers.get(e.sourceId);
     const weight = swingWeight(e.counted);
+    // Volume feeds the streak, so a heavy turn advances it faster than a
+    // trickle of small ones — same input that sets the swing's force.
+    this.streakCharge = Math.min(1, this.streakCharge + weight * STREAK_GAIN_PER_WEIGHT);
     if (buf) {
       buf.tokens += e.counted;
       buf.hits += 1;
@@ -2927,6 +2945,48 @@ export class Game {
   /** Converts a (fraction-across, fraction-into-the-clearing) pair to canvas
    * coords, then nudges the result off the lake — the lake is seeded per plot,
    * so any fixed spot can land in open water on some seeds. */
+  /** The streak bar — on screen only while a streak is actually running.
+   *
+   * This game deliberately has no permanent corner HUD; wood, amber and focus
+   * are physical props standing in the clearing (see the note below on
+   * propSpot). A streak is not a stock of anything though — it is transient
+   * feedback about what is happening right now — so it appears when it means
+   * something and leaves when it does not, rather than sitting in a corner
+   * reading x1.00 all day.
+   *
+   * Drawn just under the sky line, centred, so it collides with neither the
+   * props along the ground nor the budget strip below the canvas.
+   */
+  private renderStreakMeter(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    skyH: number,
+  ): void {
+    if (this.streakCharge <= 0.02) return;
+    const mult = streakMult(this.streakCharge);
+    const label = `STREAK x${mult.toFixed(2)}`;
+    const barW = Math.max(40, Math.min(90, Math.round(w * 0.18)));
+    const barH = 3;
+    const x = Math.round(w / 2 - barW / 2);
+    const y = skyH + 6;
+
+    ctx.fillStyle = "rgba(12, 20, 16, 0.55)";
+    ctx.fillRect(x - 2, y - 2, barW + 4, barH + 4);
+    ctx.fillStyle = "#233327";
+    ctx.fillRect(x, y, barW, barH);
+    // Fill shifts green -> gold as it approaches the cap, so "nearly maxed"
+    // is readable without parsing the number.
+    ctx.fillStyle = this.streakCharge > 0.85 ? "#ffd75e" : "#4f9b4a";
+    ctx.fillRect(x, y, Math.round(barW * this.streakCharge), barH);
+    drawText(
+      ctx,
+      label,
+      Math.round(w / 2 - textWidth(label) / 2),
+      y - 9,
+      this.streakCharge > 0.85 ? "#ffd75e" : "#cfe8cf",
+    );
+  }
+
   private propSpot(fx: number, fy: number): { x: number; y: number } {
     const top = this.groundTop() + 8;
     const bottom = this.groundBottom();
@@ -4747,6 +4807,15 @@ export class Game {
   }
 
   private gradeSkillCheck(sc: SkillCheck, pos: number): SkillGrade {
+    // Crit first — it is a subset of the great zone, so testing great first
+    // would swallow it entirely.
+    if (
+      sc.critWidth !== undefined &&
+      sc.critStart !== undefined &&
+      pos >= sc.critStart &&
+      pos <= sc.critStart + sc.critWidth
+    )
+      return "crit";
     if (pos >= sc.greatStart && pos <= sc.greatStart + sc.greatWidth)
       return "great";
     if (pos >= sc.zoneStart && pos <= sc.zoneStart + sc.zoneWidth)
@@ -4763,7 +4832,7 @@ export class Game {
    * skillCheckWidenForMember/Wc) — it widens zoneWidth, and greatWidth
    * widens right along with it since it's already derived as a fraction of
    * zoneWidth below. */
-  private rollSkillCheck(tierOverride?: number, widenPct = 0): SkillCheck {
+  private rollSkillCheck(tierOverride?: number, widenPct = 0, withCrit = false): SkillCheck {
     const tier = tierOverride ?? this.save.worldIndex;
     const baseZoneWidth =
       Math.max(7, Math.min(22, 12 - tier * 1.5)) + Math.random() * 10;
@@ -4773,6 +4842,9 @@ export class Game {
     const greatStart = zoneStart + (zoneWidth - greatWidth) / 2;
     const speed =
       SKILL_SPEED_BASE + Math.random() * SKILL_SPEED_RANGE + tier * SKILL_SPEED_PER_TIER;
+    const critWidth = withCrit ? greatWidth * POV_CRIT_FRACTION : undefined;
+    const critStart =
+      critWidth !== undefined ? greatStart + (greatWidth - critWidth) / 2 : undefined;
     return {
       pos: 0,
       dir: 1,
@@ -4781,6 +4853,8 @@ export class Game {
       zoneWidth,
       greatStart,
       greatWidth,
+      critStart,
+      critWidth,
     };
   }
 
@@ -5246,7 +5320,11 @@ export class Game {
     // have none and fall back to `hits`, which is what they always used —
     // a click is a click regardless of what the model happened to be doing.
     const force = chop.weight ?? chop.hits;
-    const chips = force * getWorld(this.plotWorld).mult * totalYieldMult;
+    // The streak multiplies WOOD only, never damage — otherwise a hot streak
+    // would also clear plots faster, and plot clearing is what gates world
+    // progress. The bonus should make a session richer, not shorter.
+    const chips =
+      force * getWorld(this.plotWorld).mult * totalYieldMult * streakMult(this.streakCharge);
     s.wood += chips;
     s.totalWoodEarned += chips;
     // Everything this swing paid, returned to the caller so the POV timing
@@ -5269,8 +5347,14 @@ export class Game {
       );
     }
     if (felled) {
+      // Same streak multiplier as the chips above: a tree felled mid-streak
+      // pays at the rate you were chopping at, rather than dropping back to
+      // base the moment it actually falls.
       const payout =
-        WOOD_YIELD[tree.kind] * getWorld(this.plotWorld).mult * totalYieldMult;
+        WOOD_YIELD[tree.kind] *
+        getWorld(this.plotWorld).mult *
+        totalYieldMult *
+        streakMult(this.streakCharge);
       s.wood += payout;
       s.totalWoodEarned += payout;
       awarded += payout;
@@ -5335,6 +5419,19 @@ export class Game {
     const tree = wc.currentTree;
     if (!tree || !tree.standing) return;
     this.effects.push(new Effect(chop.x, chop.y, [SLASH1, SLASH2], 0.25));
+    // A missed timing check whiffs completely: no wood, and no damage either.
+    //
+    // Paying 0x wood but still felling the tree would make the check purely
+    // cosmetic in the way that matters most — you would clear the plot at the
+    // same rate whether or not you ever hit the zone, and plot clearing is
+    // what gates world progress. The swing still animates and still costs the
+    // wind-up, so a miss costs time, which is the whole point of a timing
+    // game.
+    if (chop.yieldMult <= 0) {
+      playSfx("chop");
+      if (this.povFlash) this.povFlash.t = 0;
+      return;
+    }
     const awarded = this.resolveChop(
       tree,
       { tokens: 0, hits: chop.hits, yieldMult: chop.yieldMult },
@@ -5878,6 +5975,12 @@ export class Game {
       }
     }
 
+    // Streak drains whenever usage stops arriving. Done here rather than on a
+    // timestamp check so it eases down visibly instead of snapping to zero.
+    if (this.streakCharge > 0) {
+      this.streakCharge = Math.max(0, this.streakCharge - STREAK_DECAY_PER_SEC * dt);
+    }
+
     // Boost timers.
     this.animT += dt;
     if (this.frenzyT > 0) {
@@ -6166,6 +6269,7 @@ export class Game {
           this.povSkillCheck = this.rollSkillCheck(
             undefined,
             this.skillCheckWidenForWc(this.povTarget),
+            true, // POV chops are the only check with a crit sliver
           );
         }
         if (this.povSkillCheck) {
@@ -6406,6 +6510,8 @@ export class Game {
       e.render(ctx);
     }
 
+    this.renderStreakMeter(ctx, w, skyH);
+
     // Night falls over the land.
     if (this.sky.darkness > 0.01) {
       ctx.fillStyle = `rgba(14, 20, 46, ${(this.sky.darkness * 0.55).toFixed(3)})`;
@@ -6534,18 +6640,26 @@ export class Game {
     if (this.povFlash) {
       const grade = this.povFlash.grade;
       const color =
-        grade === "great"
-          ? "#ffd75e"
-          : grade === "good"
-            ? "#6fb7ff"
-            : "#d64545";
+        grade === "crit"
+          ? "#e03b3b"
+          : grade === "great"
+            ? "#ffd75e"
+            : grade === "good"
+              ? "#6fb7ff"
+              : "#d64545";
       // The wood, not the multiplier. A bare "x1.5" restated the grade and
       // left you to work out what it was worth; the payout is the thing you
       // came here for, so it is what the bar says. The grade still shows,
       // smaller, above it — it is the feedback on your timing.
       const wood = this.povFlash.wood;
       const gradeLabel =
-        grade === "great" ? "GREAT!" : grade === "good" ? "GOOD" : "MISS";
+        grade === "crit"
+          ? "CRITICAL!"
+          : grade === "great"
+            ? "GREAT!"
+            : grade === "good"
+              ? "GOOD"
+              : "MISS";
       drawText(
         ctx,
         gradeLabel,
