@@ -86,7 +86,21 @@ excluded — they'd dwarf everything else and make the forest meaningless.
 
 Grab the installer for your platform from the
 [latest release](../../releases/latest): `.dmg` (macOS, Apple Silicon or
-Intel), `.exe` (Windows), `.AppImage`/`.deb` (Linux).
+Intel), `.exe` (Windows), `.AppImage`/`.deb`/`.rpm` (Linux).
+
+**On Linux, prefer the `.AppImage`.** It bundles its own GTK/WebKit stack
+(that is why it is ~80 MB against the deb's 5 MB), so it depends on nothing
+from your system, installs by `chmod +x`, and can update itself in place:
+
+```bash
+chmod +x TokenForest_*_amd64.AppImage
+./TokenForest_*_amd64.AppImage
+```
+
+The `.deb`/`.rpm` are fine too, but they link against your system's
+`libwebkit2gtk-4.1-0` and `libayatana-appindicator3-1`, so they inherit
+whatever state your package manager is in — and they cannot auto-update (see
+[Auto-updates](#auto-updates)).
 
 Builds are **unsigned** (no paid certificates), so:
 - **macOS**: right-click the app → Open the first time, or run
@@ -142,6 +156,27 @@ one click downloads, verifies the signature, installs, and relaunches.
 Update artifacts are signed with a minisign keypair; the public key ships
 in `tauri.conf.json`, the private key lives only in the repo's Actions
 secrets.
+
+**Exception — Linux `.deb`/`.rpm` installs update manually.** There the pill
+reads "Get vX" and opens the releases page instead of installing. Tauri's
+updater installs a deb by running `dpkg -i`, which does not resolve
+dependencies and will not configure other packages; on a machine with any
+half-configured package it unpacks the new version over the working one and
+then refuses to configure it, leaving the app broken rather than merely
+un-updated. Handing the download to your package manager — which does
+resolve dependencies — avoids that entirely. AppImage installs are
+unaffected and still update in one click.
+
+If an older version already left you in that state, this repairs it:
+
+```bash
+sudo dpkg --configure -a        # finish the interrupted configuration
+sudo apt --fix-broken install   # or let apt sort out what is missing
+```
+
+If it still will not configure, the first error from `dpkg --configure -a`
+names the package that is actually blocking the queue — it is often an
+unrelated third-party package, and TokenForest is just behind it in line.
 
 ## Run from source
 

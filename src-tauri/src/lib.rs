@@ -49,6 +49,67 @@ fn report_fell(wood: u64, state: tauri::State<AppState>) {
     *state.fell.lock().unwrap() = Some((Instant::now(), wood));
 }
 
+/// Whether this install can safely replace itself in place.
+///
+/// `tauri-plugin-updater` installs a Linux `.deb` update by shelling out to
+/// `dpkg -i` (updater.rs: `try_tmp_locations(bytes, "dpkg", "-i", "deb")`).
+/// `dpkg -i` is the low-level installer: it does not resolve dependencies and
+/// will not configure anything else. So on a machine where any dependency is
+/// merely *unconfigured* — a half-finished apt transaction, another package
+/// whose postinst failed — dpkg unpacks the new version over the old one and
+/// then refuses to configure it. The user is left worse off than before the
+/// update: the working version is gone and the new one is not usable.
+///
+/// That is not hypothetical; it is what this function exists because of. The
+/// fix is to not start down that road: a package-managed install reports
+/// false here, and the UI offers a download link instead of a self-update.
+/// The package manager, which does resolve dependencies, does the install.
+///
+/// AppImage is unaffected and stays fully self-updating — it bundles its own
+/// GTK/WebKit stack and the plugin rewrites the image in place, touching no
+/// system package at all.
+#[tauri::command]
+fn can_self_update() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // Set by the AppImage runtime for the running image.
+        if std::env::var_os("APPIMAGE").is_some() {
+            return true;
+        }
+        // A deb/rpm drops the binary under a system prefix. Anything else
+        // (a `cargo tauri dev` build, a manually extracted tree) is not
+        // package-managed and keeps the old behaviour.
+        if let Ok(exe) = std::env::current_exe() {
+            if exe.starts_with("/usr/") || exe.starts_with("/opt/") {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Opens the releases page in the user's browser — the manual update path for
+/// package-managed installs (see `can_self_update`).
+///
+/// The URL is fixed here rather than passed in from the frontend: a command
+/// that opens whatever string it is handed is a launch-anything primitive,
+/// and there is exactly one page this ever needs to open.
+#[tauri::command]
+fn open_releases_page() -> Result<(), String> {
+    const URL: &str = "https://github.com/sohaibgv/tokenforest/releases/latest";
+    #[cfg(target_os = "linux")]
+    let cmd = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(target_os = "windows")]
+    let cmd = "explorer";
+    std::process::Command::new(cmd)
+        .arg(URL)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Dropdown mode bundles hide-on-blur with always-on-top and skip-taskbar;
 /// window mode behaves like a normal window (Linux default).
 fn apply_panel_mode(app: &AppHandle, dropdown: bool) {
@@ -206,6 +267,8 @@ pub fn run() {
             get_snapshot,
             set_budget,
             report_fell,
+            can_self_update,
+            open_releases_page,
             get_hide_on_blur,
             set_hide_on_blur,
             get_use_real_usage,
