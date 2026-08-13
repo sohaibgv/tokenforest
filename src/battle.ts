@@ -777,9 +777,8 @@ export function resolveTurn(req: TurnRequest): TurnEvent[] {
         stats.values.atkMult *
         (1 + (battle.atkSurge ?? 0)) *
         firstStrike *
-        // Both return exactly 1 with no stacks: Fervor is the attacker's own
-        // temporary buff, Vulnerable is the target's damage-taken debuff.
-        statusMult(board, memberId, "fervor", 1) *
+        // Returns exactly 1 with no stacks — Vulnerable is the target's
+        // damage-taken debuff.
         statusMult(board, targetUnit.id, "vulnerable", 1);
       const forcedCrit =
         attackGrade === "great" ? true : attackGrade === "miss" ? false : undefined;

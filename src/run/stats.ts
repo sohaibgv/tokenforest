@@ -88,7 +88,6 @@ export type RunStatKey =
   | "guardBonus"
   | "shieldOnGuardPct"
   | "regenPerRoundPct"
-  | "maxHpMult"
   /** Number of times a lethal blow leaves someone standing at 1 HP instead of
    * ending the run. Arms BattleSnapshot.lastStandArmed at startBattle, reusing
    * the mechanism the lastStand gear ability already established rather than
@@ -123,7 +122,6 @@ export const BASE_RUN_STATS: Readonly<Record<RunStatKey, number>> = {
   guardBonus: 0,
   shieldOnGuardPct: 0,
   regenPerRoundPct: 0,
-  maxHpMult: 1,
   lastStandCharges: 0,
   woodMult: 1,
   amberMult: 1,

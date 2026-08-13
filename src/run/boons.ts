@@ -237,8 +237,19 @@ const BRAMBLE_BOONS: BoonDef[] = [
     rarities: ["common", "rare", "epic", "heroic"],
     maxRank: MAX_BOON_RANK,
     effects: [
-      { kind: "stat", key: "armorPct", perStep: 0.08 },
-      { kind: "stat", key: "reflectPct", perStep: 0.04 },
+      // Armour ONLY, deliberately.
+      //
+      // This used to give a little armour AND a little reflect, which made it
+      // the best single pick in most measured situations — not because its
+      // numbers were large, but because armour and reflect are capped
+      // SEPARATELY and both reduce incoming damage, so a boon that spends
+      // across two ceilings is strictly more efficient than one that spends
+      // against a single one. That is an arbitrage, not a design, and it made
+      // every pure-reflect boon in the patron look weak by comparison.
+      //
+      // Each mitigation boon now fills one ceiling, so they are told apart by
+      // WHICH cap they fill rather than by being quietly better maths.
+      { kind: "stat", key: "armorPct", perStep: 0.11 },
     ],
     description: "Take {n}% less damage from everything.",
   },
@@ -570,10 +581,15 @@ const LUMEN_BOONS: BoonDef[] = [
     rarities: ["common", "rare", "epic", "heroic"],
     maxRank: MAX_BOON_RANK,
     effects: [
-      { kind: "stat", key: "critChance", perStep: 0.15 },
+      { kind: "stat", key: "critChance", perStep: 0.08 },
       { kind: "stat", key: "critMult", perStep: 0.2 },
+      // The only producer of Mark in the catalog. Its consumer in battle.ts
+      // was fully implemented and unreachable — a mechanic that could never
+      // occur. Marking on hit means the benefit lands on the NEXT blow against
+      // that target, which is what makes focusing fire worth doing.
+      { kind: "trigger", on: "attack", status: "mark", stacks: 1, potencyPct: 0.15 },
     ],
-    description: "+{n}% critical chance, and criticals hit harder.",
+    description: "+{n}% critical chance, criticals hit harder, and every target you strike is left Marked.",
   },
   {
     id: "aegisOfDawn",

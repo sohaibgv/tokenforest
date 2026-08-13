@@ -1468,6 +1468,13 @@ export class Game {
     );
     if (action === "ability" && events.some((e) => e.kind === "ability")) {
       adv.abilityUsed = true;
+      // Benediction's Rite. It is resolved HERE rather than in battle.ts
+      // because a reroll charge is a run concern and BattleSnapshot has no
+      // business knowing about the offer economy — see RunStats.riteHandler.
+      // Without this the card's headline promise had no code path at all.
+      if (this.runStats().riteHandler === "riteReroll") {
+        adv.rerollsLeft += 1;
+      }
     }
     this.battleAnimQueue.push(...events);
     const outcome = isBattleOver(battle);

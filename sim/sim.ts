@@ -108,7 +108,9 @@ import {
   type BoonInstance,
 } from "../src/run/boons";
 import { PATRON_DEFS, PATRON_DEFS_BY_ID } from "../src/run/patrons";
-import { baseRunStats, deriveRunStats, type RunStats } from "../src/run/stats";
+import { baseRunStats, BASE_RUN_STATS, deriveRunStats, type RunStats } from "../src/run/stats";
+import { CHARM_DEFS, CURSE_DEFS } from "../src/run/charms";
+import { CONSUMABLE_DEFS } from "../src/run/shop";
 import { canBuy, roomAcorns, rollShop } from "../src/run/shop";
 import { groveRank, grovePayoutMult, pactEnemyScaling, PACT_DEFS } from "../src/run/pact";
 import {
@@ -759,6 +761,56 @@ function buildDominanceChecks(): void {
     `spread ${spread.toFixed(1)}% (best ${best.policy} ${best.clearPct.toFixed(1)}%, worst ${worst.policy} ${worst.clearPct.toFixed(1)}%)`,
   );
 
+  // WHOSE FAULT IS THE LOSS?
+  //
+  // The least addictive thing a roguelike can do is take a run away before the
+  // player has made any decisions worth blaming. A loss in room two is a bad
+  // draw; a loss in room ten is a build that did not come together, and only
+  // the second one makes anybody want to go again.
+  //
+  // So: where do losses actually happen? Depth I is four rooms in, with at most
+  // three picks made — a run that dies there was decided by the deal.
+  {
+    const rng = scenarioRng("loss-attribution");
+    const depthOfLoss = [0, 0, 0];
+    let losses = 0;
+    for (let t = 0; t < 400; t++) {
+      const out = runFullDelve({ ...base, boonPolicy: "greedy-atk", trials: 400 }, rng);
+      if (out.cleared) continue;
+      losses++;
+      depthOfLoss[depthOf(out.roomsCleared) - 1]++;
+    }
+    const early = losses > 0 ? (100 * depthOfLoss[0]) / losses : 0;
+    check(
+      "losses are not decided before the player has decided anything",
+      early <= 25,
+      losses === 0
+        ? "no losses to attribute"
+        : `${early.toFixed(0)}% of ${losses} losses fell in Depth I (${depthOfLoss.join("/")} by depth)`,
+    );
+  }
+
+  // ESCALATION. Difficulty has to outrun the build, or the back half of a run
+  // is a victory lap; it must not outrun it so far that the run walls.
+  {
+    const rng = scenarioRng("escalation");
+    const reached = new Array(TOTAL_ROOMS + 1).fill(0);
+    const RUNS = 300;
+    for (let t = 0; t < RUNS; t++) {
+      const out = runFullDelve({ ...base, boonPolicy: "greedy-atk", trials: RUNS }, rng);
+      reached[out.roomsCleared]++;
+    }
+    // Where runs actually end, as a distribution.
+    const deaths = reached.slice(0, TOTAL_ROOMS);
+    const worstRoom = deaths.indexOf(Math.max(...deaths));
+    const anyWall = deaths.some((n) => n / RUNS > 0.35);
+    check(
+      "no single room walls the run",
+      !anyWall,
+      `deadliest room ${worstRoom} takes ${((100 * Math.max(...deaths)) / RUNS).toFixed(0)}% of runs`,
+    );
+  }
+
   // A delve must always terminate. An infinite fight — two units that cannot
   // hurt each other, a regen build out-healing its own damage — would hang the
   // real game with no way out but killing the app.
@@ -808,6 +860,491 @@ function buildDominanceChecks(): void {
     }
     const avg = n > 0 ? sum / n : 0;
     check("a full run affords about two purchases", avg >= 40 && avg <= 400, `${avg.toFixed(0)} acorns earned`);
+  }
+}
+
+// --- Per-boon value sweep --------------------------------------------------
+//
+// The dominance panel compares PATRONS. That is the right shape for "is a build
+// viable", and completely blind to a single card being an auto-pick or a trap
+// inside an otherwise healthy patron — which is the more common failure and the
+// one a player actually notices, because they see the card every run.
+//
+// So: hold the party, the gear and the seeds fixed, force one specific boon into
+// the build at a fixed rarity, and fight a contested room. Every boon's win rate
+// is then directly comparable to every other's, and to holding nothing at all.
+//
+// Two failures matter, and they are opposites:
+//   - AUTO-PICK: a card so far ahead that taking anything else is a mistake.
+//     It makes the offer screen a formality.
+//   - DEAD CARD: a card no better than an empty slot. It makes the offer screen
+//     a coin flip between two options and one insult.
+//
+// Economy and meta boons are excluded: their value is acorns and offer quality,
+// neither of which a single fight can see. Judging them here would report the
+// entire Fortune slot as dead.
+
+function boonValueSweep(): void {
+  console.log("\nPer-boon value (no auto-picks, no dead cards):");
+
+  const rosterAt = (level: number) => [
+    { defId: "birch", level, items: { adventuring: "w0-adventuring-epic" } },
+    { defId: "hazel", level, items: { adventuring: "w0-adventuring-epic" } },
+    { defId: "thorne", level, items: { adventuring: "w0-adventuring-rare" } },
+  ];
+  let roster = rosterAt(6);
+  let calibratedLevel = 6;
+
+  /** Win rate over one room with exactly this build held. */
+  const rate = (held: BoonInstance[], label: string, tier: Stage, scale = 1): number => {
+    const rng = scenarioRng(`boonvalue-${label}-${tier}-${scale}`);
+    let wins = 0;
+    const TRIALS = 240;
+    for (let t = 0; t < TRIALS; t++) {
+      const { party, inventory } = buildParty(roster);
+      const stats = deriveRunStats({ party, inventory, prestigeLevel: 0, boonList: held });
+      const battle = startBattle(
+        party,
+        buildEnemy(0, tier, undefined, { hp: scale, atk: 1 + (scale - 1) * 0.5 }),
+        inventory,
+        { stats },
+      );
+      let guard = 0;
+      while (!battle.outcome && guard++ < MAX_TURNS) {
+        const actorId = battle.turnOrder[battle.turnIndex];
+        if (!actorId) break;
+        // Defend when badly hurt, so Guard-slot boons are not measured against a
+        // party that never guards — that would report every one of them dead.
+        const actor = party.find((m) => m.id === actorId)!;
+        // Defend only while somebody healthier is still swinging. Without the
+        // second clause a party that starts below the threshold has EVERY
+        // member defend forever, the fight never resolves, and the scenario
+        // scores as a loss for reasons that have nothing to do with what is
+        // being measured — which is exactly what made the low-HP situations
+        // read as unwinnable at every tier. Mirrors the `smart` policy above.
+        const someoneElseHealthy = party.some(
+          (m) => m.id !== actor.id && m.currentHp > 0 && m.currentHp / m.maxHp >= 0.45,
+        );
+        const hurt = actor.currentHp / actor.maxHp < 0.45 && someoneElseHealthy;
+        resolveTurn({
+          battle,
+          party,
+          memberId: actorId,
+          action: hurt ? "defend" : "attack",
+          defendGrade: hurt ? rollGrade(rng) : undefined,
+          inventory,
+          stats,
+          rng,
+        });
+      }
+      if (battle.outcome === "win") wins++;
+    }
+    return (100 * wins) / TRIALS;
+  };
+
+  // CALIBRATE FIRST, BY BISECTION.
+  //
+  // A comparison between options carries information only where the outcome is
+  // genuinely in doubt. Run at a fixed difficulty the bare party won essentially
+  // never and any status boon won essentially always, so every card scored
+  // either +0 or +99 and the sweep reported nonsense.
+  //
+  // A coarse grid of difficulty multipliers does not fix it — the step from
+  // "comfortable win" to "certain loss" is narrower than any grid I guessed, so
+  // the search kept landing on 0% or 90% and calling it closest. Bisecting on
+  // the multiplier finds the knife edge directly.
+  //
+  // Tier 2 is a THREE-enemy swarm and is used deliberately: kill-triggered and
+  // enemy-side-wide boons are meaningless against a single boss, and measuring
+  // them there reports them dead when they are merely situational.
+  const TARGET = 30;
+  const tier: Stage = 2;
+  const calibrate = (level: number): { scale: number; bare: number } => {
+    roster = rosterAt(level);
+    let lo = 1;
+    let hi = 400;
+    let best = { scale: 1, bare: rate([], `bare-${level}-1`, tier, 1) };
+    for (let i = 0; i < 12; i++) {
+      const mid = Math.round((lo + hi) / 2);
+      const w = rate([], `bare-${level}-${mid}`, tier, mid);
+      if (Math.abs(w - TARGET) < Math.abs(best.bare - TARGET)) best = { scale: mid, bare: w };
+      // Harder scale => lower win rate, so the search direction is inverted.
+      if (w > TARGET) lo = mid + 1;
+      else hi = mid - 1;
+      if (lo > hi) break;
+    }
+    return best;
+  };
+  let calibrated = calibrate(9);
+  if (Math.abs(calibrated.bare - TARGET) > 12) calibrated = calibrate(6);
+  const scale = calibrated.scale;
+  const bare = calibrated.bare;
+  calibratedLevel = Math.abs(calibrated.bare - TARGET) > 12 ? 6 : 9;
+  roster = rosterAt(calibratedLevel);
+  check(
+    "the sweep runs against a contested fight",
+    bare > 10 && bare < 55,
+    `level ${calibratedLevel} trio vs tier ${tier}x${scale}: bare wins ${bare.toFixed(1)}%`,
+  );
+
+  // Only boons whose whole value is COMBAT and expressible as stats or
+  // triggers. Excluded, with reasons:
+  //   - fortune/instant slots: economy and one-shot effects.
+  //   - custom handlers: Rites fire on the once-per-run Ability, and pick-time
+  //     effects (Iron Skin's HP bump) are applied by Game, not by the stat
+  //     block this harness builds.
+  //   - economy-only auras (Golden Hour): their payoff is wood and amber, which
+  //     a single fight cannot see.
+  const ECONOMY_KEYS = new Set(["woodMult", "amberMult", "acornMult", "xpMult", "rarityLuck", "extraOfferCount", "rerollCharges"]);
+  const combat = BOON_DEFS.filter((d) => {
+    if (d.slot === "fortune" || d.slot === "instant" || d.duoPatrons || d.requiresPatronBoons) return false;
+    if (d.effects.some((e) => e.kind === "custom")) return false;
+    const statKeys = d.effects.filter((e) => e.kind === "stat").map((e) => (e as { key: string }).key);
+    const hasTrigger = d.effects.some((e) => e.kind === "trigger");
+    if (!hasTrigger && statKeys.length > 0 && statKeys.every((k) => ECONOMY_KEYS.has(k))) return false;
+    return true;
+  });
+
+  const scored = combat.map((def) => ({
+    id: def.id,
+    slot: def.slot,
+    win: rate([{ id: def.id, rarity: "epic", rank: 2 }], def.id, tier, scale),
+  }));
+  const lifts = scored.map((r) => r.win - bare);
+  const mean = lifts.reduce((a, b) => a + b, 0) / lifts.length;
+
+  const dead = scored.filter((r) => r.win - bare < 2);
+  check(
+    "no combat boon is a dead card",
+    dead.length === 0,
+    dead.length ? dead.map((r) => `${r.id} (${(r.win - bare).toFixed(1)})`).join(", ") : `${scored.length} boons, mean lift +${mean.toFixed(1)}`,
+  );
+
+  // Judged against the mean rather than an absolute, so the check survives
+  // retuning the whole catalog up or down together.
+  const auto = scored.filter((r) => r.win - bare > mean * 2.5 && r.win - bare > 15);
+  check(
+    "no combat boon is an auto-pick",
+    auto.length === 0,
+    auto.length ? auto.map((r) => `${r.id} (+${(r.win - bare).toFixed(1)} vs mean +${mean.toFixed(1)})`).join(", ") : `best +${Math.max(...lifts).toFixed(1)} vs mean +${mean.toFixed(1)}`,
+  );
+
+  for (const slot of ["strike", "guard", "aura"] as const) {
+    const inSlot = scored.filter((r) => r.slot === slot);
+    if (inSlot.length === 0) continue;
+    const avg = inSlot.reduce((sum, r) => sum + (r.win - bare), 0) / inSlot.length;
+    check(`  ${slot} slot pulls its weight`, avg > 2, `mean +${avg.toFixed(1)} over ${inSlot.length} boons`);
+  }
+}
+
+// --- Do choices depend on state? -------------------------------------------
+//
+// A per-boon sweep can say "no card is dominant on average" while the game is
+// still a slot machine, because averages hide the thing that actually matters:
+// whether the RIGHT answer moves. If the best pick is the same card no matter
+// what party you brought, how hurt you are, or what you already hold, then the
+// build variety is decorative — every run converges on one shape and the offer
+// screen is a formality with three faces.
+//
+// So this measures the argmax directly across deliberately different states,
+// and asserts it is not constant.
+
+function stateDependenceChecks(): void {
+  console.log("\nDo choices depend on state:");
+
+  const CANDIDATES = ["kindle", "thornbite", "jitter", "siphon", "barkskin", "ironroot", "packetLoss", "overheat"];
+
+  interface Situation {
+    name: string;
+    roster: { defId: string; level: number; items?: Record<string, string> }[];
+    held: BoonInstance[];
+    hpFrac: number;
+    tier: Stage;
+    /** Extra enemy scaling found by calibration. The five tiers alone do not
+     * reach far enough: a build that has already committed beats tier 5
+     * comfortably, and with no headroom above it every candidate scores 100. */
+    scale?: number;
+  }
+
+  const situations: Situation[] = [
+    {
+      name: "fresh trio, healthy, early room",
+      roster: [
+        { defId: "birch", level: 5, items: { adventuring: "w0-adventuring-rare" } },
+        { defId: "hazel", level: 5, items: { adventuring: "w0-adventuring-rare" } },
+        { defId: "thorne", level: 5, items: { adventuring: "w0-adventuring-common" } },
+      ],
+      held: [],
+      hpFrac: 1,
+      tier: 3,
+    },
+    {
+      name: "badly hurt, deep room",
+      roster: [
+        { defId: "birch", level: 9, items: { adventuring: "w0-adventuring-epic" } },
+        { defId: "hazel", level: 9, items: { adventuring: "w0-adventuring-epic" } },
+        { defId: "thorne", level: 9, items: { adventuring: "w0-adventuring-rare" } },
+      ],
+      held: [],
+      hpFrac: 0.3,
+      tier: 5,
+    },
+    {
+      name: "already committed to burn",
+      roster: [
+        { defId: "birch", level: 9, items: { adventuring: "w0-adventuring-epic" } },
+        { defId: "hazel", level: 9, items: { adventuring: "w0-adventuring-epic" } },
+        { defId: "thorne", level: 9, items: { adventuring: "w0-adventuring-rare" } },
+      ],
+      held: [
+        { id: "kindle", rarity: "epic", rank: 3 },
+        { id: "overheat", rarity: "epic", rank: 2 },
+      ],
+      hpFrac: 1,
+      tier: 5,
+    },
+    {
+      name: "solo survivor, everything on one member",
+      roster: [{ defId: "ironbark", level: 11, items: { adventuring: "w0-adventuring-legendary" } }],
+      held: [],
+      hpFrac: 0.6,
+      tier: 4,
+    },
+  ];
+
+  const winWith = (sit: Situation, extra: BoonInstance | null): number => {
+    const rng = scenarioRng(`state-${sit.name}-${extra?.id ?? "none"}`);
+    let wins = 0;
+    const TRIALS = 200;
+    for (let t = 0; t < TRIALS; t++) {
+      const { party, inventory } = buildParty(sit.roster);
+      for (const m of party) m.currentHp = Math.max(1, Math.round(m.maxHp * sit.hpFrac));
+      const held = extra ? [...sit.held, extra] : sit.held;
+      const stats = deriveRunStats({ party, inventory, prestigeLevel: 0, boonList: held });
+      const scale = sit.scale ?? 1;
+      const battle = startBattle(
+        party,
+        buildEnemy(0, sit.tier, undefined, { hp: scale, atk: 1 + (scale - 1) * 0.5 }),
+        inventory,
+        { stats },
+      );
+      let guard = 0;
+      while (!battle.outcome && guard++ < MAX_TURNS) {
+        const actorId = battle.turnOrder[battle.turnIndex];
+        if (!actorId) break;
+        const actor = party.find((m) => m.id === actorId)!;
+        // Defend only while somebody healthier is still swinging. Without the
+        // second clause a party that starts below the threshold has EVERY
+        // member defend forever, the fight never resolves, and the scenario
+        // scores as a loss for reasons that have nothing to do with what is
+        // being measured — which is exactly what made the low-HP situations
+        // read as unwinnable at every tier. Mirrors the `smart` policy above.
+        const someoneElseHealthy = party.some(
+          (m) => m.id !== actor.id && m.currentHp > 0 && m.currentHp / m.maxHp >= 0.45,
+        );
+        const hurt = actor.currentHp / actor.maxHp < 0.45 && someoneElseHealthy;
+        resolveTurn({
+          battle,
+          party,
+          memberId: actorId,
+          action: hurt ? "defend" : "attack",
+          defendGrade: hurt ? rollGrade(rng) : undefined,
+          inventory,
+          stats,
+          rng,
+        });
+      }
+      if (battle.outcome === "win") wins++;
+    }
+    return (100 * wins) / TRIALS;
+  };
+
+  // CALIBRATE EACH SITUATION.
+  //
+  // Third time this lesson has bitten in this file, so it is worth stating
+  // plainly: a comparison between options carries information only where the
+  // outcome is genuinely in doubt. At a tier the situation always wins, every
+  // candidate scores 100 and the argmax is just whichever was listed first; at
+  // a tier it always loses, the same in reverse. Both look like a passing check
+  // and mean nothing. So each situation's tier is chosen to put its baseline in
+  // the middle before any candidate is compared.
+  for (const sit of situations) {
+    let bestTier = sit.tier;
+    let bestScale = 1;
+    let closest = Infinity;
+    for (const t of [2, 3, 4, 5] as Stage[]) {
+      for (const sc of [1, 1.6, 2.5, 4, 6.5]) {
+        const w = winWith({ ...sit, tier: t, scale: sc }, null);
+        if (Math.abs(w - 45) < closest) {
+          closest = Math.abs(w - 45);
+          bestTier = t;
+          bestScale = sc;
+        }
+        // Nothing to gain from searching further once the baseline is close.
+        if (closest < 8) break;
+      }
+      if (closest < 8) break;
+    }
+    sit.tier = bestTier;
+    sit.scale = bestScale;
+  }
+
+  const bests: string[] = [];
+  for (const sit of situations) {
+    const scored = CANDIDATES
+      // A boon already held at max rank is not a choice in that situation.
+      .filter((id) => !sit.held.some((h) => h.id === id && h.rank >= 3))
+      .map((id) => ({ id, win: winWith(sit, { id, rarity: "epic", rank: 2 }) }));
+    const best = scored.reduce((a, b) => (a.win > b.win ? a : b));
+    const worst = scored.reduce((a, b) => (a.win < b.win ? a : b));
+    bests.push(best.id);
+    const baseline = winWith(sit, null);
+    check(
+      `  ${sit.name}`,
+      // A situation where every candidate scores the same is not evidence of
+      // balance, it is evidence the measurement found no signal — so say so
+      // rather than quietly passing.
+      best.win - worst.win > 3,
+      `tier ${sit.tier}x${sit.scale}, bare ${baseline.toFixed(0)}% | best ${best.id} ${best.win.toFixed(0)}%, worst ${worst.id} ${worst.win.toFixed(0)}%`,
+    );
+  }
+
+  // THE CHECK. If one card is the right answer in every situation, the offer
+  // screen is theatre.
+  const distinct = new Set(bests);
+  check(
+    "the best pick changes with the situation",
+    distinct.size > 1,
+    `${distinct.size} distinct best picks across ${situations.length} situations: ${bests.join(", ")}`,
+  );
+}
+
+// --- Declared-but-unwired content ------------------------------------------
+//
+// THE FAMILY GATE.
+//
+// The Pact of the Grove shipped with three of its six modifiers as pure text:
+// the names rendered, the ranks computed, the payout applied, and nothing ever
+// got harder. That class of bug is invisible from the code — every individual
+// file looks correct, and the defect lives in the ABSENCE of a call site — and
+// it never occurs once. Auditing the same day turned up three more: a Rite that
+// promised a reroll and had no handler, a stat nothing could set, and a status
+// with a fully-implemented consumer that nothing could ever produce.
+//
+// So this checks the shape of the wiring rather than any particular content.
+// It reads the engine's own source, the way contrastChecks reads styles.css,
+// and asserts that everything DECLARED is also CONSUMED somewhere. It is the
+// only check here that would have caught the original bug, and the only one
+// that will catch the next one.
+
+function wiringChecks(): void {
+  console.log("\nContent wiring (nothing declared without a consumer):");
+  const read = (rel: string): string => readFileSync(new URL(rel, import.meta.url), "utf-8");
+  const battle = read("../src/battle.ts");
+  const game = read("../src/scene/game.ts");
+  const offers = read("../src/run/offers.ts");
+  const ledger = read("../src/ui/ledger.ts");
+  const adventure = read("../src/adventure.ts");
+  const rooms = read("../src/run/rooms.ts");
+  // statuses.ts counts as engine: burn and bleed are consumed there, by the
+  // generic round-end tick rather than by name in battle.ts.
+  const statuses = read("../src/statuses.ts");
+  const engine = battle + game + offers + ledger + adventure + rooms + statuses;
+
+  // Every RunStat must be read by something. A stat nothing reads is a boon
+  // waiting to silently do nothing.
+  {
+    const unread = (Object.keys(BASE_RUN_STATS) as string[]).filter(
+      (key) => !engine.includes(`values.${key}`),
+    );
+    check("every run stat has a reader", unread.length === 0, unread.join(", ") || `${Object.keys(BASE_RUN_STATS).length} stats`);
+  }
+
+  // Every custom boon handler must be handled. This is what Benediction's
+  // reroll was missing.
+  {
+    const declared = new Set(
+      BOON_DEFS.flatMap((d) =>
+        d.effects.filter((e) => e.kind === "custom").map((e) => (e as { handlerId: string }).handlerId),
+      ),
+    );
+    const unhandled = [...declared].filter((h) => !battle.includes(`"${h}"`) && !game.includes(`"${h}"`));
+    check("every boon handler is handled", unhandled.length === 0, unhandled.join(", ") || `${declared.size} handlers`);
+  }
+
+  // Every status must have BOTH a producer in the catalog and a consumer in the
+  // engine. Mark had a consumer and no producer; Fervor had neither.
+  {
+    const produced = new Set<string>(
+      BOON_DEFS.flatMap((d) =>
+        d.effects.filter((e) => e.kind === "trigger").map((e) => (e as { status: string }).status),
+      ),
+    );
+    // These three are produced by the ENGINE rather than by a boon: Bark by the
+    // shield-on-guard stat and the Bramble Wall rite, Regen by Bloom, and Weak
+    // additionally by enemy moves.
+    for (const engineProduced of ["bark", "regen"]) {
+      if (battle.includes(`"${engineProduced}"`)) produced.add(engineProduced);
+    }
+    const orphans = STATUS_DEFS.filter((d) => !produced.has(d.id));
+    check("every status has a producer", orphans.length === 0, orphans.map((d) => d.id).join(", ") || `${STATUS_DEFS.length} statuses`);
+
+    const unconsumed = STATUS_DEFS.filter(
+      (d) => !battle.includes(`"${d.id}"`) && !battle.includes(`.${d.id}`) && !statuses.includes(`def.id === "${d.id}"`),
+    );
+    check("every status has a consumer", unconsumed.length === 0, unconsumed.map((d) => d.id).join(", ") || "all consumed");
+  }
+
+  // Every pact modifier must reach the run. This is the original bug.
+  {
+    const pactSrc = read("../src/run/pact.ts");
+    const unwired = PACT_DEFS.filter(
+      (m) => !pactSrc.includes(`"${m.id}"`) || !(game.includes(`"${m.id}"`) || pactSrc.includes(`includes("${m.id}")`)),
+    );
+    check("every pact modifier reaches the run", unwired.length === 0, unwired.map((m) => m.id).join(", ") || `${PACT_DEFS.length} modifiers`);
+  }
+
+  // Elite affixes are declared TWICE — as a union in adventure.ts (what the
+  // fight understands) and as a display list in run/rooms.ts (what the door
+  // advertises). Nothing but this keeps them in step, and a door offering an
+  // affix the fight ignores is the same lie in a different costume.
+  {
+    const unionMatch = adventure.match(/export type EliteAffixId =([^;]+);/);
+    const inUnion = new Set((unionMatch?.[1] ?? "").match(/"[a-z]+"/gi)?.map((q) => q.replace(/"/g, "")) ?? []);
+    const listed = ELITE_AFFIXES.map((a) => a.id);
+    const missing = listed.filter((id) => !inUnion.has(id));
+    const extra = [...inUnion].filter((id) => !listed.includes(id));
+    check(
+      "the two elite-affix declarations agree",
+      missing.length === 0 && extra.length === 0,
+      missing.length || extra.length ? `door-only: ${missing.join(",")} fight-only: ${extra.join(",")}` : `${listed.length} affixes`,
+    );
+    // And each one has to be READ by the code that builds or fights the enemy.
+    const inert = listed.filter((id) => !adventure.includes(`"${id}"`) && !battle.includes(`"${id}"`));
+    check("every elite affix changes something", inert.length === 0, inert.join(", ") || "all wired");
+  }
+
+  // Every curse's payout must be resolvable, or a chaos gate charges a real
+  // price for nothing.
+  {
+    const unpaid = CURSE_DEFS.filter((c) => !game.includes(`"${c.reward}"`));
+    check("every curse pays out", unpaid.length === 0, unpaid.map((c) => `${c.id}->${c.reward}`).join(", ") || `${CURSE_DEFS.length} curses`);
+  }
+
+  // Every consumable must do something when bought.
+  {
+    const inert = CONSUMABLE_DEFS.filter((c) => !game.includes(`"${c.id}"`));
+    check("every consumable does something", inert.length === 0, inert.map((c) => c.id).join(", ") || `${CONSUMABLE_DEFS.length} consumables`);
+  }
+
+  // Every charm effect must name a real stat — a typo'd key would typecheck
+  // (it is a union) but silently contribute to nothing the engine reads.
+  {
+    const keys = new Set(Object.keys(BASE_RUN_STATS));
+    const bad = CHARM_DEFS.flatMap((c) =>
+      [...c.upside, ...c.downside].filter((e) => !keys.has(e.key)).map((e) => `${c.id}.${e.key}`),
+    );
+    check("every charm effect names a real stat", bad.length === 0, bad.join(", ") || `${CHARM_DEFS.length} charms`);
   }
 }
 
@@ -3234,6 +3771,9 @@ function main(): void {
 
   buildDominanceChecks();
   economyChecks();
+  wiringChecks();
+  boonValueSweep();
+  stateDependenceChecks();
   pactChecks();
   affixChecks();
   runMapChecks();

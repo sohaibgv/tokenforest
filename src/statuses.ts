@@ -57,8 +57,7 @@ export type StatusId =
   | "glitch"
   // friendly — applied to party members
   | "bark" // absorbs damage before HP; does not decay
-  | "regen" // heals at round end
-  | "fervor"; // temporary attack bonus
+  | "regen"; // heals at round end
 
 /** How a status leaves the board.
  *
@@ -94,7 +93,6 @@ export const STATUS_DEFS: StatusDef[] = [
   { id: "glitch", name: "Glitched", decay: "none", hostile: true, blurb: "Loses its next turn entirely." },
   { id: "bark", name: "Bark", decay: "none", hostile: false, blurb: "A shield that soaks damage before HP does." },
   { id: "regen", name: "Regen", decay: "rounds", hostile: false, blurb: "Heals at the end of each round." },
-  { id: "fervor", name: "Fervor", decay: "rounds", hostile: false, blurb: "Deals more damage while it lasts." },
 ];
 
 export const STATUS_DEFS_BY_ID: Record<StatusId, StatusDef> = Object.fromEntries(
@@ -107,8 +105,8 @@ export interface StatusStack {
   /** Rounds remaining, for "rounds" decay. Ignored otherwise. */
   rounds: number;
   /** Per-stack magnitude in ABSOLUTE units, resolved once at apply time:
-   * HP for burn/bleed/bark/regen, a 0..1 fraction for weak/vulnerable/mark/
-   * fervor. Never recomputed — see constraint 3 in the header. */
+   * HP for burn/bleed/bark/regen, a 0..1 fraction for weak/vulnerable/mark.
+   * Never recomputed — see constraint 3 in the header. */
   potency: number;
   /** Who applied it, for lifesteal attribution and the event log. */
   sourceId?: string;
@@ -136,8 +134,8 @@ export interface StatusApplication {
   /** 0..1. A value of 1 must not consume an rng draw — see header constraint 5. */
   chance: number;
   /** Fraction of the applier's effective ATK (hostile) or the target's max HP
-   * (friendly). For the pure-multiplier statuses (weak/vulnerable/mark/fervor)
-   * this IS the final per-stack fraction and is stored as-is. */
+   * (friendly). For the pure-multiplier statuses (weak/vulnerable/mark) this
+   * IS the final per-stack fraction and is stored as-is. */
   potencyPct: number;
 }
 
@@ -145,7 +143,7 @@ export interface StatusApplication {
  * quantity of HP — these are stored verbatim instead of being scaled by an
  * ATK or max-HP denominator. */
 function isMultiplierStatus(id: StatusId): boolean {
-  return id === "weak" || id === "vulnerable" || id === "mark" || id === "fervor";
+  return id === "weak" || id === "vulnerable" || id === "mark";
 }
 
 /**
