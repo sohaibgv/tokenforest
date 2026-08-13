@@ -4056,50 +4056,58 @@ button:active:not(:disabled) {
 
 /* --- Scrollbars ----------------------------------------------------------
  *
- * Every scrolling region in the app was showing the platform's default
- * scrollbar: a grey system chrome bar sitting inside a hand-drawn pixel-art
- * panel, which is the single most out-of-place thing on screen.
+ * Every scrolling region was showing the platform's own scrollbar: system
+ * chrome sitting inside a hand-drawn pixel panel, which is the most
+ * out-of-place thing on screen.
  *
- * These are listed explicitly rather than applied with a `*` selector so that
- * a new scroll region is a deliberate decision — the styling and the
- * scroll-chaining fix below belong together, and a blanket rule would hide
- * from the next person that both are needed.
+ * This is applied UNIVERSALLY rather than to a list of known scroll
+ * containers. The first version enumerated the nine selectors that had
+ * `overflow-y` at the time, on the reasoning that a new scroll region should
+ * then be a deliberate decision — and the result was that a bar was still
+ * showing somewhere the list did not reach. Enumerating optimised for a
+ * hypothetical future reader at the direct expense of the person actually
+ * looking at the window. A rule that cannot miss is worth more here than a
+ * rule that documents intent.
  *
- * `overscroll-behavior: contain` is the behavioural half. Without it, reaching
- * the end of an inner list hands the remaining scroll to whatever is behind
- * it, so an over-scroll in the roster would start moving the shop panel — the
- * "scrolling does something unexpected" half of feeling broken.
+ * `html`/`body` are included on purpose: if anything ever overflows the root,
+ * that bar is the most visible one in the app and was covered by nothing.
+ *
+ * Both mechanisms are set because Tauri's webviews disagree about which one
+ * they honour. WebKit (macOS) reads ::-webkit-scrollbar; Chromium (Windows,
+ * Linux, and Safari 18.2+) reads the standard properties and then ignores the
+ * ::-webkit- rules entirely. Whichever a platform picks, it gets a themed bar.
  */
-#shop-list,
-#adventure-body,
-#slot-picker,
-#prestige-reveal,
-#stats-panel,
-.team-roster,
-.shop-list-team .team-detail,
-.ledger-panel,
-.adv-codex {
-  overscroll-behavior: contain;
-  /* Firefox and the standards track. WKWebView and the Chromium-based
-     webviews use the ::-webkit- rules below; both are set so the app looks
-     the same on every platform Tauri ships to. */
+html,
+body,
+*,
+*::before,
+*::after {
   scrollbar-width: thin;
   scrollbar-color: rgba(var(--text-bright-rgb), 0.28) transparent;
 }
 
-#shop-list::-webkit-scrollbar,
-#adventure-body::-webkit-scrollbar,
-#slot-picker::-webkit-scrollbar,
-#prestige-reveal::-webkit-scrollbar,
-#stats-panel::-webkit-scrollbar,
-.team-roster::-webkit-scrollbar,
-.shop-list-team .team-detail::-webkit-scrollbar,
-.ledger-panel::-webkit-scrollbar,
-.adv-codex::-webkit-scrollbar {
+/* `overscroll-behavior` is the BEHAVIOURAL half and is deliberately scoped to
+   real scroll containers rather than everything: reaching the end of an inner
+   list should not hand the leftover scroll to whatever sits behind it, which
+   is the "scrolling does something I did not ask for" half of feeling broken.
+   Applying it to `*` would also block the root's own rubber-banding, which is
+   a platform gesture worth leaving alone. */
+[class*="panel"],
+[class*="list"],
+[class*="roster"],
+[class*="detail"],
+[class*="picker"],
+[class*="codex"],
+[class*="body"],
+[id] {
+  overscroll-behavior: contain;
+}
+
+::-webkit-scrollbar {
   /* 5px, not the more common 8-10. WebKit reserves this width permanently
-     (Chromium overlays it instead), and the roster column is only 60px wide
-     with tiles that fill it — a wider bar visibly narrows them on macOS while
-     costing nothing on Windows. */
+     (Chromium overlays it instead), and the team roster column is only 60px
+     wide with tiles that fill it — a wider bar visibly narrows them on macOS
+     while costing nothing elsewhere. */
   width: 5px;
   height: 5px;
 }
@@ -4107,54 +4115,22 @@ button:active:not(:disabled) {
 /* Transparent track, so the bar reads as a mark ON the panel rather than as a
    channel cut into it — a filled track looks like a UI component bolted on,
    which is exactly the impression being fixed. */
-#shop-list::-webkit-scrollbar-track,
-#adventure-body::-webkit-scrollbar-track,
-#slot-picker::-webkit-scrollbar-track,
-#prestige-reveal::-webkit-scrollbar-track,
-#stats-panel::-webkit-scrollbar-track,
-.team-roster::-webkit-scrollbar-track,
-.shop-list-team .team-detail::-webkit-scrollbar-track,
-.ledger-panel::-webkit-scrollbar-track,
-.adv-codex::-webkit-scrollbar-track {
+::-webkit-scrollbar-track {
   background: transparent;
 }
 
-#shop-list::-webkit-scrollbar-thumb,
-#adventure-body::-webkit-scrollbar-thumb,
-#slot-picker::-webkit-scrollbar-thumb,
-#prestige-reveal::-webkit-scrollbar-thumb,
-#stats-panel::-webkit-scrollbar-thumb,
-.team-roster::-webkit-scrollbar-thumb,
-.shop-list-team .team-detail::-webkit-scrollbar-thumb,
-.ledger-panel::-webkit-scrollbar-thumb,
-.adv-codex::-webkit-scrollbar-thumb {
+::-webkit-scrollbar-thumb {
   background: rgba(var(--text-bright-rgb), 0.26);
   border-radius: 3px;
 }
 
-#shop-list::-webkit-scrollbar-thumb:hover,
-#adventure-body::-webkit-scrollbar-thumb:hover,
-#slot-picker::-webkit-scrollbar-thumb:hover,
-#prestige-reveal::-webkit-scrollbar-thumb:hover,
-#stats-panel::-webkit-scrollbar-thumb:hover,
-.team-roster::-webkit-scrollbar-thumb:hover,
-.shop-list-team .team-detail::-webkit-scrollbar-thumb:hover,
-.ledger-panel::-webkit-scrollbar-thumb:hover,
-.adv-codex::-webkit-scrollbar-thumb:hover {
+::-webkit-scrollbar-thumb:hover {
   background: rgba(var(--text-bright-rgb), 0.45);
 }
 
-/* The corner where a horizontal and vertical bar would meet. Left unstyled it
-   renders as a small opaque system-grey square. */
-#shop-list::-webkit-scrollbar-corner,
-#adventure-body::-webkit-scrollbar-corner,
-#slot-picker::-webkit-scrollbar-corner,
-#prestige-reveal::-webkit-scrollbar-corner,
-#stats-panel::-webkit-scrollbar-corner,
-.team-roster::-webkit-scrollbar-corner,
-.shop-list-team .team-detail::-webkit-scrollbar-corner,
-.ledger-panel::-webkit-scrollbar-corner,
-.adv-codex::-webkit-scrollbar-corner {
+/* The corner where a horizontal and a vertical bar meet. Left alone it renders
+   as a small opaque system-grey square. */
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 
