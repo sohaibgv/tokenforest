@@ -1227,7 +1227,7 @@ body.shop-takeover #shop {
   min-height: 110px;
   overflow-y: auto;
   /* No padding-right. It existed to keep tiles clear of the platform's own
-     scrollbar; the styled bar below is 5px and sits in the same place, so
+     scrollbar; the styled bar below is 7px and sits in the same place, so
      reserving another 2px on top just narrows the tiles for nothing. This is
      the app's narrowest scroll region, and the tiles fill its width, so every
      pixel here shows. */
@@ -2115,7 +2115,12 @@ body.shop-takeover #shop {
    already there without it: the next card is clipped by the edge, which reads
    as "there is more" the way a scrollbar does. Vertical panels keep their
    thumb — there the content boundary is off-screen, so the bar is the only
-   thing that says how far down you are. */
+   thing that says how far down you are.
+
+   These two are the ONLY places `scrollbar-width` may appear (see the
+   Scrollbars section): it opts an element out of ::-webkit-scrollbar, which is
+   ruinous when styling a bar and exactly right when removing one. Both
+   spellings are set so an engine that supports neither still hides it. */
 .adv-tray,
 #build-slots {
   scrollbar-width: none;
@@ -4088,19 +4093,24 @@ button:active:not(:disabled) {
  * `html`/`body` are included on purpose: if anything ever overflows the root,
  * that bar is the most visible one in the app and was covered by nothing.
  *
- * Both mechanisms are set because Tauri's webviews disagree about which one
- * they honour. WebKit (macOS) reads ::-webkit-scrollbar; Chromium (Windows,
- * Linux, and Safari 18.2+) reads the standard properties and then ignores the
- * ::-webkit- rules entirely. Whichever a platform picks, it gets a themed bar.
+ * ONLY the ::-webkit- pseudo-elements are used, and `scrollbar-width` /
+ * `scrollbar-color` are deliberately NOT set anywhere except to hide a bar
+ * outright. This is the opposite of the obvious "declare both for safety", and
+ * declaring both is what kept the system bar on screen for three rounds:
+ *
+ *   Setting `scrollbar-width` or `scrollbar-color` on an element opts it OUT
+ *   of ::-webkit-scrollbar entirely, in BOTH engines.
+ *
+ * So on macOS the pair resolved to the worst of both — Safari 18.2+ honours
+ * `scrollbar-width: thin` (the bar got narrower) but not `scrollbar-color`
+ * (the thumb stayed system grey), while the ::-webkit- rules that would have
+ * coloured it were switched off by the very property that narrowed it. The
+ * belt disabled the braces.
+ *
+ * The standard properties are only needed for Gecko, and Tauri never uses it:
+ * WKWebView on macOS, WebView2/Blink on Windows, WebKitGTK on Linux. All three
+ * support ::-webkit-scrollbar. There is no platform here that needs the pair.
  */
-html,
-body,
-*,
-*::before,
-*::after {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(var(--text-bright-rgb), 0.28) transparent;
-}
 
 /* `overscroll-behavior` is the BEHAVIOURAL half and is deliberately scoped to
    real scroll containers rather than everything: reaching the end of an inner
@@ -4120,28 +4130,52 @@ body,
 }
 
 ::-webkit-scrollbar {
-  /* 5px, not the more common 8-10. WebKit reserves this width permanently
-     (Chromium overlays it instead), and the team roster column is only 60px
-     wide with tiles that fill it — a wider bar visibly narrows them on macOS
-     while costing nothing elsewhere. */
-  width: 5px;
-  height: 5px;
+  /* 7px of gutter carrying a 5px thumb (the border insets it, below). WebKit
+     reserves this width permanently rather than overlaying it, and the team
+     roster column is only 60px wide with tiles that fill it — the system
+     default takes 15px of that, which is why the roster tiles looked cramped
+     on macOS and not on Windows. */
+  width: 7px;
+  height: 7px;
 }
 
 /* Transparent track, so the bar reads as a mark ON the panel rather than as a
-   channel cut into it — a filled track looks like a UI component bolted on,
-   which is exactly the impression being fixed. */
-::-webkit-scrollbar-track {
+   channel cut into it — a filled track is what makes a scrollbar look like a
+   system component bolted onto a hand-drawn panel. */
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-track-piece {
   background: transparent;
 }
 
+/* Square, not rounded, and in the panel's own ink rather than a grey: the rest
+   of the window is a pixel grid, and a 5px capsule is the one element on screen
+   with a curve too small to be drawn in it. `background-clip: padding-box`
+   behind a transparent border is how the thumb gets its 1px breathing room
+   without a second element to hold the padding. */
 ::-webkit-scrollbar-thumb {
-  background: rgba(var(--text-bright-rgb), 0.26);
-  border-radius: 3px;
+  background: rgba(var(--text-bright-rgb), 0.3);
+  border: 1px solid transparent;
+  background-clip: padding-box;
+  border-radius: 0;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(var(--text-bright-rgb), 0.45);
+  background: rgba(var(--text-bright-rgb), 0.5);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: rgba(var(--text-bright-rgb), 0.62);
+  background-clip: padding-box;
+}
+
+/* The arrow buttons at the ends of the bar. WebKit draws system-grey chevrons
+   there unless the pseudo-element is given a zero size — and a chevron is not a
+   thing this UI has anywhere else. */
+::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 /* The corner where a horizontal and a vertical bar meet. Left alone it renders
